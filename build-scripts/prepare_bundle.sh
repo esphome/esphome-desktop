@@ -10,9 +10,9 @@
 
 set -e
 
-PYTHON_VERSION="3.13.0"
-PBS_VERSION="20241016"
-BASE_URL="https://github.com/indygreg/python-build-standalone/releases/download/${PBS_VERSION}"
+PYTHON_VERSION="3.13.12"
+PBS_VERSION="20260203"
+BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
