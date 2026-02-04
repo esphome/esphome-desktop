@@ -110,10 +110,7 @@ impl DaemonManager {
 
         // Create new process group on Unix so we can kill all children
         #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
+        cmd.process_group(0);
 
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
