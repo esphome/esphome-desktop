@@ -19,7 +19,6 @@ Download the latest release for your platform from the [Releases](https://github
 | Platform | Installer |
 |----------|-----------|
 | macOS (Apple Silicon) | `ESPHome Desktop_x.x.x_aarch64.dmg` |
-| macOS (Intel) | `ESPHome Desktop_x.x.x_x64.dmg` |
 | Windows | `ESPHome Desktop_x.x.x_x64-setup.exe` or `.msi` |
 | Linux | `esphome-desktop_x.x.x_amd64.AppImage` or `.deb` |
 
@@ -132,6 +131,16 @@ Settings are stored in `settings.json`:
 - `check_updates` - Check for ESPHome updates automatically
 
 ## Troubleshooting
+
+### macOS: "App is damaged and can't be opened"
+
+The app is not currently code-signed. macOS Gatekeeper may block it with a "damaged" message. To fix this, run:
+
+```bash
+xattr -c "/Applications/ESPHome Builder.app"
+```
+
+Then try opening the app again.
 
 ### Dashboard won't start
 
