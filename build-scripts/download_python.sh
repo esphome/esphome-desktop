@@ -18,7 +18,7 @@ BASE_URL="https://github.com/indygreg/python-build-standalone/releases/download/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-RESOURCES_DIR="$PROJECT_DIR/resources/python"
+RESOURCES_DIR="$PROJECT_DIR/src-tauri/python"
 
 download_python() {
     local platform=$1
