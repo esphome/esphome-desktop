@@ -34,8 +34,8 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
 
-      - name: Download Python
-        run: ./build-scripts/download_python.sh macos-arm64
+      - name: Prepare Python bundle
+        run: ./build-scripts/prepare_bundle.sh macos-arm64
 
       - name: Build
         run: cargo tauri build

@@ -43,8 +43,8 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
 
-      - name: Download Python
-        run: ./build-scripts/download_python.sh linux-x64
+      - name: Prepare Python bundle
+        run: ./build-scripts/prepare_bundle.sh linux-x64
 
       - name: Build
         run: cargo tauri build

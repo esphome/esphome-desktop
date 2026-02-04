@@ -92,9 +92,9 @@ This directory contains:
    cargo install tauri-cli --locked
    ```
 
-3. Download bundled Python (optional, for development):
+3. Download bundled Python for development:
    ```bash
-   ./build-scripts/download_python.sh
+   ./build-scripts/prepare_bundle.sh
    ```
 
 4. Build:
