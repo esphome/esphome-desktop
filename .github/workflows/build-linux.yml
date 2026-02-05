@@ -47,9 +47,10 @@ jobs:
         run: ./build-scripts/prepare_bundle.sh linux-x64
 
       - name: Build
-        run: cargo tauri build
+        run: cargo tauri build --verbose
         env:
           NO_STRIP: true
+          APPIMAGE_EXTRACT_AND_RUN: 1
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
