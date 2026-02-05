@@ -63,7 +63,7 @@ case $PLATFORM in
         VENV_PYTHON="bin/python"
         ;;
     windows-x64)
-        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-pc-windows-msvc-shared-install_only.tar.gz"
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-pc-windows-msvc-install_only.tar.gz"
         PYTHON_BIN="python.exe"
         VENV_PYTHON="Scripts/python.exe"
         ;;
