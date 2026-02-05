@@ -51,6 +51,7 @@ jobs:
         env:
           NO_STRIP: true
           APPIMAGE_EXTRACT_AND_RUN: 1
+          LD_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/python/lib
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
