@@ -49,8 +49,9 @@ jobs:
       - name: Build
         run: |
           # Build LD_LIBRARY_PATH with all directories containing .so files in the Python bundle
-          PYTHON_LIB_PATHS=$(find src-tauri/python -name '*.so*' -printf '%h\n' | sort -u | paste -sd ':')
-          export LD_LIBRARY_PATH="$PYTHON_LIB_PATHS"
+          PYTHON_LIB_PATHS=$(find ${{ github.workspace }}/src-tauri/python -name '*.so*' -printf '%h\n' | sort -u | paste -sd ':')
+          export LD_LIBRARY_PATH="${{ github.workspace }}/src-tauri/python/lib:$PYTHON_LIB_PATHS"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
           cargo tauri build --verbose
         env:
           NO_STRIP: true
