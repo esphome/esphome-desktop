@@ -27,13 +27,14 @@ if [[ ! -d "$BUNDLE_DIR" ]]; then
 fi
 
 echo "=== Signing Python bundle binaries ==="
+echo "Bundle: $BUNDLE_DIR"
 echo "Identity: $APPLE_SIGNING_IDENTITY"
 echo "Entitlements: $ENTITLEMENTS"
 echo ""
 
 SIGNED=0
 
-# Find all Mach-O files (executables, dylibs, .so files)
+# Use find -L to follow symlinks (python, python3 are often symlinks to python3.13)
 # Sign dylibs and .so files first (inside-out signing)
 echo "--- Signing shared libraries (.dylib and .so) ---"
 while IFS= read -r -d '' file; do
@@ -42,13 +43,13 @@ while IFS= read -r -d '' file; do
         --entitlements "$ENTITLEMENTS" \
         --sign "$APPLE_SIGNING_IDENTITY" "$file"
     SIGNED=$((SIGNED + 1))
-done < <(find "$BUNDLE_DIR" \( -name "*.dylib" -o -name "*.so" \) -print0)
+done < <(find -L "$BUNDLE_DIR" \( -name "*.dylib" -o -name "*.so" \) -type f -print0)
 
-# Sign executables in bin/
+# Sign all other Mach-O executables in the entire bundle
 echo ""
 echo "--- Signing executables ---"
 while IFS= read -r -d '' file; do
-    # Only sign Mach-O binaries, skip scripts
+    # Only sign Mach-O binaries, skip scripts and other files
     if file "$file" | grep -q "Mach-O"; then
         echo "Signing: ${file#$BUNDLE_DIR/}"
         codesign --force --options runtime --timestamp \
@@ -56,7 +57,7 @@ while IFS= read -r -d '' file; do
             --sign "$APPLE_SIGNING_IDENTITY" "$file"
         SIGNED=$((SIGNED + 1))
     fi
-done < <(find "$BUNDLE_DIR/bin" -type f -print0)
+done < <(find -L "$BUNDLE_DIR" -type f -not -name "*.dylib" -not -name "*.so" -print0)
 
 echo ""
 echo "=== Signed $SIGNED binaries ==="
