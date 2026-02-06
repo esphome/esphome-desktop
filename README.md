@@ -134,7 +134,7 @@ Settings are stored in `settings.json`:
 
 ### macOS: "App is damaged and can't be opened"
 
-The app is not currently code-signed. macOS Gatekeeper may block it with a "damaged" message. To fix this, run:
+The app is code-signed and notarized. If you still encounter this message (e.g., from a development build), run:
 
 ```bash
 xattr -c "/Applications/ESPHome Builder.app"
