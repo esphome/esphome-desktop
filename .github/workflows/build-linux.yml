@@ -47,11 +47,14 @@ jobs:
         run: ./build-scripts/prepare_bundle.sh linux-x64
 
       - name: Build
-        run: cargo tauri build --verbose
+        run: |
+          # Build LD_LIBRARY_PATH with all directories containing .so files in the Python bundle
+          PYTHON_LIB_PATHS=$(find src-tauri/python -name '*.so*' -printf '%h\n' | sort -u | paste -sd ':')
+          export LD_LIBRARY_PATH="$PYTHON_LIB_PATHS"
+          cargo tauri build --verbose
         env:
           NO_STRIP: true
           APPIMAGE_EXTRACT_AND_RUN: 1
-          LD_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/python/lib
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
