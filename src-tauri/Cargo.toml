@@ -1,6 +1,6 @@
 [package]
 name = "esphome-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Desktop application for ESPHome"
 authors = ["ESPHome Team"]
 license = "Apache-2.0"
