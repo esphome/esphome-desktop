@@ -40,22 +40,24 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
+      # TEMPORARY WORKAROUND:
+      # SOURCE: https://github.com/music-assistant/desktop-app/blob/main/.github/workflows/build-release.yml
+      # Use a custom tauri-cli branch to enable the new "truly portable" AppImage format.
+      # This relies on TAURI_BUNDLER_NEW_APPIMAGE_FORMAT=true and can be removed once
+      # https://github.com/tauri-apps/tauri/pull/12491 is merged and released upstream.
+      - name: Install Tauri CLI (custom branch for portable AppImage)
+        run: |
+          # Use custom tauri-cli branch with truly portable AppImage format
+          # This avoids linuxdeploy issues with vendored Python libraries
+          cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/truly-portable-appimage --locked --force
 
       - name: Prepare Python bundle
         run: ./build-scripts/prepare_bundle.sh linux-x64
 
       - name: Build
-        run: |
-          # Build LD_LIBRARY_PATH with all directories containing .so files in the Python bundle
-          PYTHON_LIB_PATHS=$(find ${{ github.workspace }}/src-tauri/python -name '*.so*' -printf '%h\n' | sort -u | paste -sd ':')
-          export LD_LIBRARY_PATH="${{ github.workspace }}/src-tauri/python/lib:$PYTHON_LIB_PATHS"
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-          cargo tauri build --verbose
+        run: cargo tauri build --verbose
         env:
-          NO_STRIP: true
-          APPIMAGE_EXTRACT_AND_RUN: 1
+          TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
       - name: Upload AppImage
         uses: actions/upload-artifact@v4
