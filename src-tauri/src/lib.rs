@@ -194,6 +194,36 @@ pub fn run() {
                 }
             });
 
+            // Set up signal handlers for graceful shutdown on Ctrl+C
+            #[cfg(unix)]
+            {
+                let signal_state = state.clone();
+                let signal_app = app.handle().clone();
+                async_runtime::spawn(async move {
+                    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                        .expect("Failed to set up SIGINT handler");
+                    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("Failed to set up SIGTERM handler");
+
+                    tokio::select! {
+                        _ = sigint.recv() => {
+                            info!("Received SIGINT, shutting down...");
+                        }
+                        _ = sigterm.recv() => {
+                            info!("Received SIGTERM, shutting down...");
+                        }
+                    }
+
+                    // Stop the daemon
+                    if let Err(e) = signal_state.daemon.stop().await {
+                        error!("Error stopping daemon on signal: {}", e);
+                    }
+
+                    // Exit the app
+                    signal_app.exit(0);
+                });
+            }
+
             // Open dashboard on first start (after it's ready)
             let settings = async_runtime::block_on(state.settings.read());
             if settings.open_on_start {
