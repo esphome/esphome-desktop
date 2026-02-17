@@ -73,7 +73,7 @@ jobs:
 
       # Bundle RPM using standard tauri-cli (workaround for custom branch slowdown)
       - name: Install standard Tauri CLI for RPM
-        run: cargo install tauri-cli --version 2.5.4 --locked --force
+        run: cargo install tauri-cli --version 2.10.0 --locked --force
 
       - name: Bundle RPM only
         run: cargo tauri bundle --bundles rpm
