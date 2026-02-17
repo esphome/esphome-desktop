@@ -10,6 +10,7 @@ mod tray;
 mod update;
 
 use anyhow::Result;
+use clap::Parser;
 use std::sync::Arc;
 use tauri::{
     async_runtime, AppHandle, Manager, RunEvent,
@@ -23,6 +24,16 @@ use daemon::DaemonManager;
 use settings::Settings;
 use tray::build_tray_menu;
 use update::UpdateChecker;
+
+/// ESPHome Desktop - System tray application for ESPHome
+#[derive(Parser, Debug, Clone)]
+#[command(name = "esphome-desktop")]
+#[command(about = "ESPHome Desktop Builder", long_about = None)]
+pub struct Cli {
+    /// Don't open the dashboard in browser on startup
+    #[arg(long = "no-open-dashboard")]
+    pub no_open_dashboard: bool,
+}
 
 /// Application state shared across the app
 pub struct AppState {
@@ -99,9 +110,13 @@ fn handle_tray_click(_app: &AppHandle, state: &AppState) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run(cli: Cli) {
     init_logging();
     info!("Starting ESPHome Builder");
+    info!("CLI args: {:?}", cli);
+
+    // Capture CLI flags before closure
+    let no_open_dashboard = cli.no_open_dashboard;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -119,7 +134,7 @@ pub fn run() {
                 open_dashboard(settings.port);
             }
         }))
-        .setup(|app| {
+        .setup(move |app| {
             info!("Setting up ESPHome Builder");
 
             // Ensure user venv exists (copy from bundled on first run)
@@ -226,8 +241,10 @@ pub fn run() {
 
             // Open dashboard on first start (after it's ready)
             let settings = async_runtime::block_on(state.settings.read());
-            if settings.open_on_start {
+            let should_open = settings.open_on_start && !no_open_dashboard;
+            if should_open {
                 let port = settings.port;
+                info!("Opening dashboard on startup");
                 // Wait for dashboard to be ready, then open browser
                 async_runtime::spawn(async move {
                     if wait_for_dashboard_ready(port, 60).await {
@@ -237,6 +254,8 @@ pub fn run() {
                         open_dashboard(port);
                     }
                 });
+            } else if no_open_dashboard {
+                info!("Dashboard opening suppressed by --no-open-dashboard flag");
             }
 
             Ok(())
