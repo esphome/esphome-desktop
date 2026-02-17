@@ -71,12 +71,19 @@ jobs:
           name: linux-deb
           path: src-tauri/target/release/bundle/deb/*.deb
 
-      # Temporarily disabled - RPM builds take too long
-      # - name: Upload RPM
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: linux-rpm
-      #     path: src-tauri/target/release/bundle/rpm/*.rpm
+      # Bundle RPM using standard tauri-cli (workaround for custom branch slowdown)
+      - name: Install standard Tauri CLI for RPM
+        run: cargo install tauri-cli --version 2.5.4 --locked --force
+
+      - name: Bundle RPM only
+        run: cargo tauri bundle --bundles rpm
+        working-directory: src-tauri
+
+      - name: Upload RPM
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: linux-rpm
+          path: src-tauri/target/release/bundle/rpm/*.rpm
 
   release:
     needs: build
