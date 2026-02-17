@@ -1,0 +1,54 @@
+name: Release Drafter
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release-drafter:
+    runs-on: ubuntu-latest
+    environment: release-drafter
+    steps:
+      - uses: release-drafter/release-drafter@6db134d15f3909ccc9eefd369f02bd1e9cffdf97 # v6.2.0
+        id: release-draft
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Update version numbers in Cargo.toml and tauri.conf.json
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Calculate version
+        id: version
+        run: |
+          tag="${{ steps.release-draft.outputs.tag_name }}"
+          echo "version=${tag:1}" >> $GITHUB_OUTPUT
+
+      - name: Set Cargo.toml version
+        run: |
+          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/g" src-tauri/Cargo.toml
+
+      - name: Set tauri.conf.json version
+        run: |
+          sed -i "s/\"version\": .*/\"version\": \"${{ steps.version.outputs.version }}\",/g" src-tauri/tauri.conf.json
+
+      - name: Update Cargo.lock
+        run: |
+          cd src-tauri
+          cargo update --workspace
+
+      # github actions email from here: https://github.community/t/github-actions-bot-email-address/17204
+      - name: Commit changes
+        run: |
+          if ! git diff --quiet; then
+            git config --global user.name "esphomebot"
+            git config --global user.email "68923041+esphomebot@users.noreply.github.com"
+            git commit -am "Bump version to ${{ steps.version.outputs.version }}"
+            git push
+          fi
