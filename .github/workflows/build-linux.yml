@@ -55,7 +55,7 @@ jobs:
         run: ./build-scripts/prepare_bundle.sh linux-x64
 
       - name: Build
-        run: cargo tauri build --verbose
+        run: cargo tauri build --verbose --bundles appimage,deb
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
@@ -71,11 +71,12 @@ jobs:
           name: linux-deb
           path: src-tauri/target/release/bundle/deb/*.deb
 
-      - name: Upload RPM
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-rpm
-          path: src-tauri/target/release/bundle/rpm/*.rpm
+      # Temporarily disabled - RPM builds take too long
+      # - name: Upload RPM
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: linux-rpm
+      #     path: src-tauri/target/release/bundle/rpm/*.rpm
 
   release:
     needs: build
