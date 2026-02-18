@@ -22,8 +22,8 @@ pub struct DaemonManager {
     process: Arc<Mutex<Option<Child>>>,
     /// Path to bundled Python executable
     python_path: PathBuf,
-    /// Path to bundled venv bin directory (for PATH)
-    venv_bin_dir: PathBuf,
+    /// Path to bundled Python bin directory (for PATH)
+    python_bin_dir: PathBuf,
     /// Path to config directory
     config_dir: PathBuf,
     /// Path to logs directory
@@ -39,7 +39,7 @@ impl DaemonManager {
     pub fn new(app_handle: &AppHandle, settings: &Settings) -> Result<Self> {
         let data_dir = platform::get_data_dir(app_handle)?;
         let python_path = platform::get_python_path(app_handle)?;
-        let venv_bin_dir = platform::get_venv_bin(app_handle)?;
+        let python_bin_dir = platform::get_python_bin(app_handle)?;
 
         // Use ~/esphome as the default config directory
         let config_dir = settings.config_dir.clone().unwrap_or_else(|| {
@@ -56,7 +56,7 @@ impl DaemonManager {
         Ok(Self {
             process: Arc::new(Mutex::new(None)),
             python_path,
-            venv_bin_dir,
+            python_bin_dir,
             config_dir,
             logs_dir,
             port: settings.port,
@@ -73,7 +73,7 @@ impl DaemonManager {
 
         info!("Starting ESPHome dashboard on port {}", self.port);
         debug!("Python path: {:?}", self.python_path);
-        debug!("Venv bin: {:?}", self.venv_bin_dir);
+        debug!("Python bin: {:?}", self.python_bin_dir);
         debug!("Config dir: {:?}", self.config_dir);
         debug!("Logs dir: {:?}", self.logs_dir);
 
@@ -115,9 +115,9 @@ impl DaemonManager {
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
 
-        // Add venv bin directory to PATH so dashboard can find esphome command
+        // Add Python bin directory to PATH for any subprocess needs
         let current_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", self.venv_bin_dir.display(), current_path);
+        let new_path = format!("{}:{}", self.python_bin_dir.display(), current_path);
         info!("PATH set to: {}", new_path);
         cmd.env("PATH", new_path);
 

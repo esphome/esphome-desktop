@@ -27,38 +27,38 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Get the path to the user venv Python executable
-/// On first run, the bundled venv is copied to user data for updates
+/// Get the path to the user Python executable
+/// On first run, the bundled Python is copied to user data for updates
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     let data_dir = get_data_dir(app_handle)?;
-    let user_venv = data_dir.join("venv");
+    let user_python = data_dir.join("python");
 
     // Platform-specific Python path
     #[cfg(target_os = "windows")]
-    let python_path = user_venv.join("Scripts").join("python.exe");
+    let python_path = user_python.join("python.exe");
 
     #[cfg(not(target_os = "windows"))]
-    let python_path = user_venv.join("bin").join("python");
+    let python_path = user_python.join("bin").join("python3");
 
     if python_path.exists() {
-        debug!("Using user venv Python: {:?}", python_path);
+        debug!("Using user Python: {:?}", python_path);
         return Ok(python_path);
     }
 
-    // Fall back to bundled venv (will be copied on first run)
+    // Fall back to bundled Python (will be copied on first run)
     let resource_dir = app_handle
         .path()
         .resource_dir()
         .context("Failed to get resource directory")?;
 
     #[cfg(target_os = "windows")]
-    let bundled_python = resource_dir.join("python").join("Scripts").join("python.exe");
+    let bundled_python = resource_dir.join("python").join("python.exe");
 
     #[cfg(not(target_os = "windows"))]
-    let bundled_python = resource_dir.join("python").join("bin").join("python");
+    let bundled_python = resource_dir.join("python").join("bin").join("python3");
 
     if bundled_python.exists() {
-        debug!("Using bundled venv Python: {:?}", bundled_python);
+        debug!("Using bundled Python: {:?}", bundled_python);
         return Ok(bundled_python);
     }
 
@@ -71,30 +71,30 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }))
 }
 
-/// Get the venv bin directory (for PATH)
-pub fn get_venv_bin(app_handle: &AppHandle) -> Result<PathBuf> {
+/// Get the Python bin directory (for PATH)
+pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     let data_dir = get_data_dir(app_handle)?;
-    let user_venv = data_dir.join("venv");
+    let user_python = data_dir.join("python");
 
     #[cfg(target_os = "windows")]
-    let bin_dir = user_venv.join("Scripts");
+    let bin_dir = user_python.clone(); // On Windows, python.exe is in the root
 
     #[cfg(not(target_os = "windows"))]
-    let bin_dir = user_venv.join("bin");
+    let bin_dir = user_python.join("bin");
 
-    // If user venv exists, use it
+    // If user Python exists, use it
     if bin_dir.exists() {
         return Ok(bin_dir);
     }
 
-    // Fall back to bundled venv
+    // Fall back to bundled Python
     let resource_dir = app_handle
         .path()
         .resource_dir()
         .context("Failed to get resource directory")?;
 
     #[cfg(target_os = "windows")]
-    let bundled_bin = resource_dir.join("python").join("Scripts");
+    let bundled_bin = resource_dir.join("python"); // On Windows, python.exe is in the root
 
     #[cfg(not(target_os = "windows"))]
     let bundled_bin = resource_dir.join("python").join("bin");
@@ -102,41 +102,41 @@ pub fn get_venv_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(bundled_bin)
 }
 
-/// Ensure the user venv exists by copying from bundled venv if needed
-pub fn ensure_user_venv(app_handle: &AppHandle) -> Result<()> {
+/// Ensure the user Python exists by copying from bundled Python if needed
+pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
     use tracing::info;
 
     let data_dir = get_data_dir(app_handle)?;
-    let user_venv = data_dir.join("venv");
+    let user_python = data_dir.join("python");
 
-    // Check if user venv already exists
+    // Check if user Python already exists
     #[cfg(target_os = "windows")]
-    let python_check = user_venv.join("Scripts").join("python.exe");
+    let python_check = user_python.join("python.exe");
     #[cfg(not(target_os = "windows"))]
-    let python_check = user_venv.join("bin").join("python");
+    let python_check = user_python.join("bin").join("python3");
 
     if python_check.exists() {
-        debug!("User venv already exists");
+        debug!("User Python already exists");
         return Ok(());
     }
 
-    // Get bundled venv path
+    // Get bundled Python path
     let resource_dir = app_handle
         .path()
         .resource_dir()
         .context("Failed to get resource directory")?;
-    let bundled_venv = resource_dir.join("python");
+    let bundled_python = resource_dir.join("python");
 
-    if !bundled_venv.exists() {
-        anyhow::bail!("Bundled venv not found at {:?}", bundled_venv);
+    if !bundled_python.exists() {
+        anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
     }
 
-    info!("Copying bundled venv to user data directory...");
+    info!("Copying bundled Python to user data directory...");
 
-    // Copy the bundled venv to user data
-    copy_dir_recursive(&bundled_venv, &user_venv)?;
+    // Copy the bundled Python to user data
+    copy_dir_recursive(&bundled_python, &user_python)?;
 
-    info!("User venv ready at {:?}", user_venv);
+    info!("User Python ready at {:?}", user_python);
     Ok(())
 }
 
@@ -163,7 +163,7 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Check if ESPHome is available (bundled venv has it pre-installed)
+/// Check if ESPHome is available (bundled Python has it pre-installed)
 pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
     let python_path = match get_python_path(app_handle) {
         Ok(p) => p,
