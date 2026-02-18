@@ -122,6 +122,46 @@ echo ""
 echo "=== Preparing bundle ==="
 cp -R "$PYTHON_DIR" "$BUNDLE_DIR"
 
+# Create portable wrapper scripts for esphome
+echo ""
+echo "=== Creating portable esphome wrappers ==="
+
+case $PLATFORM in
+    windows-x64)
+        # Remove any broken pip-generated scripts
+        rm -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/Scripts/esphome-script.py" 2>/dev/null || true
+        rm -f "$BUNDLE_DIR/esphome.exe" "$BUNDLE_DIR/esphome-script.py" 2>/dev/null || true
+
+        # Create esphome.bat wrapper in both Scripts and root for compatibility
+        mkdir -p "$BUNDLE_DIR/Scripts"
+
+        cat > "$BUNDLE_DIR/Scripts/esphome.bat" << 'EOF'
+@echo off
+"%~dp0..\python.exe" -m esphome %*
+EOF
+
+        cat > "$BUNDLE_DIR/esphome.bat" << 'EOF'
+@echo off
+"%~dp0python.exe" -m esphome %*
+EOF
+
+        echo "Created esphome.bat wrappers for Windows"
+        ;;
+    *)
+        # Remove any broken pip-generated scripts
+        rm -f "$BUNDLE_DIR/bin/esphome" 2>/dev/null || true
+
+        # Create esphome wrapper for Unix (macOS/Linux) in bin directory
+        cat > "$BUNDLE_DIR/bin/esphome" << 'EOF'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/python3" -m esphome "$@"
+EOF
+        chmod +x "$BUNDLE_DIR/bin/esphome"
+        echo "Created esphome shell wrapper"
+        ;;
+esac
+
 # Get size
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
 echo ""
