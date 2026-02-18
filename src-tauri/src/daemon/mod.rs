@@ -117,7 +117,14 @@ impl DaemonManager {
 
         // Add Python bin directory to PATH for any subprocess needs
         let current_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", self.python_bin_dir.display(), current_path);
+
+        // Use platform-specific PATH separator (';' on Windows, ':' on Unix)
+        #[cfg(target_os = "windows")]
+        let path_sep = ";";
+        #[cfg(not(target_os = "windows"))]
+        let path_sep = ":";
+
+        let new_path = format!("{}{}{}", self.python_bin_dir.display(), path_sep, current_path);
         info!("PATH set to: {}", new_path);
         cmd.env("PATH", new_path);
 
