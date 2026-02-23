@@ -128,9 +128,29 @@ echo "=== Creating portable esphome wrappers ==="
 
 case $PLATFORM in
     windows-x64)
-        # Remove any broken pip-generated scripts
-        rm -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/Scripts/esphome-script.py" 2>/dev/null || true
-        rm -f "$BUNDLE_DIR/esphome.exe" "$BUNDLE_DIR/esphome-script.py" 2>/dev/null || true
+        # Fix pip-generated launcher to use python from PATH
+        if [[ -f "$BUNDLE_DIR/Scripts/esphome-script.py" ]]; then
+            BUNDLE_DIR="$BUNDLE_DIR" "$BUNDLE_DIR/python.exe" - << 'PY'
+from pathlib import Path
+import os
+
+bundle_dir = Path(os.environ["BUNDLE_DIR"])
+script_path = bundle_dir / "Scripts" / "esphome-script.py"
+text = script_path.read_text(encoding="utf-8")
+lines = text.splitlines()
+if lines:
+    lines[0] = "#!python.exe"
+    script_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+        fi
+
+        # Copy launcher and script to root so it's on PATH
+        if [[ -f "$BUNDLE_DIR/Scripts/esphome.exe" ]]; then
+            cp -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/esphome.exe"
+        fi
+        if [[ -f "$BUNDLE_DIR/Scripts/esphome-script.py" ]]; then
+            cp -f "$BUNDLE_DIR/Scripts/esphome-script.py" "$BUNDLE_DIR/esphome-script.py"
+        fi
 
         # Create esphome.bat wrapper in both Scripts and root for compatibility
         mkdir -p "$BUNDLE_DIR/Scripts"
