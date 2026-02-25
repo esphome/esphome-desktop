@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Get the application data directory
 ///
@@ -143,6 +143,9 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
     // Always ensure wrapper scripts exist (in case they were missing in older versions)
     ensure_esphome_wrapper(&user_python)?;
 
+    #[cfg(target_os = "windows")]
+    ensure_esphome_launcher(app_handle, &user_python)?;
+
     Ok(())
 }
 
@@ -195,6 +198,51 @@ fn ensure_esphome_wrapper(python_dir: &PathBuf) -> Result<()> {
         debug!("Created esphome wrapper at {:?}", wrapper_path);
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_esphome_launcher(app_handle: &AppHandle, python_dir: &PathBuf) -> Result<()> {
+    use std::fs;
+
+    let root_launcher = python_dir.join("esphome.exe");
+    let root_script = python_dir.join("esphome-script.py");
+    let scripts_dir = python_dir.join("Scripts");
+    let scripts_launcher = scripts_dir.join("esphome.exe");
+    let scripts_script = scripts_dir.join("esphome-script.py");
+
+    if root_launcher.exists() && root_script.exists() {
+        return Ok(());
+    }
+
+    let resource_dir = app_handle
+        .path()
+        .resource_dir()
+        .context("Failed to get resource directory")?;
+    let bundled_python = resource_dir.join("python");
+    let bundled_launcher = bundled_python.join("Scripts").join("esphome.exe");
+    let bundled_script = bundled_python
+        .join("Scripts")
+        .join("esphome-script.py");
+
+    if bundled_launcher.exists() && bundled_script.exists() {
+        fs::create_dir_all(&scripts_dir)
+            .context("Failed to create python Scripts directory")?;
+        fs::copy(&bundled_launcher, &scripts_launcher)
+            .context("Failed to copy esphome.exe launcher")?;
+        fs::copy(&bundled_script, &scripts_script)
+            .context("Failed to copy esphome-script.py")?;
+        fs::copy(&bundled_launcher, &root_launcher)
+            .context("Failed to copy esphome.exe to root")?;
+        fs::copy(&bundled_script, &root_script)
+            .context("Failed to copy esphome-script.py to root")?;
+        return Ok(());
+    }
+
+    warn!(
+        "Bundled esphome launcher not found at {:?}; esphome.exe may be missing",
+        bundled_launcher
+    );
     Ok(())
 }
 
