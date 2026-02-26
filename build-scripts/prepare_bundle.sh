@@ -3,8 +3,10 @@
 #
 # This script:
 # 1. Downloads python-build-standalone
-# 2. Creates a venv with ESPHome installed
+# 2. Installs ESPHome directly into the standalone Python (no venv)
 # 3. Prepares it for bundling with the app
+#
+# Note: No venv is used to avoid absolute path issues in bundled executables
 #
 # Usage: ./prepare_bundle.sh [platform]
 
@@ -55,33 +57,28 @@ case $PLATFORM in
     macos-x64)
         FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-apple-darwin-install_only.tar.gz"
         PYTHON_BIN="bin/python3"
-        VENV_PYTHON="bin/python"
         ;;
     macos-arm64)
         FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-aarch64-apple-darwin-install_only.tar.gz"
         PYTHON_BIN="bin/python3"
-        VENV_PYTHON="bin/python"
         ;;
     windows-x64)
         FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-pc-windows-msvc-install_only.tar.gz"
         PYTHON_BIN="python.exe"
-        VENV_PYTHON="Scripts/python.exe"
         ;;
     linux-x64)
         FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-unknown-linux-gnu-install_only.tar.gz"
         PYTHON_BIN="bin/python3"
-        VENV_PYTHON="bin/python"
         ;;
 esac
 
 URL="${BASE_URL}/${FILENAME}"
 PYTHON_DIR="$BUILD_DIR/python-${PLATFORM}"
-VENV_DIR="$BUILD_DIR/venv-${PLATFORM}"
 
 echo "=== Preparing ESPHome bundle for ${PLATFORM} ==="
 
 # Clean up previous builds
-rm -rf "$PYTHON_DIR" "$VENV_DIR" "$BUNDLE_DIR"
+rm -rf "$PYTHON_DIR" "$BUNDLE_DIR"
 mkdir -p "$BUILD_DIR"
 
 # Download Python
@@ -105,34 +102,61 @@ echo ""
 echo "=== Verifying Python ==="
 "$PYTHON_DIR/$PYTHON_BIN" --version
 
-# Create venv
-echo ""
-echo "=== Creating virtual environment ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m venv "$VENV_DIR"
-
 # Install uv for fast package installation
 echo ""
 echo "=== Installing uv ==="
-"$VENV_DIR/$VENV_PYTHON" -m pip install --upgrade pip uv
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install --upgrade pip uv
 
-# Install ESPHome using uv
+# Install ESPHome directly into standalone Python (no venv)
 echo ""
 echo "=== Installing ESPHome (using uv) ==="
-"$VENV_DIR/$VENV_PYTHON" -m uv pip install esphome
+"$PYTHON_DIR/$PYTHON_BIN" -m uv pip install esphome
 
 # Verify ESPHome
 echo ""
 echo "=== Verifying ESPHome ==="
-"$VENV_DIR/$VENV_PYTHON" -m esphome version
+"$PYTHON_DIR/$PYTHON_BIN" -m esphome version
 
-# Copy venv to bundle location and include Python lib
+# Copy Python directory to bundle location
 echo ""
 echo "=== Preparing bundle ==="
-cp -R "$VENV_DIR" "$BUNDLE_DIR"
+cp -R "$PYTHON_DIR" "$BUNDLE_DIR"
 
-# Copy the base Python lib directory (needed for libpython)
-echo "Copying Python libraries..."
-cp -R "$PYTHON_DIR/lib" "$BUNDLE_DIR/"
+# Create portable wrapper scripts for esphome
+echo ""
+echo "=== Creating portable esphome wrappers ==="
+
+case $PLATFORM in
+    windows-x64)
+        # Create esphome.bat wrappers for compatibility
+        mkdir -p "$BUNDLE_DIR/Scripts"
+
+        cat > "$BUNDLE_DIR/Scripts/esphome.bat" << 'EOF'
+@echo off
+"%~dp0..\python.exe" -m esphome %*
+EOF
+
+        cat > "$BUNDLE_DIR/esphome.bat" << 'EOF'
+@echo off
+"%~dp0python.exe" -m esphome %*
+EOF
+
+        echo "Created esphome.bat wrappers for Windows"
+        ;;
+    *)
+        # Remove any broken pip-generated scripts
+        rm -f "$BUNDLE_DIR/bin/esphome" 2>/dev/null || true
+
+        # Create esphome wrapper for Unix (macOS/Linux) in bin directory
+        cat > "$BUNDLE_DIR/bin/esphome" << 'EOF'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/python3" -m esphome "$@"
+EOF
+        chmod +x "$BUNDLE_DIR/bin/esphome"
+        echo "Created esphome shell wrapper"
+        ;;
+esac
 
 # Get size
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
