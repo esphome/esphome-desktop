@@ -1,0 +1,219 @@
+name: Build
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            target: windows-x64
+            bundles: msi,nsis
+            artifact_paths: |
+              src-tauri/target/release/bundle/msi/*.msi
+              src-tauri/target/release/bundle/nsis/*.exe
+          - platform: linux
+            os: ubuntu-22.04
+            target: linux-x64
+            bundles: appimage,deb
+            artifact_paths: |
+              src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/deb/*.deb
+          - platform: macos
+            os: macos-15
+            target: macos-arm64
+            bundles: dmg
+            artifact_paths: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Linux-specific dependencies
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            libayatana-appindicator3-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: src-tauri
+
+      # Linux uses custom tauri-cli for portable AppImage
+      - name: Install Tauri CLI (Linux - custom branch for portable AppImage)
+        if: matrix.platform == 'linux'
+        run: |
+          # Use custom tauri-cli branch with truly portable AppImage format
+          # This avoids linuxdeploy issues with vendored Python libraries
+          cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/truly-portable-appimage --locked --force
+
+      # Windows and macOS use standard tauri-cli
+      - name: Install Tauri CLI
+        if: matrix.platform != 'linux'
+        run: cargo install tauri-cli --locked
+
+      - name: Prepare Python bundle
+        shell: bash
+        run: ./build-scripts/prepare_bundle.sh ${{ matrix.target }}
+
+      # macOS-specific signing setup
+      - name: Import Apple certificate
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_FILE=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERT_FILE
+          security create-keychain -p "${{ github.run_id }}" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "${{ github.run_id }}" $KEYCHAIN_PATH
+          security import $CERT_FILE -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "${{ github.run_id }}" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Sign Python bundle binaries
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        run: ./build-scripts/sign_python_bundle.sh
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      # Build step - Linux with special env var
+      - name: Build (Linux CI)
+        if: matrix.platform == 'linux' && !startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
+
+      - name: Build (Linux Release)
+        if: matrix.platform == 'linux' && startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
+
+      # Build step - Windows CI
+      - name: Build (Windows CI)
+        if: matrix.platform == 'windows' && !startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
+
+      - name: Build (Windows Release with signing)
+        if: matrix.platform == 'windows' && startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      # Build step - macOS CI
+      - name: Build (macOS CI)
+        if: matrix.platform == 'macos' && !startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
+
+      - name: Build (macOS Release with signing)
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        run: cargo tauri build
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ matrix.platform }}-artifacts
+          path: ${{ matrix.artifact_paths }}
+
+  # Comment on PR with artifact links
+  comment:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Find Comment
+        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '<!-- build-artifacts-comment -->'
+
+      - name: Create or update comment
+        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body: |
+            <!-- build-artifacts-comment -->
+            ## 📦 Build Artifacts
+
+            The following artifacts are available from this build:
+
+            ### Windows
+            - [MSI Installer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (windows-artifacts)
+            - [NSIS Installer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (windows-artifacts)
+
+            ### Linux
+            - [AppImage](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (linux-artifacts)
+            - [Debian Package](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (linux-artifacts)
+
+            ### macOS
+            - [DMG](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (macos-artifacts)
+
+            ---
+            *Last updated: ${{ github.event.pull_request.head.sha }} - Run #${{ github.run_number }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          files: artifacts/**/*
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
