@@ -125,7 +125,7 @@ impl DaemonManager {
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
 
-        // Add Python bin directory to PATH for any subprocess needs
+        // Add Python bin directory and Scripts to PATH for subprocess needs
         let current_path = std::env::var("PATH").unwrap_or_default();
 
         // Use platform-specific PATH separator (';' on Windows, ':' on Unix)
@@ -134,6 +134,14 @@ impl DaemonManager {
         #[cfg(not(target_os = "windows"))]
         let path_sep = ":";
 
+        // On Windows, also add Scripts directory so esphome.exe (pip launcher) can be found
+        #[cfg(target_os = "windows")]
+        let new_path = {
+            let scripts_dir = self.python_bin_dir.join("Scripts");
+            format!("{}{}{}{}{}", scripts_dir.display(), path_sep, self.python_bin_dir.display(), path_sep, current_path)
+        };
+
+        #[cfg(not(target_os = "windows"))]
         let new_path = format!("{}{}{}", self.python_bin_dir.display(), path_sep, current_path);
         info!("PATH set to: {}", new_path);
         cmd.env("PATH", new_path);

@@ -128,15 +128,7 @@ echo "=== Creating portable esphome wrappers ==="
 
 case $PLATFORM in
     windows-x64)
-        # Copy launcher and script to root so it's on PATH
-        if [[ -f "$BUNDLE_DIR/Scripts/esphome.exe" ]]; then
-            cp -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/esphome.exe"
-        fi
-        if [[ -f "$BUNDLE_DIR/Scripts/esphome-script.py" ]]; then
-            cp -f "$BUNDLE_DIR/Scripts/esphome-script.py" "$BUNDLE_DIR/esphome-script.py"
-        fi
-
-        # Create esphome.bat wrapper in both Scripts and root for compatibility
+        # Create esphome.bat wrappers for compatibility
         mkdir -p "$BUNDLE_DIR/Scripts"
 
         cat > "$BUNDLE_DIR/Scripts/esphome.bat" << 'EOF'
