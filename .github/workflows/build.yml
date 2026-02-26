@@ -25,22 +25,14 @@ jobs:
             os: windows-latest
             target: windows-x64
             bundles: msi,nsis
-            artifact_paths: |
-              src-tauri/target/release/bundle/msi/*.msi
-              src-tauri/target/release/bundle/nsis/*.exe
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
             bundles: appimage,deb
-            artifact_paths: |
-              src-tauri/target/release/bundle/appimage/*.AppImage
-              src-tauri/target/release/bundle/deb/*.deb
           - platform: macos
             os: macos-15
             target: macos-arm64
             bundles: dmg
-            artifact_paths: |
-              src-tauri/target/release/bundle/dmg/*.dmg
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.platform }}
@@ -150,11 +142,40 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # Upload artifacts
-      - name: Upload artifacts
+      - name: Upload MSI
+        if: matrix.platform == 'windows'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: ${{ matrix.platform }}-artifacts
-          path: ${{ matrix.artifact_paths }}
+          name: windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+
+      - name: Upload NSIS
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: Upload AppImage
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: linux-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Upload deb
+        if: matrix.platform == 'linux'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+
+      - name: Upload DMG
+        if: matrix.platform == 'macos'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: macos-dmg
+          path: src-tauri/target/release/bundle/dmg/*.dmg
 
   # Comment on PR with artifact links
   comment:
@@ -173,31 +194,75 @@ jobs:
           comment-author: 'github-actions[bot]'
           body-includes: '<!-- build-artifacts-comment -->'
 
+      - name: Build artifact comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          run_id="${{ github.run_id }}"
+          repo="${{ github.repository }}"
+
+          artifacts_json=$(gh api "repos/${repo}/actions/runs/${run_id}/artifacts" --paginate)
+          artifacts=$(echo "$artifacts_json" | jq -s '[.[].artifacts[]]')
+
+          artifact_url() {
+            local name="$1"
+            echo "$artifacts" | jq -r --arg name "$name" '.[] | select(.name == $name) | "https://github.com/'"$repo"'/actions/runs/'"$run_id"'/artifacts/\(.id)"' | head -n 1
+          }
+
+          write_link() {
+            local name="$1"
+            local label="$2"
+            local url
+            url=$(artifact_url "$name")
+            if [[ -n "$url" ]]; then
+              echo "- [$label]($url)" >> comment.md
+            else
+              echo "- $label (not available)" >> comment.md
+            fi
+          }
+
+          cat > comment.md <<'EOF'
+          <!-- build-artifacts-comment -->
+          ## 📦 Build Artifacts
+
+          The following artifacts are available from this build:
+
+          ### Windows
+          EOF
+
+          write_link "windows-msi" "MSI Installer"
+          write_link "windows-nsis" "NSIS Installer"
+
+          cat >> comment.md <<'EOF'
+
+          ### Linux
+          EOF
+
+          write_link "linux-appimage" "AppImage"
+          write_link "linux-deb" "Debian Package"
+
+          cat >> comment.md <<'EOF'
+
+          ### macOS
+          EOF
+
+          write_link "macos-dmg" "DMG"
+
+          cat >> comment.md <<EOF
+
+          ---
+          *Last updated: ${{ github.event.pull_request.head.sha }} - Run #${{ github.run_number }}*
+          EOF
+
       - name: Create or update comment
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
           edit-mode: replace
-          body: |
-            <!-- build-artifacts-comment -->
-            ## 📦 Build Artifacts
-
-            The following artifacts are available from this build:
-
-            ### Windows
-            - [MSI Installer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (windows-artifacts)
-            - [NSIS Installer](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (windows-artifacts)
-
-            ### Linux
-            - [AppImage](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (linux-artifacts)
-            - [Debian Package](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (linux-artifacts)
-
-            ### macOS
-            - [DMG](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts) (macos-artifacts)
-
-            ---
-            *Last updated: ${{ github.event.pull_request.head.sha }} - Run #${{ github.run_number }}*
+          body-path: comment.md
 
   release:
     needs: build
