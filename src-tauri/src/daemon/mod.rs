@@ -13,6 +13,12 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
 use crate::platform;
 use crate::settings::Settings;
 
@@ -111,6 +117,10 @@ impl DaemonManager {
         // Create new process group on Unix so we can kill all children
         #[cfg(unix)]
         cmd.process_group(0);
+
+        // Prevent a console window from staying open on Windows
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW.0);
 
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
