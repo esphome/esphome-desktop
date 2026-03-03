@@ -144,35 +144,35 @@ jobs:
       # Upload artifacts
       - name: Upload MSI
         if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: windows-msi
           path: src-tauri/target/release/bundle/msi/*.msi
 
       - name: Upload NSIS
         if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: windows-nsis
           path: src-tauri/target/release/bundle/nsis/*.exe
 
       - name: Upload AppImage
         if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: linux-appimage
           path: src-tauri/target/release/bundle/appimage/*.AppImage
 
       - name: Upload deb
         if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: linux-deb
           path: src-tauri/target/release/bundle/deb/*.deb
 
       - name: Upload DMG
         if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: macos-dmg
           path: src-tauri/target/release/bundle/dmg/*.dmg
