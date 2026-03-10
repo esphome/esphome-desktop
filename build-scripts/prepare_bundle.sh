@@ -117,6 +117,11 @@ echo ""
 echo "=== Verifying ESPHome ==="
 "$PYTHON_DIR/$PYTHON_BIN" -m esphome version
 
+# Uninstall uv (only needed for fast installation, not runtime)
+echo ""
+echo "=== Removing uv (not needed at runtime) ==="
+"$PYTHON_DIR/$PYTHON_BIN" -m pip uninstall -y uv
+
 # Copy Python directory to bundle location
 echo ""
 echo "=== Preparing bundle ==="
