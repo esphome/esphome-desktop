@@ -28,7 +28,7 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 }
 
 /// Get the path to the user Python executable
-/// On first run, the bundled Python is copied to user data for updates
+/// On non-Windows platforms, the bundled Python is copied to user data for updates
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     let data_dir = get_data_dir(app_handle)?;
     let user_python = data_dir.join("python");
@@ -104,45 +104,58 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
 
 /// Ensure the user Python exists by copying from bundled Python if needed
 pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
-    use tracing::info;
-
-    let data_dir = get_data_dir(app_handle)?;
-    let user_python = data_dir.join("python");
-
-    // Check if user Python already exists
     #[cfg(target_os = "windows")]
-    let python_check = user_python.join("python.exe");
-    #[cfg(not(target_os = "windows"))]
-    let python_check = user_python.join("bin").join("python3");
-
-    let needs_copy = !python_check.exists();
-
-    if needs_copy {
-        // Get bundled Python path
+    {
         let resource_dir = app_handle
             .path()
             .resource_dir()
             .context("Failed to get resource directory")?;
-        let bundled_python = resource_dir.join("python");
+        let bundled_python = resource_dir.join("python").join("python.exe");
 
         if !bundled_python.exists() {
             anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
         }
 
-        info!("Copying bundled Python to user data directory...");
-
-        // Copy the bundled Python to user data
-        copy_dir_recursive(&bundled_python, &user_python)?;
-
-        info!("User Python ready at {:?}", user_python);
-    } else {
-        debug!("User Python already exists");
+        return Ok(());
     }
 
-    // Always ensure wrapper scripts exist (in case they were missing in older versions)
-    ensure_esphome_wrapper(&user_python)?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tracing::info;
 
-    Ok(())
+        let data_dir = get_data_dir(app_handle)?;
+        let user_python = data_dir.join("python");
+        let python_check = user_python.join("bin").join("python3");
+
+        let needs_copy = !python_check.exists();
+
+        if needs_copy {
+            // Get bundled Python path
+            let resource_dir = app_handle
+                .path()
+                .resource_dir()
+                .context("Failed to get resource directory")?;
+            let bundled_python = resource_dir.join("python");
+
+            if !bundled_python.exists() {
+                anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
+            }
+
+            info!("Copying bundled Python to user data directory...");
+
+            // Copy the bundled Python to user data
+            copy_dir_recursive(&bundled_python, &user_python)?;
+
+            info!("User Python ready at {:?}", user_python);
+        } else {
+            debug!("User Python already exists");
+        }
+
+        // Always ensure wrapper scripts exist (in case they were missing in older versions)
+        ensure_esphome_wrapper(&user_python)?;
+
+        Ok(())
+    }
 }
 
 /// Ensure portable esphome wrapper scripts exist

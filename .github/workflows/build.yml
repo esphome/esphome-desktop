@@ -24,7 +24,7 @@ jobs:
           - platform: windows
             os: windows-latest
             target: windows-x64
-            bundles: msi,nsis
+            bundles: nsis
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
@@ -142,13 +142,6 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # Upload artifacts
-      - name: Upload MSI
-        if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: windows-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
-
       - name: Upload NSIS
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -232,7 +225,6 @@ jobs:
           ### Windows
           EOF
 
-          write_link "windows-msi" "MSI Installer"
           write_link "windows-nsis" "NSIS Installer"
 
           cat >> comment.md <<'EOF'
