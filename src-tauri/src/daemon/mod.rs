@@ -22,6 +22,40 @@ use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 use crate::platform;
 use crate::settings::Settings;
 
+fn ensure_runtime_esphome_wrapper(python_path: &PathBuf, python_bin_dir: &PathBuf) -> Result<()> {
+    use std::io::Write;
+
+    #[cfg(target_os = "windows")]
+    {
+        let wrapper_path = python_bin_dir.join("esphome.bat");
+        let mut file = std::fs::File::create(&wrapper_path)
+            .with_context(|| format!("Failed to create {:?}", wrapper_path))?;
+        file.write_all(
+            format!("@echo off\r\n\"{}\" -m esphome %*\r\n", python_path.display()).as_bytes(),
+        )
+        .with_context(|| format!("Failed to write {:?}", wrapper_path))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let wrapper_path = python_bin_dir.join("esphome");
+        let mut file = std::fs::File::create(&wrapper_path)
+            .with_context(|| format!("Failed to create {:?}", wrapper_path))?;
+        file.write_all(
+            format!("#!/bin/sh\nexec \"{}\" -m esphome \"$@\"\n", python_path.display()).as_bytes(),
+        )
+        .with_context(|| format!("Failed to write {:?}", wrapper_path))?;
+
+        let mut perms = std::fs::metadata(&wrapper_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&wrapper_path, perms)?;
+    }
+
+    Ok(())
+}
+
 /// Manages the ESPHome dashboard process
 pub struct DaemonManager {
     /// The running process, if any
@@ -87,6 +121,10 @@ impl DaemonManager {
         if !self.python_path.exists() {
             anyhow::bail!("Python not found at {:?}", self.python_path);
         }
+
+        // Ensure `esphome` resolves to a direct Python module wrapper instead of
+        // any packaged launcher shim (e.g. uv trampoline).
+        ensure_runtime_esphome_wrapper(&self.python_path, &self.python_bin_dir)?;
 
         // Open log file for stdout and stderr combined
         let log_path = self.logs_dir.join("dashboard.log");

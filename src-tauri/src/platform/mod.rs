@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Get the application data directory
 ///
@@ -105,7 +105,6 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
 /// Ensure the user Python exists by copying from bundled Python if needed
 pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
     use tracing::info;
-    use std::fs;
 
     let data_dir = get_data_dir(app_handle)?;
     let user_python = data_dir.join("python");
