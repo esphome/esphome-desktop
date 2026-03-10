@@ -27,13 +27,19 @@ fn ensure_runtime_esphome_wrapper(python_path: &PathBuf, python_bin_dir: &PathBu
 
     #[cfg(target_os = "windows")]
     {
-        let wrapper_path = python_bin_dir.join("esphome.bat");
+        let scripts_dir = python_bin_dir.join("Scripts");
+        std::fs::create_dir_all(&scripts_dir)
+            .with_context(|| format!("Failed to create Scripts directory {:?}", scripts_dir))?;
+
+        let wrapper_path = scripts_dir.join("esphome.bat");
         let mut file = std::fs::File::create(&wrapper_path)
             .with_context(|| format!("Failed to create {:?}", wrapper_path))?;
         file.write_all(
             format!("@echo off\r\n\"{}\" -m esphome %*\r\n", python_path.display()).as_bytes(),
         )
         .with_context(|| format!("Failed to write {:?}", wrapper_path))?;
+
+        info!("Created esphome wrapper at {:?}", wrapper_path);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -51,6 +57,8 @@ fn ensure_runtime_esphome_wrapper(python_path: &PathBuf, python_bin_dir: &PathBu
         let mut perms = std::fs::metadata(&wrapper_path)?.permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&wrapper_path, perms)?;
+
+        info!("Created esphome wrapper at {:?}", wrapper_path);
     }
 
     Ok(())
@@ -122,8 +130,7 @@ impl DaemonManager {
             anyhow::bail!("Python not found at {:?}", self.python_path);
         }
 
-        // Ensure `esphome` resolves to a direct Python module wrapper instead of
-        // any packaged launcher shim (e.g. uv trampoline).
+        // Ensure esphome wrapper script exists
         ensure_runtime_esphome_wrapper(&self.python_path, &self.python_bin_dir)?;
 
         // Open log file for stdout and stderr combined
