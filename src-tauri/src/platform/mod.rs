@@ -151,64 +151,10 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             debug!("User Python already exists");
         }
 
-        // Always ensure wrapper scripts exist (in case they were missing in older versions)
-        ensure_esphome_wrapper(&user_python)?;
-
         Ok(())
     }
 }
 
-/// Ensure portable esphome wrapper scripts exist
-fn ensure_esphome_wrapper(python_dir: &PathBuf) -> Result<()> {
-    use std::fs;
-    use std::io::Write;
-
-    #[cfg(target_os = "windows")]
-    {
-        // Create esphome.bat wrapper in root directory
-        let wrapper_path = python_dir.join("esphome.bat");
-        let mut file = fs::File::create(&wrapper_path)
-            .context("Failed to create esphome.bat wrapper")?;
-        file.write_all(b"@echo off\r\n\"%~dp0python.exe\" -m esphome %*\r\n")
-            .context("Failed to write esphome.bat wrapper")?;
-        debug!("Created esphome.bat wrapper at {:?}", wrapper_path);
-
-        // Also create in Scripts directory if it exists
-        let scripts_dir = python_dir.join("Scripts");
-        if scripts_dir.exists() {
-            let scripts_wrapper = scripts_dir.join("esphome.bat");
-            let mut file = fs::File::create(&scripts_wrapper)
-                .context("Failed to create Scripts/esphome.bat wrapper")?;
-            file.write_all(b"@echo off\r\n\"%~dp0..\\python.exe\" -m esphome %*\r\n")
-                .context("Failed to write Scripts/esphome.bat wrapper")?;
-            debug!("Created Scripts/esphome.bat wrapper at {:?}", scripts_wrapper);
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Create esphome wrapper in bin directory
-        let bin_dir = python_dir.join("bin");
-        let wrapper_path = bin_dir.join("esphome");
-        let mut file = fs::File::create(&wrapper_path)
-            .context("Failed to create esphome wrapper")?;
-        file.write_all(b"#!/bin/sh\nDIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\nexec \"$DIR/python3\" -m esphome \"$@\"\n")
-            .context("Failed to write esphome wrapper")?;
-
-        // Make it executable
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&wrapper_path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&wrapper_path, perms)?;
-        }
-
-        debug!("Created esphome wrapper at {:?}", wrapper_path);
-    }
-
-    Ok(())
-}
 /// Recursively copy a directory
 fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     use std::fs;
