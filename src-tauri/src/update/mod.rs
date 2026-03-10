@@ -191,33 +191,11 @@ impl UpdateChecker {
 
         let python_path = platform::get_python_path(app_handle)?;
 
-        // Try uv pip install first (faster), fall back to regular pip
         let output = tokio::process::Command::new(&python_path)
-            .args([
-                "-m",
-                "uv",
-                "pip",
-                "install",
-                &format!("esphome=={}", version),
-            ])
+            .args(["-m", "pip", "install", &format!("esphome=={}", version)])
             .output()
-            .await;
-
-        let output = match output {
-            Ok(o) if o.status.success() => {
-                info!("ESPHome updated successfully to {} (via uv)", version);
-                return Ok(());
-            }
-            _ => {
-                // Fall back to regular pip
-                debug!("uv not available, falling back to pip");
-                tokio::process::Command::new(&python_path)
-                    .args(["-m", "pip", "install", &format!("esphome=={}", version)])
-                    .output()
-                    .await
-                    .context("Failed to run pip install")?
-            }
-        };
+            .await
+            .context("Failed to run pip install")?;
 
         if output.status.success() {
             info!("ESPHome updated successfully to {}", version);

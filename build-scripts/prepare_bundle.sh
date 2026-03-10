@@ -102,30 +102,59 @@ echo ""
 echo "=== Verifying Python ==="
 "$PYTHON_DIR/$PYTHON_BIN" --version
 
-# Install uv for fast package installation
+# Upgrade pip
 echo ""
-echo "=== Installing uv ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m pip install --upgrade pip uv
+echo "=== Upgrading pip ==="
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install --upgrade pip
 
 # Install ESPHome directly into standalone Python (no venv)
 echo ""
-echo "=== Installing ESPHome (using uv) ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m uv pip install esphome
+echo "=== Installing ESPHome ==="
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install esphome
 
 # Verify ESPHome
 echo ""
 echo "=== Verifying ESPHome ==="
 "$PYTHON_DIR/$PYTHON_BIN" -m esphome version
 
-# Uninstall uv (only needed for fast installation, not runtime)
-echo ""
-echo "=== Removing uv (not needed at runtime) ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m pip uninstall -y uv
-
 # Copy Python directory to bundle location
 echo ""
 echo "=== Preparing bundle ==="
 cp -R "$PYTHON_DIR" "$BUNDLE_DIR"
+
+# Create portable wrapper scripts for esphome
+echo ""
+echo "=== Creating portable esphome wrappers ==="
+
+case $PLATFORM in
+    windows-x64)
+    mkdir -p "$BUNDLE_DIR/Scripts"
+    rm -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/Scripts/esphome-script.py"
+
+    cat > "$BUNDLE_DIR/Scripts/esphome.bat" << 'EOF'
+@echo off
+"%~dp0..\python.exe" -m esphome %*
+EOF
+
+    cat > "$BUNDLE_DIR/esphome.bat" << 'EOF'
+@echo off
+"%~dp0python.exe" -m esphome %*
+EOF
+
+    echo "Created esphome.bat wrappers for Windows"
+    ;;
+    *)
+    rm -f "$BUNDLE_DIR/bin/esphome"
+
+    cat > "$BUNDLE_DIR/bin/esphome" << 'EOF'
+#!/bin/sh
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/python3" -m esphome "$@"
+EOF
+    chmod +x "$BUNDLE_DIR/bin/esphome"
+    echo "Created esphome shell wrapper"
+    ;;
+esac
 
 # Get size
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
