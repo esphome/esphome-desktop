@@ -108,7 +108,8 @@ echo "=== Verifying Python ==="
 # Create venv
 echo ""
 echo "=== Creating virtual environment ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m venv "$VENV_DIR"
+# Use --copies to make venv more relocatable (no symlinks)
+"$PYTHON_DIR/$PYTHON_BIN" -m venv --copies "$VENV_DIR"
 
 # Install uv for fast package installation
 echo ""
@@ -133,6 +134,19 @@ cp -R "$VENV_DIR" "$BUNDLE_DIR"
 # Copy the base Python lib directory (needed for libpython)
 echo "Copying Python libraries..."
 cp -R "$PYTHON_DIR/lib" "$BUNDLE_DIR/"
+
+# Make venv relocatable by removing absolute paths from pyvenv.cfg
+echo "Making venv relocatable..."
+PYVENV_CFG="$BUNDLE_DIR/pyvenv.cfg"
+if [[ -f "$PYVENV_CFG" ]]; then
+    # Remove the 'home' and 'executable' lines as they contain absolute paths
+    # Python will fall back to using relative paths from the venv location
+    sed -i.bak '/^home = /d' "$PYVENV_CFG"
+    sed -i.bak '/^executable = /d' "$PYVENV_CFG"
+    sed -i.bak '/^command = /d' "$PYVENV_CFG"
+    rm -f "$PYVENV_CFG.bak"
+    echo "Updated pyvenv.cfg to be relocatable"
+fi
 
 # Get size
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
