@@ -27,10 +27,20 @@ fn ensure_runtime_esphome_wrapper(python_path: &PathBuf, python_bin_dir: &PathBu
 
     #[cfg(target_os = "windows")]
     {
+        // On Windows, create wrapper in both root and Scripts directory
         let scripts_dir = python_bin_dir.join("Scripts");
         std::fs::create_dir_all(&scripts_dir)
             .with_context(|| format!("Failed to create Scripts directory {:?}", scripts_dir))?;
 
+        // Remove any existing esphome.exe launcher that might cause issues
+        let exe_path = scripts_dir.join("esphome.exe");
+        if exe_path.exists() {
+            std::fs::remove_file(&exe_path)
+                .with_context(|| format!("Failed to remove {:?}", exe_path))?;
+            info!("Removed problematic esphome.exe launcher");
+        }
+
+        // Create wrapper in Scripts directory
         let wrapper_path = scripts_dir.join("esphome.bat");
         let mut file = std::fs::File::create(&wrapper_path)
             .with_context(|| format!("Failed to create {:?}", wrapper_path))?;
@@ -38,8 +48,19 @@ fn ensure_runtime_esphome_wrapper(python_path: &PathBuf, python_bin_dir: &PathBu
             format!("@echo off\r\n\"{}\" -m esphome %*\r\n", python_path.display()).as_bytes(),
         )
         .with_context(|| format!("Failed to write {:?}", wrapper_path))?;
+        debug!("Created esphome wrapper at {:?}", wrapper_path);
 
-        info!("Created esphome wrapper at {:?}", wrapper_path);
+        // Also create wrapper in root directory as fallback
+        let root_wrapper = python_bin_dir.join("esphome.bat");
+        let mut file = std::fs::File::create(&root_wrapper)
+            .with_context(|| format!("Failed to create {:?}", root_wrapper))?;
+        file.write_all(
+            format!("@echo off\r\n\"{}\" -m esphome %*\r\n", python_path.display()).as_bytes(),
+        )
+        .with_context(|| format!("Failed to write {:?}", root_wrapper))?;
+        debug!("Created esphome wrapper at {:?}", root_wrapper);
+
+        info!("Created esphome wrappers at {:?}", python_bin_dir);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -172,6 +193,7 @@ impl DaemonManager {
 
         // Add Python bin directory and Scripts to PATH for subprocess needs
         let current_path = std::env::var("PATH").unwrap_or_default();
+        debug!("Current PATH: {}", current_path);
 
         // Use platform-specific PATH separator (';' on Windows, ':' on Unix)
         #[cfg(target_os = "windows")]
@@ -179,16 +201,23 @@ impl DaemonManager {
         #[cfg(not(target_os = "windows"))]
         let path_sep = ":";
 
-        // On Windows, also add Scripts directory so esphome.exe (pip launcher) can be found
+        // On Windows, also add Scripts directory so esphome wrappers can be found
         #[cfg(target_os = "windows")]
         let new_path = {
             let scripts_dir = self.python_bin_dir.join("Scripts");
-            format!("{}{}{}{}{}", scripts_dir.display(), path_sep, self.python_bin_dir.display(), path_sep, current_path)
+            let path = format!("{}{}{}{}{}", scripts_dir.display(), path_sep, self.python_bin_dir.display(), path_sep, current_path);
+            debug!("Python Scripts directory: {}", scripts_dir.display());
+            debug!("Python root directory: {}", self.python_bin_dir.display());
+            info!("Updated PATH for dashboard: Scripts and python bin dir added");
+            path
         };
 
         #[cfg(not(target_os = "windows"))]
-        let new_path = format!("{}{}{}", self.python_bin_dir.display(), path_sep, current_path);
-        info!("PATH set to: {}", new_path);
+        let new_path = {
+            let path = format!("{}{}{}", self.python_bin_dir.display(), path_sep, current_path);
+            debug!("Python bin directory: {}", self.python_bin_dir.display());
+            path
+        };
         cmd.env("PATH", new_path);
 
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
