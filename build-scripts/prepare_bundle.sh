@@ -110,7 +110,7 @@ echo "=== Upgrading pip ==="
 # Install ESPHome directly into standalone Python (no venv)
 echo ""
 echo "=== Installing ESPHome ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m pip install esphome
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install --pre esphome
 
 # Verify ESPHome
 echo ""
@@ -121,40 +121,6 @@ echo "=== Verifying ESPHome ==="
 echo ""
 echo "=== Preparing bundle ==="
 cp -R "$PYTHON_DIR" "$BUNDLE_DIR"
-
-# Create portable wrapper scripts for esphome
-echo ""
-echo "=== Creating portable esphome wrappers ==="
-
-case $PLATFORM in
-    windows-x64)
-    mkdir -p "$BUNDLE_DIR/Scripts"
-    rm -f "$BUNDLE_DIR/Scripts/esphome.exe" "$BUNDLE_DIR/Scripts/esphome-script.py"
-
-    cat > "$BUNDLE_DIR/Scripts/esphome.bat" << 'EOF'
-@echo off
-"%~dp0..\python.exe" -m esphome %*
-EOF
-
-    cat > "$BUNDLE_DIR/esphome.bat" << 'EOF'
-@echo off
-"%~dp0python.exe" -m esphome %*
-EOF
-
-    echo "Created esphome.bat wrappers for Windows"
-    ;;
-    *)
-    rm -f "$BUNDLE_DIR/bin/esphome"
-
-    cat > "$BUNDLE_DIR/bin/esphome" << 'EOF'
-#!/bin/sh
-DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/python3" -m esphome "$@"
-EOF
-    chmod +x "$BUNDLE_DIR/bin/esphome"
-    echo "Created esphome shell wrapper"
-    ;;
-esac
 
 # Get size
 BUNDLE_SIZE=$(du -sh "$BUNDLE_DIR" | cut -f1)
