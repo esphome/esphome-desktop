@@ -107,10 +107,11 @@ impl Settings {
 fn detect_installed_version(app_handle: &AppHandle) -> Result<String> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let output = std::process::Command::new(&python_path)
-        .args(["-m", "esphome", "version"])
-        .output()
-        .context("Failed to run esphome version")?;
+    let mut cmd = std::process::Command::new(&python_path);
+    cmd.args(["-m", "esphome", "version"]);
+    platform::configure_no_window_command(&mut cmd);
+
+    let output = cmd.output().context("Failed to run esphome version")?;
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout)

@@ -9,6 +9,12 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 use tracing::debug;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
 /// Get the application data directory
 ///
 /// - macOS: `~/Library/Application Support/ESPHome Builder/`
@@ -186,11 +192,39 @@ pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
     };
 
     // Try to run esphome version
-    std::process::Command::new(&python_path)
-        .args(["-m", "esphome", "version"])
-        .output()
+    let mut cmd = std::process::Command::new(&python_path);
+    cmd.args(["-m", "esphome", "version"]);
+    configure_no_window_command(&mut cmd);
+
+    cmd.output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Configure std::process::Command to not create a console window on Windows
+pub fn configure_no_window_command(cmd: &mut std::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW.0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Configure tokio::process::Command to not create a console window on Windows
+pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW.0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
 }
 
 /// Platform-specific initialization
