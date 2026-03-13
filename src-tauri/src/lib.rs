@@ -137,11 +137,11 @@ pub fn run(cli: Cli) {
         .setup(move |app| {
             info!("Setting up ESPHome Builder");
 
-            // Ensure user venv exists (copy from bundled on first run)
+            // Ensure user Python exists (copy from bundled on first run for non-Windows)
             // This must happen before AppState::new() so paths are correct
-            if let Err(e) = platform::ensure_user_venv(app.handle()) {
-                error!("Failed to set up user venv: {}", e);
-                // Continue anyway - might work with bundled venv
+            if let Err(e) = platform::ensure_user_python(app.handle()) {
+                error!("Failed to set up user Python: {}", e);
+                // Continue anyway - might work with bundled Python
             }
 
             // Initialize app state
