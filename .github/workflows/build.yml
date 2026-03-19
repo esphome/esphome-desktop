@@ -141,6 +141,41 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # The sharun-based truly-portable AppImage format does not include Tauri
+      # resources in the squashfs. We need to inject the Python bundle manually
+      # by extracting, copying, and repacking the AppImage.
+      - name: Inject Python into AppImage
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          echo "Found AppImage: $APPIMAGE"
+
+          # Get the offset where squashfs starts (runtime header size)
+          chmod +x "$APPIMAGE"
+          OFFSET=$("$APPIMAGE" --appimage-offset)
+
+          # Extract runtime header
+          dd if="$APPIMAGE" of=runtime.bin bs=1 count="$OFFSET"
+
+          # Extract squashfs contents
+          "$APPIMAGE" --appimage-extract
+
+          # Copy Python bundle into the resource directory where Tauri's
+          # resource_dir() resolves on Linux: exe_dir/../lib/<package_name>/
+          # The binary is at bin/esphome-desktop, so resources go to lib/esphome-desktop/
+          mkdir -p squashfs-root/lib/esphome-desktop
+          cp -r src-tauri/python squashfs-root/lib/esphome-desktop/python
+
+          # Repack: create new squashfs and combine with runtime
+          mksquashfs squashfs-root new.squashfs -root-owned -noappend -comp zstd
+          cat runtime.bin new.squashfs > "$APPIMAGE"
+          chmod +x "$APPIMAGE"
+
+          # Clean up
+          rm -rf squashfs-root runtime.bin new.squashfs
+
       # Upload artifacts
       - name: Upload NSIS
         if: matrix.platform == 'windows'
