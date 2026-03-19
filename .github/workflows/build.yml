@@ -141,40 +141,46 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      # The sharun-based truly-portable AppImage format does not include Tauri
-      # resources in the squashfs. We need to inject the Python bundle manually
-      # by extracting, copying, and repacking the AppImage.
+      # The sharun-based AppImage format uses DwarFS and does not include Tauri
+      # resources. The build leaves the AppDir intact, so we inject Python into
+      # it and repack with mkdwarfs + the uruntime header.
       - name: Inject Python into AppImage
         if: matrix.platform == 'linux'
         run: |
           set -euo pipefail
 
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Builder.AppDir"
           echo "Found AppImage: $APPIMAGE"
-
-          # Get the offset where squashfs starts (runtime header size)
-          chmod +x "$APPIMAGE"
-          OFFSET=$("$APPIMAGE" --appimage-offset)
-
-          # Extract runtime header
-          dd if="$APPIMAGE" of=runtime.bin bs=1 count="$OFFSET"
-
-          # Extract squashfs contents
-          "$APPIMAGE" --appimage-extract
+          echo "AppDir: $APPDIR"
 
           # Copy Python bundle into the resource directory where Tauri's
           # resource_dir() resolves on Linux: exe_dir/../lib/<package_name>/
           # The binary is at bin/esphome-desktop, so resources go to lib/esphome-desktop/
-          mkdir -p squashfs-root/lib/esphome-desktop
-          cp -r src-tauri/python squashfs-root/lib/esphome-desktop/python
+          mkdir -p "$APPDIR/lib/esphome-desktop"
+          cp -r src-tauri/python "$APPDIR/lib/esphome-desktop/python"
 
-          # Repack: create new squashfs and combine with runtime
-          mksquashfs squashfs-root new.squashfs -root-owned -noappend -comp zstd
-          cat runtime.bin new.squashfs > "$APPIMAGE"
+          # Extract the uruntime header from the existing AppImage
+          chmod +x "$APPIMAGE"
+          OFFSET=$("$APPIMAGE" --appimage-offset)
+          dd if="$APPIMAGE" of=runtime.bin bs="$OFFSET" count=1
+
+          # Download mkdwarfs (same version used by quick-sharun.sh)
+          DWARFS_VERSION="0.14.1"
+          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-x86_64"
+          curl -L -o mkdwarfs "$DWARFS_URL"
+          chmod +x mkdwarfs
+
+          # Repack: create DwarFS image from the AppDir and combine with runtime
+          ./mkdwarfs -i "$APPDIR" -o new.dwarfs --no-history -l7
+          cat runtime.bin new.dwarfs > "$APPIMAGE"
           chmod +x "$APPIMAGE"
 
+          # Show the result
+          echo "AppImage size: $(du -sh "$APPIMAGE" | cut -f1)"
+
           # Clean up
-          rm -rf squashfs-root runtime.bin new.squashfs
+          rm -f runtime.bin new.dwarfs mkdwarfs
 
       # Upload artifacts
       - name: Upload NSIS
