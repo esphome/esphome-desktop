@@ -13,8 +13,9 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 use tauri::{
-    async_runtime, AppHandle, Manager, RunEvent,
-    tray::{MouseButton, MouseButtonState, TrayIconEvent},
+    async_runtime,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, RunEvent,
 };
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -137,39 +138,79 @@ pub fn run(cli: Cli) {
         .setup(move |app| {
             info!("Setting up ESPHome Builder");
 
-            // Ensure user venv exists (copy from bundled on first run)
+            // Ensure user Python exists (copy from bundled on first run for non-Windows)
             // This must happen before AppState::new() so paths are correct
-            if let Err(e) = platform::ensure_user_venv(app.handle()) {
-                error!("Failed to set up user venv: {}", e);
-                // Continue anyway - might work with bundled venv
+            if let Err(e) = platform::ensure_user_python(app.handle()) {
+                error!("Failed to set up user Python: {}", e);
+                // Continue anyway - might work with bundled Python
             }
 
             // Initialize app state
             let state = Arc::new(AppState::new(app.handle())?);
             app.manage(state.clone());
 
-            // Build and set up the tray menu
-            let menu = build_tray_menu(app.handle(), &state)?;
+            // Build and set up the tray menu (if tray support is available)
+            let tray_available = if platform::is_tray_supported() {
+                // Create the tray icon programmatically.
+                // We wrap this in catch_unwind as a safety net: on Linux the
+                // underlying libappindicator-sys crate will panic!() if the
+                // shared library fails to load (e.g. GLIBC version mismatch).
+                let tray_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let icon = app
+                        .default_window_icon()
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("No default icon available for tray"))?;
 
-            // Get the tray icon handle and set up event handlers
-            if let Some(tray) = app.tray_by_id("main") {
-                tray.set_menu(Some(menu))?;
-                tray.set_tooltip(Some("ESPHome Builder"))?;
+                    let tray = TrayIconBuilder::with_id("main")
+                        .icon(icon)
+                        .icon_as_template(false)
+                        .tooltip("ESPHome Builder")
+                        .build(app)?;
 
-                // Set up click handler
-                let state_clone = state.clone();
-                let app_handle = app.handle().clone();
-                tray.on_tray_icon_event(move |_tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        handle_tray_click(&app_handle, &state_clone);
+                    let menu = build_tray_menu(app.handle(), &state)?;
+                    tray.set_menu(Some(menu))?;
+
+                    // Set up click handler
+                    let state_clone = state.clone();
+                    let app_handle = app.handle().clone();
+                    tray.on_tray_icon_event(move |_tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            handle_tray_click(&app_handle, &state_clone);
+                        }
+                    });
+
+                    Ok::<(), anyhow::Error>(())
+                }));
+
+                match tray_result {
+                    Ok(Ok(())) => {
+                        info!("System tray icon created successfully");
+                        true
                     }
-                });
-            }
+                    Ok(Err(e)) => {
+                        warn!("Failed to create system tray icon: {}. Running without tray.", e);
+                        false
+                    }
+                    Err(_) => {
+                        warn!(
+                            "System tray creation panicked (appindicator library not usable?). \
+                             Running without tray."
+                        );
+                        false
+                    }
+                }
+            } else {
+                warn!(
+                    "System tray not supported (appindicator library not found). \
+                     Running without tray."
+                );
+                false
+            };
 
             // Start the daemon
             let daemon_state = state.clone();
@@ -241,7 +282,9 @@ pub fn run(cli: Cli) {
 
             // Open dashboard on first start (after it's ready)
             let settings = async_runtime::block_on(state.settings.read());
-            let should_open = settings.open_on_start && !no_open_dashboard;
+            // Always open the dashboard if there's no tray (the user needs some
+            // way to interact with the app), unless explicitly suppressed.
+            let should_open = (settings.open_on_start || !tray_available) && !no_open_dashboard;
             if should_open {
                 let port = settings.port;
                 info!("Opening dashboard on startup");
