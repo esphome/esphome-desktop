@@ -191,33 +191,11 @@ impl UpdateChecker {
 
         let python_path = platform::get_python_path(app_handle)?;
 
-        // Try uv pip install first (faster), fall back to regular pip
-        let output = tokio::process::Command::new(&python_path)
-            .args([
-                "-m",
-                "uv",
-                "pip",
-                "install",
-                &format!("esphome=={}", version),
-            ])
-            .output()
-            .await;
+        let mut cmd = tokio::process::Command::new(&python_path);
+        cmd.args(["-m", "pip", "install", &format!("esphome=={}", version)]);
+        platform::configure_no_window_tokio_command(&mut cmd);
 
-        let output = match output {
-            Ok(o) if o.status.success() => {
-                info!("ESPHome updated successfully to {} (via uv)", version);
-                return Ok(());
-            }
-            _ => {
-                // Fall back to regular pip
-                debug!("uv not available, falling back to pip");
-                tokio::process::Command::new(&python_path)
-                    .args(["-m", "pip", "install", &format!("esphome=={}", version)])
-                    .output()
-                    .await
-                    .context("Failed to run pip install")?
-            }
-        };
+        let output = cmd.output().await.context("Failed to run pip install")?;
 
         if output.status.success() {
             info!("ESPHome updated successfully to {}", version);
@@ -233,10 +211,11 @@ impl UpdateChecker {
 fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let output = std::process::Command::new(&python_path)
-        .args(["-m", "esphome", "version"])
-        .output()
-        .context("Failed to run esphome version")?;
+    let mut cmd = std::process::Command::new(&python_path);
+    cmd.args(["-m", "esphome", "version"]);
+    platform::configure_no_window_command(&mut cmd);
+
+    let output = cmd.output().context("Failed to run esphome version")?;
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();

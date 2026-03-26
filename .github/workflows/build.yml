@@ -24,7 +24,7 @@ jobs:
           - platform: windows
             os: windows-latest
             target: windows-x64
-            bundles: msi,nsis
+            bundles: nsis
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
@@ -141,14 +141,49 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      # Upload artifacts
-      - name: Upload MSI
-        if: matrix.platform == 'windows'
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: windows-msi
-          path: src-tauri/target/release/bundle/msi/*.msi
+      # The sharun-based AppImage format uses DwarFS and does not include Tauri
+      # resources. The build leaves the AppDir intact, so we inject Python into
+      # it and repack with mkdwarfs + the uruntime header.
+      - name: Inject Python into AppImage
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
 
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Builder.AppDir"
+          echo "Found AppImage: $APPIMAGE"
+          echo "AppDir: $APPDIR"
+
+          # Copy Python bundle into the resource directory that
+          # get_bundled_resource_dir() resolves on Linux: exe_dir/../lib/esphome-desktop/
+          # The binary lives at bin/esphome-desktop, so this becomes lib/esphome-desktop/.
+          RESOURCE_DIR="$APPDIR/lib/esphome-desktop"
+          mkdir -p "$RESOURCE_DIR"
+          cp -r src-tauri/python "$RESOURCE_DIR/python"
+
+          # Extract the uruntime header from the existing AppImage
+          chmod +x "$APPIMAGE"
+          OFFSET=$("$APPIMAGE" --appimage-offset)
+          dd if="$APPIMAGE" of=runtime.bin bs="$OFFSET" count=1
+
+          # Download mkdwarfs (same version used by quick-sharun.sh)
+          DWARFS_VERSION="0.14.1"
+          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-x86_64"
+          curl -L -o mkdwarfs "$DWARFS_URL"
+          chmod +x mkdwarfs
+
+          # Repack: create DwarFS image from the AppDir and combine with runtime
+          ./mkdwarfs -i "$APPDIR" -o new.dwarfs --no-history -l7
+          cat runtime.bin new.dwarfs > "$APPIMAGE"
+          chmod +x "$APPIMAGE"
+
+          # Show the result
+          echo "AppImage size: $(du -sh "$APPIMAGE" | cut -f1)"
+
+          # Clean up
+          rm -f runtime.bin new.dwarfs mkdwarfs
+
+      # Upload artifacts
       - name: Upload NSIS
         if: matrix.platform == 'windows'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -232,7 +267,6 @@ jobs:
           ### Windows
           EOF
 
-          write_link "windows-msi" "MSI Installer"
           write_link "windows-nsis" "NSIS Installer"
 
           cat >> comment.md <<'EOF'

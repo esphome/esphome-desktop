@@ -8,11 +8,6 @@
   },
   "app": {
     "windows": [],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false,
-      "id": "main"
-    },
     "security": {
       "csp": null
     }
