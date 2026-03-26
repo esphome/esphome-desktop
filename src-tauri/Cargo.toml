@@ -63,7 +63,7 @@ cocoa = "0.26"
 windows = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Linux-specific dependencies if needed
+libloading = "0.8"
 
 [features]
 default = ["custom-protocol"]

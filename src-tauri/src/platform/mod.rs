@@ -259,4 +259,38 @@ mod linux {
     pub fn init() {
         // Linux-specific initialization
     }
+
+    /// Check if a usable appindicator library is available on this system.
+    ///
+    /// The `tray-icon` crate (via `libappindicator-sys`) will `panic!()` if none of
+    /// these shared libraries can be loaded.  We probe for them first so we can
+    /// degrade gracefully instead of crashing.
+    pub fn is_appindicator_available() -> bool {
+        use std::ffi::OsStr;
+        for name in &[
+            "libayatana-appindicator3.so.1",
+            "libappindicator3.so.1",
+            "libayatana-appindicator3.so",
+            "libappindicator3.so",
+        ] {
+            if unsafe { libloading::Library::new(OsStr::new(name)) }.is_ok() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Returns `true` on Linux when the appindicator library required for system
+/// tray support is available, and always `true` on non-Linux platforms (which
+/// use native APIs that don't require a separate shared library).
+pub fn is_tray_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::is_appindicator_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
 }
