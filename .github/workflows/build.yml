@@ -154,11 +154,12 @@ jobs:
           echo "Found AppImage: $APPIMAGE"
           echo "AppDir: $APPDIR"
 
-          # Copy Python bundle into the resource directory where Tauri's
-          # resource_dir() resolves on Linux: exe_dir/../lib/<package_name>/
-          # The binary is at bin/esphome-desktop, so resources go to lib/esphome-desktop/
-          mkdir -p "$APPDIR/lib/esphome-desktop"
-          cp -r src-tauri/python "$APPDIR/lib/esphome-desktop/python"
+          # Copy Python bundle into the resource directory that
+          # get_bundled_resource_dir() resolves on Linux: exe_dir/../lib/esphome-desktop/
+          # The binary lives at bin/esphome-desktop, so this becomes lib/esphome-desktop/.
+          RESOURCE_DIR="$APPDIR/lib/esphome-desktop"
+          mkdir -p "$RESOURCE_DIR"
+          cp -r src-tauri/python "$RESOURCE_DIR/python"
 
           # Extract the uruntime header from the existing AppImage
           chmod +x "$APPIMAGE"

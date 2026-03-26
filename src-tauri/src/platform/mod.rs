@@ -13,7 +13,7 @@ use tracing::debug;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
-use ::windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Get the application data directory
 ///
@@ -31,6 +31,66 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 
     debug!("Data directory: {:?}", path);
     Ok(path)
+}
+
+/// Get the bundled resource directory.
+///
+/// On Linux we resolve this ourselves so the path is always
+/// `<prefix>/lib/esphome-desktop/` — no spaces, no dependence on
+/// Tauri's `resource_dir()` which uses the product name ("ESPHome Builder").
+///
+/// The sharun-based AppImage format patches `/usr/…` paths in the binary
+/// with random `/tmp/…` tokens, so `std::env::current_exe()` returns a
+/// path like `/tmp/.mount_XXX/tmp/<rand>/esphome-desktop` instead of the
+/// real `<mount>/bin/esphome-desktop`.  We therefore prefer the `APPDIR`
+/// env var that sharun always sets, and fall back to exe-relative
+/// resolution for deb/AUR installs where `APPDIR` is absent.
+///
+/// On macOS and Windows, Tauri's `resource_dir()` works correctly.
+fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Prefer APPDIR (set by sharun-based AppImage at runtime)
+        if let Ok(appdir) = std::env::var("APPDIR") {
+            let resource_dir = PathBuf::from(&appdir).join("lib/esphome-desktop");
+            if resource_dir.is_dir() {
+                debug!("Bundled resource dir (APPDIR): {:?}", resource_dir);
+                return Ok(resource_dir);
+            }
+            debug!(
+                "APPDIR set to {:?} but {:?} does not exist",
+                appdir, resource_dir
+            );
+        }
+
+        // 2. Resolve relative to the real executable (deb/AUR installs)
+        let exe = std::env::current_exe().context("Failed to get current executable path")?;
+        let exe_dir = exe.parent().context("Failed to get executable directory")?;
+        // bin/esphome-desktop -> ../lib/esphome-desktop/
+        let resource_dir = exe_dir.join("../lib/esphome-desktop");
+        if let Ok(resolved) = resource_dir.canonicalize() {
+            debug!("Bundled resource dir (resolved): {:?}", resolved);
+            return Ok(resolved);
+        }
+
+        // 3. Fallback to Tauri's resource_dir for development builds
+        let fallback = app_handle
+            .path()
+            .resource_dir()
+            .context("Failed to get resource directory")?;
+        debug!("Bundled resource dir (fallback): {:?}", fallback);
+        Ok(fallback)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let resource_dir = app_handle
+            .path()
+            .resource_dir()
+            .context("Failed to get resource directory")?;
+        debug!("Bundled resource dir: {:?}", resource_dir);
+        Ok(resource_dir)
+    }
 }
 
 /// Get the path to the user Python executable
@@ -52,10 +112,7 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python (will be copied on first run)
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .context("Failed to get resource directory")?;
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
 
     #[cfg(target_os = "windows")]
     let bundled_python = resource_dir.join("python").join("python.exe");
@@ -94,10 +151,7 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python
-    let resource_dir = app_handle
-        .path()
-        .resource_dir()
-        .context("Failed to get resource directory")?;
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
 
     #[cfg(target_os = "windows")]
     let bundled_bin = resource_dir.join("python"); // On Windows, python.exe is in the root
@@ -112,10 +166,7 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
 pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        let resource_dir = app_handle
-            .path()
-            .resource_dir()
-            .context("Failed to get resource directory")?;
+        let resource_dir = get_bundled_resource_dir(app_handle)?;
         let bundled_python = resource_dir.join("python").join("python.exe");
 
         if !bundled_python.exists() {
@@ -136,11 +187,7 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
         let needs_copy = !python_check.exists();
 
         if needs_copy {
-            // Get bundled Python path
-            let resource_dir = app_handle
-                .path()
-                .resource_dir()
-                .context("Failed to get resource directory")?;
+            let resource_dir = get_bundled_resource_dir(app_handle)?;
             let bundled_python = resource_dir.join("python");
 
             if !bundled_python.exists() {
@@ -196,9 +243,7 @@ pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
     cmd.args(["-m", "esphome", "version"]);
     configure_no_window_command(&mut cmd);
 
-    cmd.output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Configure std::process::Command to not create a console window on Windows
