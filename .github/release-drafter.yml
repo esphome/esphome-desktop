@@ -26,6 +26,12 @@ version-resolver:
   default: patch
 
 template: |
+  > [!CAUTION]
+  > **DO NOT PUBLISH THIS RELEASE YET!**
+  > Build assets have not been uploaded. Wait for the build workflow to complete
+  > and this notice to be removed before publishing.
+  <!-- ASSETS_PENDING -->
+
   ## What's Changed
 
   $CHANGES
