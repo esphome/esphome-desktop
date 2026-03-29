@@ -317,8 +317,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ github.event.release.tag_name }}"
-          for file in artifacts/**/*; do
-            [ -f "$file" ] || continue
+          find artifacts -type f -print0 | while IFS= read -r -d '' file; do
             echo "Uploading: $file"
             gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
           done
@@ -331,13 +330,17 @@ jobs:
           release_id="${{ github.event.release.id }}"
           # Fetch current release body
           body=$(gh api "repos/${{ github.repository }}/releases/${release_id}" --jq '.body')
-          # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker)
+          # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker), if present
           new_body=$(echo "$body" | sed '/^> \[!CAUTION\]/,/<!-- ASSETS_PENDING -->/d')
+          # Ensure any remaining ASSETS_PENDING markers are removed even if the caution block was edited/removed
+          new_body=$(echo "$new_body" | sed 's/<!-- ASSETS_PENDING -->//g')
           # Remove any leading blank lines left behind
           new_body=$(echo "$new_body" | sed '/./,$!d')
-          # Update the release body while keeping it as a draft
-          gh api "repos/${{ github.repository }}/releases/${release_id}" \
-            --method PATCH \
-            --field "body=${new_body}" \
-            --field "draft=true" \
-            --silent
+          # Only update the release body if it has actually changed, keeping it as a draft
+          if [ "$new_body" != "$body" ]; then
+            gh api "repos/${{ github.repository }}/releases/${release_id}" \
+              --method PATCH \
+              --field "body=${new_body}" \
+              --field "draft=true" \
+              --silent
+          fi
