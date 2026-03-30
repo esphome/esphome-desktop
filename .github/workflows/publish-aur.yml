@@ -1,4 +1,4 @@
-name: Publish to AUR
+name: AUR
 
 on:
   pull_request:
@@ -76,7 +76,7 @@ jobs:
             aur-pkg/.SRCINFO
 
   publish:
-    name: Publish to AUR
+    name: Publish
     runs-on: ubuntu-latest
     needs: generate
     if: github.event_name == 'release'
