@@ -228,18 +228,11 @@ pub fn run(cli: Cli) {
                 }
             });
 
-            // Start update checker (check once at startup, then periodically)
+            // Start update checker (check after 30s, then every 24 hours)
             let update_state = state.clone();
             let update_app = app.handle().clone();
             async_runtime::spawn(async move {
-                // Wait a bit before first check
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                update_state
-                    .update_checker
-                    .check_and_notify(&update_app)
-                    .await;
-
-                // Check every 24 hours
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
                 loop {
                     interval.tick().await;
