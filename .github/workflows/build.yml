@@ -1,15 +1,14 @@
 name: Build
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.release.id || github.ref }}
   cancel-in-progress: true
 
 on:
-  push:
-    branches: [main, dev]
-    tags: ['v*']
   pull_request:
-    branches: [main, dev]
+    branches: [main]
+  release:
+    types: [created, edited]
   workflow_dispatch:
 
 env:
@@ -17,6 +16,14 @@ env:
 
 jobs:
   build:
+    # Only run for draft releases (skip if our own asset upload re-triggers the
+    # event — detected by the ASSETS_PENDING marker being absent from the body).
+    # For non-release events (push, PR, workflow_dispatch) always run.
+    if: >-
+      github.event_name != 'release' || (
+        github.event.release.draft == true &&
+        contains(github.event.release.body, '<!-- ASSETS_PENDING -->')
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +47,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # For draft release events the tag may not exist yet as a git ref,
+          # so check out the commit the release targets (usually main).
+          ref: ${{ github.event.release.target_commitish || github.ref }}
 
       # Linux-specific dependencies
       - name: Install Linux dependencies
@@ -79,7 +90,7 @@ jobs:
 
       # macOS-specific signing setup
       - name: Import Apple certificate
-        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'macos' && github.event_name == 'release'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -95,31 +106,31 @@ jobs:
           security list-keychain -d user -s $KEYCHAIN_PATH
 
       - name: Sign Python bundle binaries
-        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'macos' && github.event_name == 'release'
         run: ./build-scripts/sign_python_bundle.sh
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
 
       # Build step - Linux with special env var
       - name: Build (Linux CI)
-        if: matrix.platform == 'linux' && !startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'linux' && github.event_name != 'release'
         run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
       - name: Build (Linux Release)
-        if: matrix.platform == 'linux' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'linux' && github.event_name == 'release'
         run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
       # Build step - Windows CI
       - name: Build (Windows CI)
-        if: matrix.platform == 'windows' && !startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'windows' && github.event_name != 'release'
         run: cargo tauri build
 
       - name: Build (Windows Release with signing)
-        if: matrix.platform == 'windows' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'windows' && github.event_name == 'release'
         run: cargo tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -127,11 +138,11 @@ jobs:
 
       # Build step - macOS CI
       - name: Build (macOS CI)
-        if: matrix.platform == 'macos' && !startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'macos' && github.event_name != 'release'
         run: cargo tauri build
 
       - name: Build (macOS Release with signing)
-        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/')
+        if: matrix.platform == 'macos' && github.event_name == 'release'
         run: cargo tauri build
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -290,7 +301,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
 
     steps:
       - name: Download artifacts
@@ -298,10 +311,36 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create Release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
-        with:
-          files: artifacts/**/*
-          draft: true
+      - name: Upload assets to draft release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          find artifacts -type f -print0 | while IFS= read -r -d '' file; do
+            echo "Uploading: $file"
+            gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
+          done
+
+      - name: Remove assets-pending warning from release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_id="${{ github.event.release.id }}"
+          # Fetch current release body
+          body=$(gh api "repos/${{ github.repository }}/releases/${release_id}" --jq '.body')
+          # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker), if present
+          new_body=$(echo "$body" | sed '/^> \[!CAUTION\]/,/<!-- ASSETS_PENDING -->/d')
+          # Ensure any remaining ASSETS_PENDING markers are removed even if the caution block was edited/removed
+          new_body=$(echo "$new_body" | sed 's/<!-- ASSETS_PENDING -->//g')
+          # Remove any leading blank lines left behind
+          new_body=$(echo "$new_body" | sed '/./,$!d')
+          # Only update the release body if it has actually changed, keeping it as a draft
+          if [ "$new_body" != "$body" ]; then
+            gh api "repos/${{ github.repository }}/releases/${release_id}" \
+              --method PATCH \
+              --field "body=${new_body}" \
+              --field "draft=true" \
+              --silent
+          fi
