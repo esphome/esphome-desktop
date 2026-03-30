@@ -1,0 +1,82 @@
+name: Publish to AUR
+
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+
+jobs:
+  publish-aur:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Get release info
+        id: release
+        run: |
+          # Extract version from tag (remove 'v' prefix if present)
+          VERSION="${{ github.event.workflow_run.head_branch }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Construct deb URL from version
+          DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${VERSION}/ESPHome.Builder_${VERSION}_amd64.deb"
+          echo "deb_url=$DEB_URL" >> $GITHUB_OUTPUT
+
+      - name: Download deb and calculate checksum
+        id: checksum
+        run: |
+          curl -L -o /tmp/package.deb "${{ steps.release.outputs.deb_url }}"
+          SHA256SUM=$(sha256sum /tmp/package.deb | awk '{print $1}')
+          echo "sha256=$SHA256SUM" >> $GITHUB_OUTPUT
+
+      - name: Setup SSH for AUR
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+
+          # Configure git
+          git config --global user.name "esphomebot"
+          git config --global user.email "esphome@openhomefoundation.org"
+
+      - name: Clone AUR repository
+        run: |
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git clone ssh://aur@aur.archlinux.org/esphome-desktop-bin.git aur-repo
+
+      - name: Update PKGBUILD
+        working-directory: aur-repo
+        run: |
+          # Copy PKGBUILD from repo and replace SKIP with actual checksum
+          sed "s|sha256sums=('SKIP')|sha256sums=('${{ steps.checksum.outputs.sha256 }}')|g" \
+              "$GITHUB_WORKSPACE/packaging/aur/esphome-desktop-bin/PKGBUILD" > PKGBUILD
+
+      - name: Generate .SRCINFO
+        uses: docker://archlinux:base
+        with:
+          entrypoint: sh
+          args: |
+            -c "
+            pacman -Sy --noconfirm binutils fakeroot &&
+            useradd -m builder &&
+            cd ${{ github.workspace }}/aur-repo &&
+            su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+            "
+
+      - name: Commit and push to AUR
+        working-directory: aur-repo
+        run: |
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to version ${{ steps.release.outputs.version }}"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git push origin master
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/aur

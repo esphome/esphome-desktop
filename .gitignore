@@ -24,6 +24,14 @@ resources/
 # Build artifacts
 build/
 
+# Arch Linux packaging
+packaging/aur/**/src/
+packaging/aur/**/pkg/
+packaging/aur/**/*.pkg.tar*
+packaging/aur/**/*.src.tar*
+packaging/aur/**/*.deb
+packaging/aur/**/*.log
+
 # OS
 .DS_Store
 Thumbs.db
