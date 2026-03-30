@@ -1,57 +1,51 @@
 name: Publish to AUR
 
 on:
+  pull_request:
+    paths:
+      - "packaging/aur/**"
+      - ".github/workflows/publish-aur.yml"
   release:
     types: [published]
 
 jobs:
-  publish-aur:
+  generate:
+    name: Generate PKGBUILD
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Get release info
+      - name: Get version
         id: release
         run: |
-          # Extract version from tag (remove 'v' prefix if present)
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="0.0.0"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          # Construct deb URL from version
-          DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${VERSION}/ESPHome.Builder_${VERSION}_amd64.deb"
-          echo "deb_url=$DEB_URL" >> $GITHUB_OUTPUT
-
       - name: Download deb and calculate checksum
+        if: github.event_name == 'release'
         id: checksum
         run: |
-          curl -L -o /tmp/package.deb "${{ steps.release.outputs.deb_url }}"
+          DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${{ steps.release.outputs.version }}/ESPHome.Builder_${{ steps.release.outputs.version }}_amd64.deb"
+          curl -L -o /tmp/package.deb "$DEB_URL"
           SHA256SUM=$(sha256sum /tmp/package.deb | awk '{print $1}')
           echo "sha256=$SHA256SUM" >> $GITHUB_OUTPUT
 
-      - name: Setup SSH for AUR
+      - name: Prepare PKGBUILD
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
-
-          # Configure git
-          git config --global user.name "esphomebot"
-          git config --global user.email "esphome@openhomefoundation.org"
-
-      - name: Clone AUR repository
-        run: |
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git clone ssh://aur@aur.archlinux.org/esphome-desktop-bin.git aur-repo
-
-      - name: Update PKGBUILD
-        working-directory: aur-repo
-        run: |
-          # Copy PKGBUILD from repo and replace SKIP with actual checksum
-          sed "s|sha256sums=('SKIP')|sha256sums=('${{ steps.checksum.outputs.sha256 }}')|g" \
-              "$GITHUB_WORKSPACE/packaging/aur/esphome-desktop-bin/PKGBUILD" > PKGBUILD
+          mkdir -p aur-pkg
+          if [ "${{ github.event_name }}" = "release" ]; then
+            sed "s|sha256sums=('SKIP')|sha256sums=('${{ steps.checksum.outputs.sha256 }}')|g" \
+                packaging/aur/esphome-desktop-bin/PKGBUILD > aur-pkg/PKGBUILD
+          else
+            cp packaging/aur/esphome-desktop-bin/PKGBUILD aur-pkg/PKGBUILD
+          fi
 
       - name: Generate .SRCINFO
         uses: docker://archlinux:base
@@ -61,13 +55,65 @@ jobs:
             -c "
             pacman -Sy --noconfirm binutils fakeroot &&
             useradd -m builder &&
-            cd ${{ github.workspace }}/aur-repo &&
+            cd ${{ github.workspace }}/aur-pkg &&
             su builder -c 'makepkg --printsrcinfo' > .SRCINFO
             "
 
-      - name: Commit and push to AUR
-        working-directory: aur-repo
+      - name: Print generated files
         run: |
+          echo "=== PKGBUILD ==="
+          cat aur-pkg/PKGBUILD
+          echo ""
+          echo "=== .SRCINFO ==="
+          cat aur-pkg/.SRCINFO
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: aur-pkg
+          path: |
+            aur-pkg/PKGBUILD
+            aur-pkg/.SRCINFO
+
+  publish:
+    name: Publish to AUR
+    runs-on: ubuntu-latest
+    needs: generate
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Get version
+        id: release
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: aur-pkg
+          path: aur-pkg
+
+      - name: Setup SSH for AUR
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+
+          git config --global user.name "esphomebot"
+          git config --global user.email "esphome@openhomefoundation.org"
+
+      - name: Clone AUR repository
+        run: |
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git clone ssh://aur@aur.archlinux.org/esphome-desktop-bin.git aur-publish
+
+      - name: Commit and push to AUR
+        working-directory: aur-publish
+        run: |
+          cp ../aur-pkg/PKGBUILD PKGBUILD
+          cp ../aur-pkg/.SRCINFO .SRCINFO
           git add PKGBUILD .SRCINFO
           git commit -m "Update to version ${{ steps.release.outputs.version }}"
           GIT_SSH_COMMAND="ssh -i ~/.ssh/aur" git push origin master
