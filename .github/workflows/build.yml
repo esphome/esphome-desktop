@@ -39,9 +39,14 @@ jobs:
             os: macos-15
             target: macos-arm64
             bundles: dmg
+          - platform: macos
+            os: macos-15
+            target: macos-x64
+            rust_target: x86_64-apple-darwin
+            bundles: dmg
 
     runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.platform }}
+    name: Build ${{ matrix.target }}
 
     steps:
       - name: Checkout
@@ -64,11 +69,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       # Linux uses custom tauri-cli for portable AppImage
       - name: Install Tauri CLI (Linux - custom branch for portable AppImage)
@@ -138,11 +146,11 @@ jobs:
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
-        run: cargo tauri build
+        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
 
       - name: Build (macOS Release with signing)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: cargo tauri build
+        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -219,7 +227,7 @@ jobs:
         if: matrix.platform == 'macos'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
           archive: false
 
   # Comment on PR with artifact links

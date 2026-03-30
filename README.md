@@ -19,6 +19,7 @@ Download the latest release for your platform from the [Releases](https://github
 | Platform | Installer |
 |----------|-----------|
 | macOS (Apple Silicon) | `ESPHome Desktop_x.x.x_aarch64.dmg` |
+| macOS (Intel) | `ESPHome Desktop_x.x.x_x64.dmg` |
 | Windows | `ESPHome Desktop_x.x.x_x64-setup.exe` or `.msi` |
 | Linux | `esphome-desktop_x.x.x_amd64.AppImage` or `.deb` |
 
