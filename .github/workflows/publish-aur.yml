@@ -54,9 +54,8 @@ jobs:
           args: |
             -c "
             pacman -Sy --noconfirm binutils fakeroot &&
-            useradd -m builder &&
-            cd /github/workspace/aur-pkg &&
-            su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+            cd aur-pkg &&
+            makepkg --printsrcinfo > .SRCINFO
             "
 
       - name: Print generated files
