@@ -1,14 +1,17 @@
 name: Build
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.id || github.ref }}
+  # For workflow_run events (release builds), use a fixed group so new runs cancel
+  # in-flight ones. For PR/dispatch events, use the ref for per-branch concurrency.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_run' && 'release' || github.ref }}
   cancel-in-progress: true
 
 on:
   pull_request:
     branches: [main]
-  release:
-    types: [created, edited]
+  workflow_run:
+    workflows: ["Release Drafter"]
+    types: [completed]
   workflow_dispatch:
 
 env:
@@ -16,14 +19,10 @@ env:
 
 jobs:
   build:
-    # Only run for draft releases (skip if our own asset upload re-triggers the
-    # event — detected by the ASSETS_PENDING marker being absent from the body).
-    # For non-release events (push, PR, workflow_dispatch) always run.
+    # Only run release builds when the Release Drafter workflow succeeded.
     if: >-
-      github.event_name != 'release' || (
-        github.event.release.draft == true &&
-        contains(github.event.release.body, '<!-- ASSETS_PENDING -->')
-      )
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -48,9 +47,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # For draft release events the tag may not exist yet as a git ref,
-          # so check out the commit the release targets (usually main).
-          ref: ${{ github.event.release.target_commitish || github.ref }}
+          # For workflow_run events, check out the commit that triggered the
+          # Release Drafter workflow (the latest push to main).
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       # Linux-specific dependencies
       - name: Install Linux dependencies
@@ -90,7 +89,7 @@ jobs:
 
       # macOS-specific signing setup
       - name: Import Apple certificate
-        if: matrix.platform == 'macos' && github.event_name == 'release'
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -106,31 +105,31 @@ jobs:
           security list-keychain -d user -s $KEYCHAIN_PATH
 
       - name: Sign Python bundle binaries
-        if: matrix.platform == 'macos' && github.event_name == 'release'
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
         run: ./build-scripts/sign_python_bundle.sh
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
 
       # Build step - Linux with special env var
       - name: Build (Linux CI)
-        if: matrix.platform == 'linux' && github.event_name != 'release'
+        if: matrix.platform == 'linux' && github.event_name != 'workflow_run'
         run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
       - name: Build (Linux Release)
-        if: matrix.platform == 'linux' && github.event_name == 'release'
+        if: matrix.platform == 'linux' && github.event_name == 'workflow_run'
         run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
       # Build step - Windows CI
       - name: Build (Windows CI)
-        if: matrix.platform == 'windows' && github.event_name != 'release'
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
         run: cargo tauri build
 
       - name: Build (Windows Release with signing)
-        if: matrix.platform == 'windows' && github.event_name == 'release'
+        if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
         run: cargo tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -138,11 +137,11 @@ jobs:
 
       # Build step - macOS CI
       - name: Build (macOS CI)
-        if: matrix.platform == 'macos' && github.event_name != 'release'
+        if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
         run: cargo tauri build
 
       - name: Build (macOS Release with signing)
-        if: matrix.platform == 'macos' && github.event_name == 'release'
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
         run: cargo tauri build
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -301,11 +300,30 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: github.event_name == 'workflow_run'
     permissions:
       contents: write
 
     steps:
+      - name: Find draft release
+        id: find-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Find the most recent draft release
+          release_json=$(gh api repos/${{ github.repository }}/releases \
+            --jq '[.[] | select(.draft == true)] | first')
+          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
+            echo "::error::No draft release found"
+            exit 1
+          fi
+          release_id=$(echo "$release_json" | jq -r '.id')
+          tag_name=$(echo "$release_json" | jq -r '.tag_name')
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "Found draft release: $tag_name (ID: $release_id)"
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -316,7 +334,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.release.tag_name }}"
+          tag="${{ steps.find-release.outputs.tag_name }}"
           find artifacts -type f -print0 | while IFS= read -r -d '' file; do
             echo "Uploading: $file"
             gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
@@ -327,7 +345,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          release_id="${{ github.event.release.id }}"
+          release_id="${{ steps.find-release.outputs.release_id }}"
           # Fetch current release body
           body=$(gh api "repos/${{ github.repository }}/releases/${release_id}" --jq '.body')
           # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker), if present
