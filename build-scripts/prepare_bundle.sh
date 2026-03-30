@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prepare the Python environment with ESPHome pre-installed for bundling
+# Prepare the Python environment with ESPHome installed for bundling
 #
 # This script:
 # 1. Downloads python-build-standalone
@@ -110,7 +110,7 @@ echo "=== Upgrading pip ==="
 # Install ESPHome directly into standalone Python (no venv)
 echo ""
 echo "=== Installing ESPHome ==="
-"$PYTHON_DIR/$PYTHON_BIN" -m pip install --pre esphome
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install esphome
 
 # Verify ESPHome
 echo ""
