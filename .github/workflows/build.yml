@@ -337,6 +337,22 @@ jobs:
         with:
           path: artifacts
 
+      - name: Delete existing assets from draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_id="${{ steps.find-release.outputs.release_id }}"
+          # When the version/tag changes (e.g. from a patch to minor bump),
+          # filenames change too, leaving stale assets behind. Delete all
+          # existing assets so we only have the current build's files.
+          asset_ids=$(gh api "repos/${{ github.repository }}/releases/${release_id}/assets" \
+            --jq '.[].id')
+          for id in $asset_ids; do
+            echo "Deleting asset $id"
+            gh api "repos/${{ github.repository }}/releases/assets/${id}" --method DELETE --silent
+          done
+
       - name: Upload assets to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
