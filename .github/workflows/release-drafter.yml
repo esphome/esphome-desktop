@@ -45,6 +45,10 @@ jobs:
         run: |
           sed -i "s/\"version\": .*/\"version\": \"${{ steps.version.outputs.version }}\",/g" src-tauri/tauri.conf.json
 
+      - name: Set PKGBUILD versions
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/g" packaging/aur/esphome-desktop-bin/PKGBUILD
+
       - name: Update Cargo.lock
         run: |
           cd src-tauri
