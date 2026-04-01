@@ -1,0 +1,12 @@
+---
+blank_issues_enabled: false
+contact_links:
+  - name: Report an issue with ESPHome (firmware, compilation, validation)
+    url: https://github.com/esphome/esphome/issues/new/choose
+    about: For issues with ESPHome firmware, compilation, validation, or components.
+  - name: Report an issue with the ESPHome documentation
+    url: https://github.com/esphome/esphome-docs/issues/new/choose
+    about: Report an issue with the ESPHome documentation.
+  - name: Make a Feature Request
+    url: https://github.com/orgs/esphome/discussions
+    about: Please create feature requests in the dedicated feature request tracker.
