@@ -13,13 +13,13 @@ use tracing::debug;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
-use ::windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Get the application data directory
 ///
 /// - macOS: `~/Library/Application Support/ESPHome Builder/`
-/// - Windows: `%APPDATA%\ESPHome Builder\`
-/// - Linux: `~/.local/share/esphome-desktop/`
+/// - Windows: `%LOCALAPPDATA%\ESPHome Builder\`
+/// - Linux: `~/.local/share/io.esphome.builder/`
 pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let path = app_handle
         .path()
