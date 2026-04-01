@@ -1,0 +1,69 @@
+name: Report an issue with ESPHome Builder
+description: Report a bug with the ESPHome Builder desktop application.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue form is for reporting bugs with the **ESPHome Builder desktop application** only!
+
+        - For issues with ESPHome firmware compilation, validation, or components, please [report them here][esphome].
+        - For feature requests or enhancements, please [request them here][fr].
+
+        [esphome]: https://github.com/esphome/esphome/issues/new/choose
+        [fr]: https://github.com/orgs/esphome/discussions
+  - type: textarea
+    validations:
+      required: true
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        Describe the issue you are experiencing here to communicate to the
+        maintainers. Tell us what you were trying to do and what happened.
+
+        Provide a clear and concise description of what the problem is.
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Environment
+  - type: input
+    id: version
+    validations:
+      required: true
+    attributes:
+      label: Which version of ESPHome Builder has the issue?
+      description: >
+        The version shown in the app, e.g. 0.5.1.
+  - type: dropdown
+    validations:
+      required: true
+    id: platform
+    attributes:
+      label: What platform are you using?
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows
+        - Linux (AppImage)
+        - Linux (deb)
+
+  - type: markdown
+    attributes:
+      value: |
+        # Details
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything in the logs that might be useful for us?
+      description: >
+        Logs can be found via the tray menu under "View Logs...".
+      render: txt
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional information
+      description: >
+        If you have any additional information for us, use the field below.
+        Please note, you can attach screenshots or screen recordings here, by
+        dragging and dropping files in the field below.

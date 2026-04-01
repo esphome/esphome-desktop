@@ -1,4 +1,4 @@
-# ESPHome Desktop
+# ESPHome Builder
 
 A cross-platform desktop application that bundles ESPHome with Python and runs the dashboard as a background daemon with system tray integration.
 
@@ -7,29 +7,28 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 - **System Tray Integration**: Runs in the background with a system tray icon
 - **Single-Instance**: Only one instance runs at a time; launching again opens the browser
 - **Auto-Updates**: Checks for ESPHome updates and notifies you
-- **Cross-Platform**: Native installers for macOS (DMG), Windows (MSI/NSIS), and Linux (AppImage/deb)
+- **Cross-Platform**: Native installers for macOS (DMG), Windows (NSIS), and Linux (AppImage/deb)
 - **Bundled Python**: Includes a full Python 3.13 runtime - no system Python required
 
 ## Installation
 
 ### Pre-built Installers
 
-Download the latest release for your platform from the [Releases](https://github.com/esphome/esphome-desktop/releases) page.
+Download the latest release for your platform from the [Releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
 
 | Platform | Installer |
 |----------|-----------|
-| macOS (Apple Silicon) | `ESPHome Desktop_x.x.x_aarch64.dmg` |
-| macOS (Intel) | `ESPHome Desktop_x.x.x_x64.dmg` |
-| Windows | `ESPHome Desktop_x.x.x_x64-setup.exe` or `.msi` |
-| Linux | `esphome-desktop_x.x.x_amd64.AppImage` or `.deb` |
+| macOS (Apple Silicon) | `ESPHome.Builder_x.x.x_aarch64.dmg` |
+| macOS (Intel) | `ESPHome.Builder_x.x.x_x64.dmg` |
+| Windows | `ESPHome.Builder_x.x.x_x64-setup.exe` |
+| Linux | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb` |
 
 ### First Run
 
-On first launch, ESPHome Desktop will:
-1. Create a virtual environment with the bundled Python
-2. Install ESPHome and its dependencies
-3. Start the dashboard
-4. Open your browser to `http://localhost:6052`
+On first launch, ESPHome Builder will:
+1. Install ESPHome and its dependencies
+2. Start the dashboard
+3. Open your browser to `http://localhost:6052`
 
 This initial setup may take a few minutes depending on your internet connection.
 
@@ -37,7 +36,7 @@ This initial setup may take a few minutes depending on your internet connection.
 
 ### Starting the App
 
-Simply launch ESPHome Desktop. It will:
+Simply launch ESPHome Builder. It will:
 - Start the ESPHome dashboard in the background
 - Show a system tray icon
 - Open your browser to the dashboard
@@ -53,18 +52,17 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
-- **Quit** - Stop the daemon and exit
+- **Quit ESPHome** - Stop the daemon and exit
 
 ### Data Locations
 
 | Platform | Location |
 |----------|----------|
-| macOS | `~/Library/Application Support/ESPHome Desktop/` |
-| Windows | `%APPDATA%\ESPHome Desktop\` |
-| Linux | `~/.local/share/esphome-desktop/` |
+| macOS | `~/Library/Application Support/ESPHome Builder/` |
+| Windows | `%LOCALAPPDATA%\ESPHome Builder\` |
+| Linux | `~/.local/share/io.esphome.builder/` |
 
 This directory contains:
-- `venv/` - Python virtual environment with ESPHome
 - `config/` - Your ESPHome configuration files (default location)
 - `logs/` - Application logs
 - `settings.json` - User preferences
@@ -74,7 +72,6 @@ This directory contains:
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (1.77.2 or later)
-- [Node.js](https://nodejs.org/) (20.x or later)
 - Platform-specific dependencies:
   - **macOS**: Xcode Command Line Tools
   - **Windows**: Visual Studio Build Tools
