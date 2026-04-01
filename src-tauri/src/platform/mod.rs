@@ -13,7 +13,7 @@ use tracing::debug;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use ::windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Get the application data directory
 ///
