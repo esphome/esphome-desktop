@@ -34,7 +34,12 @@ jobs:
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
-            bundles: appimage,deb
+            bundles: appimage,deb,rpm
+            tauri_branch: feat/truly-portable-appimage
+          - platform: linux
+            os: ubuntu-22.04
+            target: linux-x64
+            bundles: rpm
           - platform: macos
             os: macos-15
             target: macos-arm64
@@ -78,18 +83,15 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.target }}
 
-      # Linux uses custom tauri-cli for portable AppImage
-      - name: Install Tauri CLI (Linux - custom branch for portable AppImage)
-        if: matrix.platform == 'linux'
-        run: |
-          # Use custom tauri-cli branch with truly portable AppImage format
-          # This avoids linuxdeploy issues with vendored Python libraries
-          cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/truly-portable-appimage --locked --force
-
-      # Windows and macOS use standard tauri-cli
       - name: Install Tauri CLI
-        if: matrix.platform != 'linux'
-        run: cargo install tauri-cli --locked
+        run: |
+          if [[ -n "${{ matrix.tauri_branch }}" ]]; then
+            # Custom tauri-cli branch (e.g. for portable AppImage format)
+            cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch ${{ matrix.tauri_branch }} --locked --force
+          else
+            cargo install tauri-cli --locked
+          fi
+        shell: bash
 
       - name: Prepare Python bundle
         shell: bash
@@ -163,7 +165,7 @@ jobs:
       # resources. The build leaves the AppDir intact, so we inject Python into
       # it and repack with mkdwarfs + the uruntime header.
       - name: Inject Python into AppImage
-        if: matrix.platform == 'linux'
+        if: contains(matrix.bundles, 'appimage')
         run: |
           set -euo pipefail
 
@@ -203,28 +205,35 @@ jobs:
 
       # Upload artifacts
       - name: Upload NSIS
-        if: matrix.platform == 'windows'
+        if: contains(matrix.bundles, 'nsis')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           path: src-tauri/target/release/bundle/nsis/*.exe
           archive: false
 
       - name: Upload AppImage
-        if: matrix.platform == 'linux'
+        if: contains(matrix.bundles, 'appimage')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           path: src-tauri/target/release/bundle/appimage/*.AppImage
           archive: false
 
       - name: Upload deb
-        if: matrix.platform == 'linux'
+        if: contains(matrix.bundles, 'deb')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           path: src-tauri/target/release/bundle/deb/*.deb
           archive: false
 
+      - name: Upload RPM
+        if: contains(matrix.bundles, 'rpm')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: src-tauri/target/release/bundle/rpm/*.rpm
+          archive: false
+
       - name: Upload DMG
-        if: matrix.platform == 'macos'
+        if: contains(matrix.bundles, 'dmg')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
@@ -283,6 +292,7 @@ jobs:
 
           write_links "AppImage"
           write_links "deb"
+          write_links "rpm"
 
           cat >> comment.md <<'EOF'
 
