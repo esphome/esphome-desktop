@@ -34,12 +34,12 @@ jobs:
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
-            bundles: appimage,deb,rpm
+            bundles: appimage
             tauri_branch: feat/truly-portable-appimage
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
-            bundles: rpm
+            bundles: deb,rpm
           - platform: macos
             os: macos-15
             target: macos-arm64
