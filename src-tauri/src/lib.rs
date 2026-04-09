@@ -229,6 +229,7 @@ pub fn run(cli: Cli) {
             });
 
             // Start update checker (check after 30s, then every 24 hours)
+            // The dev channel skips automatic update checks entirely.
             let update_state = state.clone();
             let update_app = app.handle().clone();
             async_runtime::spawn(async move {
@@ -236,9 +237,13 @@ pub fn run(cli: Cli) {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
                 loop {
                     interval.tick().await;
+                    let channel = {
+                        let settings = update_state.settings.read().await;
+                        settings.release_channel
+                    };
                     update_state
                         .update_checker
-                        .check_and_notify(&update_app)
+                        .check_and_notify(&update_app, channel)
                         .await;
                 }
             });

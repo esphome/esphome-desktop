@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 use tauri::AppHandle;
 use tracing::{debug, info};
@@ -12,6 +13,34 @@ use crate::platform;
 
 /// Default dashboard port
 const DEFAULT_PORT: u16 = 6052;
+
+/// ESPHome release channel
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    /// Latest stable release from PyPI
+    Stable,
+    /// Latest beta/pre-release from PyPI
+    Beta,
+    /// Latest development build from GitHub (no auto-updates)
+    Dev,
+}
+
+impl Default for ReleaseChannel {
+    fn default() -> Self {
+        Self::Stable
+    }
+}
+
+impl fmt::Display for ReleaseChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stable => write!(f, "Stable"),
+            Self::Beta => write!(f, "Beta"),
+            Self::Dev => write!(f, "Dev"),
+        }
+    }
+}
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +60,10 @@ pub struct Settings {
     /// Check for updates automatically
     #[serde(default = "default_true")]
     pub check_updates: bool,
+
+    /// Release channel (stable, beta, or dev)
+    #[serde(default)]
+    pub release_channel: ReleaseChannel,
 
     /// Installed ESPHome version (detected from venv)
     #[serde(skip)]
@@ -52,6 +85,7 @@ impl Default for Settings {
             config_dir: None,
             open_on_start: true,
             check_updates: true,
+            release_channel: ReleaseChannel::default(),
             installed_version: None,
         }
     }
@@ -114,9 +148,7 @@ fn detect_installed_version(app_handle: &AppHandle) -> Result<String> {
     let output = cmd.output().context("Failed to run esphome version")?;
 
     if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         // Extract just the version number (e.g., "2024.1.0" from "Version: 2024.1.0")
         let version = version
             .strip_prefix("Version: ")
