@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tauri::{
     async_runtime,
-    menu::{CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
+    menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
     AppHandle,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -58,16 +58,13 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .build(app_handle)?;
     let _ = VERSION_ITEM.set(version_item.clone());
 
-    // Create release channel check items
+    // Create release channel items
     let current_channel = settings.release_channel;
-    let channel_stable = CheckMenuItemBuilder::with_id(ids::CHANNEL_STABLE, "Stable")
-        .checked(current_channel == ReleaseChannel::Stable)
+    let channel_stable = MenuItemBuilder::with_id(ids::CHANNEL_STABLE, channel_label("Stable", current_channel == ReleaseChannel::Stable))
         .build(app_handle)?;
-    let channel_beta = CheckMenuItemBuilder::with_id(ids::CHANNEL_BETA, "Beta")
-        .checked(current_channel == ReleaseChannel::Beta)
+    let channel_beta = MenuItemBuilder::with_id(ids::CHANNEL_BETA, channel_label("Beta", current_channel == ReleaseChannel::Beta))
         .build(app_handle)?;
-    let channel_dev = CheckMenuItemBuilder::with_id(ids::CHANNEL_DEV, "Dev")
-        .checked(current_channel == ReleaseChannel::Dev)
+    let channel_dev = MenuItemBuilder::with_id(ids::CHANNEL_DEV, channel_label("Dev", current_channel == ReleaseChannel::Dev))
         .build(app_handle)?;
 
     // Store channel items for later updates
@@ -129,12 +126,12 @@ static STATUS_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceL
 /// Version menu item stored globally for updates
 static VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
-/// Release channel check items stored globally for radio-button behavior
-static CHANNEL_STABLE_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> =
+/// Release channel items stored globally for radio-button behavior
+static CHANNEL_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
-static CHANNEL_BETA_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> =
+static CHANNEL_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
-static CHANNEL_DEV_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> =
+static CHANNEL_DEV_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 
 /// Update the tray status text
@@ -157,16 +154,25 @@ pub fn update_version(version: &str) {
     }
 }
 
-/// Update the check marks on channel menu items to reflect the given channel
+/// Format a channel menu item label with a radio-button prefix.
+fn channel_label(name: &str, selected: bool) -> String {
+    if selected {
+        format!("● {}", name)
+    } else {
+        format!("○ {}", name)
+    }
+}
+
+/// Update the channel menu item labels to reflect the given channel
 fn update_channel_checks(channel: ReleaseChannel) {
     if let Some(item) = CHANNEL_STABLE_ITEM.get() {
-        let _ = item.set_checked(channel == ReleaseChannel::Stable);
+        let _ = item.set_text(channel_label("Stable", channel == ReleaseChannel::Stable));
     }
     if let Some(item) = CHANNEL_BETA_ITEM.get() {
-        let _ = item.set_checked(channel == ReleaseChannel::Beta);
+        let _ = item.set_text(channel_label("Beta", channel == ReleaseChannel::Beta));
     }
     if let Some(item) = CHANNEL_DEV_ITEM.get() {
-        let _ = item.set_checked(channel == ReleaseChannel::Dev);
+        let _ = item.set_text(channel_label("Dev", channel == ReleaseChannel::Dev));
     }
 }
 
@@ -305,9 +311,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 };
 
                 if new_channel == old_channel {
-                    // User clicked the already-selected channel; restore the check mark
-                    // (CheckMenuItem auto-toggled it off before we got here)
-                    update_channel_checks(old_channel);
                     return;
                 }
 
