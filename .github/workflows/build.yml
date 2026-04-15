@@ -206,35 +206,35 @@ jobs:
       # Upload artifacts
       - name: Upload NSIS
         if: contains(matrix.bundles, 'nsis')
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/nsis/*.exe
           archive: false
 
       - name: Upload AppImage
         if: contains(matrix.bundles, 'appimage')
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/appimage/*.AppImage
           archive: false
 
       - name: Upload deb
         if: contains(matrix.bundles, 'deb')
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/deb/*.deb
           archive: false
 
       - name: Upload RPM
         if: contains(matrix.bundles, 'rpm')
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/rpm/*.rpm
           archive: false
 
       - name: Upload DMG
         if: contains(matrix.bundles, 'dmg')
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
           archive: false
