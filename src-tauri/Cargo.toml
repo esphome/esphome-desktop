@@ -54,7 +54,7 @@ dirs = "5"
 
 # Platform-specific
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
