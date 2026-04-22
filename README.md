@@ -58,7 +58,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 
 | Platform | Location |
 |----------|----------|
-| macOS | `~/Library/Application Support/ESPHome Builder/` |
+| macOS | `~/Library/Application Support/io.esphome.builder/` |
 | Windows | `%LOCALAPPDATA%\ESPHome Builder\` |
 | Linux | `~/.local/share/io.esphome.builder/` |
 
