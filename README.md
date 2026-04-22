@@ -56,16 +56,22 @@ Right-click (or left-click on some platforms) the tray icon to access:
 
 ### Data Locations
 
+Application data (bundled Python, logs, settings):
+
 | Platform | Location |
 |----------|----------|
 | macOS | `~/Library/Application Support/io.esphome.builder/` |
-| Windows | `%LOCALAPPDATA%\ESPHome Builder\` |
+| Windows | `%APPDATA%\io.esphome.builder\` |
 | Linux | `~/.local/share/io.esphome.builder/` |
 
 This directory contains:
-- `config/` - Your ESPHome configuration files (default location)
+- `python/` - Bundled Python runtime
 - `logs/` - Application logs
 - `settings.json` - User preferences
+
+Your ESPHome configuration files are stored at `~/esphome/` on all platforms by default (configurable via `config_dir` in `settings.json`).
+
+On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Builder\`.
 
 ## Building from Source
 
