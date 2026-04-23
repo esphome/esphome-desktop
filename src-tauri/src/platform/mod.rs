@@ -17,8 +17,8 @@ use ::windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// Get the application data directory
 ///
-/// - macOS: `~/Library/Application Support/ESPHome Builder/`
-/// - Windows: `%LOCALAPPDATA%\ESPHome Builder\`
+/// - macOS: `~/Library/Application Support/io.esphome.builder/`
+/// - Windows: `%APPDATA%\io.esphome.builder\`
 /// - Linux: `~/.local/share/io.esphome.builder/`
 pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let path = app_handle
