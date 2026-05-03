@@ -118,6 +118,16 @@ impl DaemonManager {
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
 
+        // On Windows, force the spawned Python (and any subprocesses it
+        // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.
+        // Without this, Python falls back to the locale codec (cp1252 on
+        // Western installs) when stdout is a redirected pipe — which the
+        // dashboard always is — and any non-ASCII output (e.g. the wifi
+        // signal-bar block characters U+2582..U+2588) raises
+        // UnicodeEncodeError and drops the device's log connection.
+        #[cfg(target_os = "windows")]
+        cmd.env("PYTHONIOENCODING", "utf-8");
+
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
 
         let mut process = self.process.lock().await;
