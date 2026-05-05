@@ -12,7 +12,7 @@ use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
 
 use crate::platform;
-use crate::settings::ReleaseChannel;
+use crate::settings::{Backend, ReleaseChannel};
 
 /// PyPI package info response (used for stable channel)
 #[derive(Debug, Deserialize)]
@@ -370,6 +370,196 @@ impl UpdateChecker {
         }
     }
 
+    /// Install or upgrade the `esphome-device-builder` package from PyPI.
+    /// Pass `Backend::BuilderBeta` to allow pre-releases (`pip install --pre`),
+    /// `Backend::BuilderStable` for stable-only. Calling with `Backend::Classic`
+    /// is a no-op.
+    pub async fn install_device_builder(
+        &self,
+        app_handle: &AppHandle,
+        backend: Backend,
+    ) -> Result<()> {
+        if !backend.is_builder() {
+            return Ok(());
+        }
+        let python_path = platform::get_python_path(app_handle)?;
+
+        info!("Installing/upgrading esphome-device-builder ({})", backend);
+
+        let mut args: Vec<&str> = vec!["-m", "pip", "install", "--upgrade"];
+        if backend == Backend::BuilderBeta {
+            args.push("--pre");
+        }
+        args.push("esphome-device-builder");
+
+        let mut cmd = tokio::process::Command::new(&python_path);
+        cmd.args(&args);
+        platform::configure_no_window_tokio_command(&mut cmd);
+
+        let output = cmd.output().await.context("Failed to run pip install")?;
+
+        if output.status.success() {
+            info!("esphome-device-builder installed/upgraded successfully");
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr)
+        }
+    }
+
+    /// Query PyPI for the latest available `esphome-device-builder` version.
+    /// `Backend::BuilderStable` returns the latest final release; `BuilderBeta`
+    /// returns the latest version including pre-releases. Returns `Ok(None)`
+    /// if the backend is not a builder variant.
+    pub async fn check_device_builder(&self, backend: Backend) -> Result<Option<String>> {
+        if !backend.is_builder() {
+            return Ok(None);
+        }
+        let response: PyPIResponse = self
+            .client
+            .get("https://pypi.org/pypi/esphome-device-builder/json")
+            .send()
+            .await
+            .context("Failed to fetch PyPI info for esphome-device-builder")?
+            .json()
+            .await
+            .context("Failed to parse PyPI response for esphome-device-builder")?;
+
+        let include_pre = backend == Backend::BuilderBeta;
+        let latest = if include_pre {
+            find_latest_any(&response.releases).unwrap_or(response.info.version)
+        } else {
+            response.info.version
+        };
+        info!(
+            "Latest esphome-device-builder version on PyPI ({}): {}",
+            backend, latest
+        );
+        Ok(Some(latest))
+    }
+
+    /// Background check for esphome-device-builder updates. Emits a
+    /// notification if a newer version is available. No-op for non-builder
+    /// backends.
+    pub async fn check_and_notify_device_builder(
+        &self,
+        app_handle: &AppHandle,
+        backend: Backend,
+    ) {
+        if !backend.is_builder() {
+            return;
+        }
+
+        let installed = match get_installed_device_builder_version(app_handle) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!("esphome-device-builder version not detected: {}", e);
+                return;
+            }
+        };
+
+        let latest = match self.check_device_builder(backend).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("Device-builder update check failed: {}", e);
+                return;
+            }
+        };
+
+        if is_newer_version(&latest, &installed) {
+            info!(
+                "Device-builder update available: {} -> {} (installed: {})",
+                installed, latest, installed
+            );
+
+            if let Err(e) = app_handle
+                .notification()
+                .builder()
+                .title("ESPHome Device Builder Update Available")
+                .body(format!(
+                    "ESPHome Device Builder {} is available (you have {}). \
+                     Click 'Check for Updates' in the menu to update.",
+                    latest, installed
+                ))
+                .show()
+            {
+                error!("Failed to show notification: {}", e);
+            }
+        } else {
+            debug!("ESPHome Device Builder is up to date ({})", installed);
+        }
+    }
+
+    /// User-initiated check for esphome-device-builder updates. Returns
+    /// `Some(version)` if the user wants to update, `None` otherwise.
+    /// Stays silent when there is no update — the caller is responsible
+    /// for the "everything is up to date" UX.
+    pub async fn check_device_builder_for_user(
+        &self,
+        app_handle: &AppHandle,
+        backend: Backend,
+    ) -> Option<String> {
+        if !backend.is_builder() {
+            return None;
+        }
+
+        let installed = match get_installed_device_builder_version(app_handle) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "Could not detect installed esphome-device-builder version: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let latest = match self.check_device_builder(backend).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return None,
+            Err(e) => {
+                warn!("Device-builder update check failed: {}", e);
+                return None;
+            }
+        };
+
+        if !is_newer_version(&latest, &installed) {
+            info!("ESPHome Device Builder is up to date ({})", installed);
+            return None;
+        }
+
+        info!(
+            "Device-builder update available: {} -> {} (installed: {})",
+            installed, latest, installed
+        );
+
+        let dialog_app = app_handle.clone();
+        let msg = format!(
+            "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
+            latest, installed
+        );
+        let should_update = tokio::task::spawn_blocking(move || {
+            dialog_app
+                .dialog()
+                .message(msg)
+                .title("Device Builder Update Available")
+                .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+                    "Update Now".to_string(),
+                    "Later".to_string(),
+                ))
+                .blocking_show()
+        })
+        .await
+        .unwrap_or(false);
+
+        if should_update {
+            Some(latest)
+        } else {
+            None
+        }
+    }
+
     /// Switch to a new release channel by installing the appropriate version.
     /// Returns Ok(()) on success.
     pub async fn switch_channel(
@@ -455,6 +645,51 @@ fn has_beta_suffix(version: &str) -> bool {
         }
     }
     false
+}
+
+/// Find the highest version across all releases on PyPI, including
+/// pre-releases. Used for the "beta" device-builder channel where any
+/// pre-release counts (a/b/rc/dev), not just `bN` like ESPHome itself.
+fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+    let mut best: Option<String> = None;
+    for v in releases.keys() {
+        if !v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            continue;
+        }
+        match &best {
+            None => best = Some(v.clone()),
+            Some(curr) => {
+                if is_newer_version(v, curr) {
+                    best = Some(v.clone());
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Get the installed `esphome-device-builder` package version.
+pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<String> {
+    let python_path = platform::get_python_path(app_handle)?;
+
+    let mut cmd = std::process::Command::new(&python_path);
+    cmd.args([
+        "-c",
+        "from importlib.metadata import version; print(version('esphome-device-builder'))",
+    ]);
+    platform::configure_no_window_command(&mut cmd);
+
+    let output = cmd.output().context("Failed to run python")?;
+
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            anyhow::bail!("esphome-device-builder version is empty");
+        }
+        Ok(version)
+    } else {
+        anyhow::bail!("esphome-device-builder not installed")
+    }
 }
 
 /// Get the installed ESPHome version
