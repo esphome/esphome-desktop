@@ -10,9 +10,10 @@ use tauri::{
     AppHandle,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
-use crate::settings::ReleaseChannel;
+use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
 /// Menu item IDs
@@ -31,6 +32,11 @@ mod ids {
     pub const CHANNEL_STABLE: &str = "channel_stable";
     pub const CHANNEL_BETA: &str = "channel_beta";
     pub const CHANNEL_DEV: &str = "channel_dev";
+
+    // Backend submenu items
+    pub const BACKEND_CLASSIC: &str = "backend_classic";
+    pub const BACKEND_BUILDER_STABLE: &str = "backend_builder_stable";
+    pub const BACKEND_BUILDER_BETA: &str = "backend_builder_beta";
 }
 
 /// Build the tray menu
@@ -60,11 +66,11 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Create release channel items
     let current_channel = settings.release_channel;
-    let channel_stable = MenuItemBuilder::with_id(ids::CHANNEL_STABLE, channel_label("Stable", current_channel == ReleaseChannel::Stable))
+    let channel_stable = MenuItemBuilder::with_id(ids::CHANNEL_STABLE, radio_label("Stable", current_channel == ReleaseChannel::Stable))
         .build(app_handle)?;
-    let channel_beta = MenuItemBuilder::with_id(ids::CHANNEL_BETA, channel_label("Beta", current_channel == ReleaseChannel::Beta))
+    let channel_beta = MenuItemBuilder::with_id(ids::CHANNEL_BETA, radio_label("Beta", current_channel == ReleaseChannel::Beta))
         .build(app_handle)?;
-    let channel_dev = MenuItemBuilder::with_id(ids::CHANNEL_DEV, channel_label("Dev", current_channel == ReleaseChannel::Dev))
+    let channel_dev = MenuItemBuilder::with_id(ids::CHANNEL_DEV, radio_label("Dev", current_channel == ReleaseChannel::Dev))
         .build(app_handle)?;
 
     // Store channel items for later updates
@@ -76,6 +82,41 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&channel_stable)
         .item(&channel_beta)
         .item(&channel_dev)
+        .build()?;
+
+    // Backend submenu items
+    let current_backend = settings.backend;
+    let backend_classic = MenuItemBuilder::with_id(
+        ids::BACKEND_CLASSIC,
+        radio_label("Classic ESPHome Dashboard", current_backend == Backend::Classic),
+    )
+    .build(app_handle)?;
+    let backend_builder_stable = MenuItemBuilder::with_id(
+        ids::BACKEND_BUILDER_STABLE,
+        radio_label(
+            "ESPHome Builder (stable)",
+            current_backend == Backend::BuilderStable,
+        ),
+    )
+    .enabled(false) // TODO: remove once a stable release of esphome-device-builder is out
+    .build(app_handle)?;
+    let backend_builder_beta = MenuItemBuilder::with_id(
+        ids::BACKEND_BUILDER_BETA,
+        radio_label(
+            "ESPHome Builder (beta)",
+            current_backend == Backend::BuilderBeta,
+        ),
+    )
+    .build(app_handle)?;
+
+    let _ = BACKEND_CLASSIC_ITEM.set(backend_classic.clone());
+    let _ = BACKEND_BUILDER_STABLE_ITEM.set(backend_builder_stable.clone());
+    let _ = BACKEND_BUILDER_BETA_ITEM.set(backend_builder_beta.clone());
+
+    let backend_submenu = SubmenuBuilder::with_id(app_handle, "backend", "Backend")
+        .item(&backend_classic)
+        .item(&backend_builder_stable)
+        .item(&backend_builder_beta)
         .build()?;
 
     let menu = MenuBuilder::new(app_handle)
@@ -93,6 +134,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
                 .build(app_handle)?,
         )
         .separator()
+        .item(&backend_submenu)
         .item(&channel_submenu)
         .item(
             &MenuItemBuilder::with_id(ids::CHECK_UPDATES, "Check for Updates...")
@@ -134,6 +176,14 @@ static CHANNEL_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
 static CHANNEL_DEV_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 
+/// Backend menu items stored globally for radio-button behavior
+static BACKEND_CLASSIC_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+static BACKEND_BUILDER_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+static BACKEND_BUILDER_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
 /// Update the tray status text
 pub fn update_status(_app_handle: &AppHandle, running: bool) {
     let status_text = if running {
@@ -154,8 +204,8 @@ pub fn update_version(version: &str) {
     }
 }
 
-/// Format a channel menu item label with a radio-button prefix.
-fn channel_label(name: &str, selected: bool) -> String {
+/// Format a radio-style menu item label with a selection prefix.
+fn radio_label(name: &str, selected: bool) -> String {
     if selected {
         format!("● {}", name)
     } else {
@@ -166,13 +216,35 @@ fn channel_label(name: &str, selected: bool) -> String {
 /// Update the channel menu item labels to reflect the given channel
 fn update_channel_checks(channel: ReleaseChannel) {
     if let Some(item) = CHANNEL_STABLE_ITEM.get() {
-        let _ = item.set_text(channel_label("Stable", channel == ReleaseChannel::Stable));
+        let _ = item.set_text(radio_label("Stable", channel == ReleaseChannel::Stable));
     }
     if let Some(item) = CHANNEL_BETA_ITEM.get() {
-        let _ = item.set_text(channel_label("Beta", channel == ReleaseChannel::Beta));
+        let _ = item.set_text(radio_label("Beta", channel == ReleaseChannel::Beta));
     }
     if let Some(item) = CHANNEL_DEV_ITEM.get() {
-        let _ = item.set_text(channel_label("Dev", channel == ReleaseChannel::Dev));
+        let _ = item.set_text(radio_label("Dev", channel == ReleaseChannel::Dev));
+    }
+}
+
+/// Update the backend menu item labels to reflect the given backend.
+fn update_backend_checks(backend: Backend) {
+    if let Some(item) = BACKEND_CLASSIC_ITEM.get() {
+        let _ = item.set_text(radio_label(
+            "Classic ESPHome Dashboard",
+            backend == Backend::Classic,
+        ));
+    }
+    if let Some(item) = BACKEND_BUILDER_STABLE_ITEM.get() {
+        let _ = item.set_text(radio_label(
+            "ESPHome Builder (stable)",
+            backend == Backend::BuilderStable,
+        ));
+    }
+    if let Some(item) = BACKEND_BUILDER_BETA_ITEM.get() {
+        let _ = item.set_text(radio_label(
+            "ESPHome Builder (beta)",
+            backend == Backend::BuilderBeta,
+        ));
     }
 }
 
@@ -197,9 +269,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let channel = {
+                let (channel, backend) = {
                     let settings = state.settings.read().await;
-                    settings.release_channel
+                    (settings.release_channel, settings.backend)
                 };
 
                 // Check for updates and get version if user wants to update
@@ -209,7 +281,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     // Stop the dashboard
                     update_status(&app, false);
                     if let Err(e) = state.daemon.stop().await {
-                        error!("Failed to stop dashboard for update: {}", e);
+                        error!("Failed to stop backend for update: {}", e);
                         let dialog_app = app.clone();
                         let msg = format!("Failed to stop dashboard: {}", e);
                         let _ = tokio::task::spawn_blocking(move || {
@@ -234,7 +306,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
 
                             // Restart the dashboard
                             if let Err(e) = state.daemon.start().await {
-                                error!("Failed to restart dashboard after update: {}", e);
+                                error!("Failed to restart backend after update: {}", e);
                                 let dialog_app = app.clone();
                                 let msg = format!(
                                     "ESPHome updated to {}, but failed to restart dashboard: {}",
@@ -284,9 +356,115 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
 
                             // Try to restart dashboard anyway
                             if let Err(restart_err) = state.daemon.start().await {
-                                error!("Failed to restart dashboard after failed update: {}", restart_err);
+                                error!("Failed to restart backend after failed update: {}", restart_err);
                             } else {
                                 update_status(&app, true);
+                            }
+                        }
+                    }
+                }
+
+                // Also check `esphome-device-builder` when it's the active
+                // backend. This is independent of the ESPHome release channel.
+                if backend.is_builder() {
+                    if let Some(builder_version) = state
+                        .update_checker
+                        .check_device_builder_for_user(&app, backend)
+                        .await
+                    {
+                        info!(
+                            "User requested device-builder update to version {}",
+                            builder_version
+                        );
+
+                        update_status(&app, false);
+                        if let Err(e) = state.daemon.stop().await {
+                            error!("Failed to stop backend for device-builder update: {}", e);
+                            let dialog_app = app.clone();
+                            let msg = format!("Failed to stop backend: {}", e);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                dialog_app
+                                    .dialog()
+                                    .message(msg)
+                                    .kind(MessageDialogKind::Error)
+                                    .title("Update Failed")
+                                    .blocking_show();
+                            })
+                            .await;
+                            return;
+                        }
+
+                        match state
+                            .update_checker
+                            .install_device_builder(&app, backend)
+                            .await
+                        {
+                            Ok(()) => {
+                                info!(
+                                    "Device builder updated successfully to {}",
+                                    builder_version
+                                );
+
+                                if let Err(e) = state.daemon.start().await {
+                                    error!(
+                                        "Failed to restart backend after device-builder update: {}",
+                                        e
+                                    );
+                                    let dialog_app = app.clone();
+                                    let msg = format!(
+                                        "Device builder updated to {}, but failed to restart backend: {}",
+                                        builder_version, e
+                                    );
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        dialog_app
+                                            .dialog()
+                                            .message(msg)
+                                            .kind(MessageDialogKind::Warning)
+                                            .title("Update Partially Complete")
+                                            .blocking_show();
+                                    })
+                                    .await;
+                                } else {
+                                    update_status(&app, true);
+                                    let dialog_app = app.clone();
+                                    let msg = format!(
+                                        "ESPHome Device Builder has been updated to version {}.",
+                                        builder_version
+                                    );
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        dialog_app
+                                            .dialog()
+                                            .message(msg)
+                                            .kind(MessageDialogKind::Info)
+                                            .title("Update Complete")
+                                            .blocking_show();
+                                    })
+                                    .await;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Device-builder update failed: {}", e);
+                                let dialog_app = app.clone();
+                                let msg = format!("Failed to update ESPHome Device Builder: {}", e);
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    dialog_app
+                                        .dialog()
+                                        .message(msg)
+                                        .kind(MessageDialogKind::Error)
+                                        .title("Update Failed")
+                                        .blocking_show();
+                                })
+                                .await;
+
+                                // Try to restart backend anyway
+                                if let Err(restart_err) = state.daemon.start().await {
+                                    error!(
+                                        "Failed to restart backend after failed device-builder update: {}",
+                                        restart_err
+                                    );
+                                } else {
+                                    update_status(&app, true);
+                                }
                             }
                         }
                     }
@@ -354,7 +532,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 // Stop the dashboard
                 update_status(&app, false);
                 if let Err(e) = state.daemon.stop().await {
-                    error!("Failed to stop dashboard for channel switch: {}", e);
+                    error!("Failed to stop backend for channel switch: {}", e);
                     let dialog_app = app.clone();
                     let msg = format!("Failed to stop dashboard: {}", e);
                     let _ = tokio::task::spawn_blocking(move || {
@@ -390,7 +568,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
 
                         // Restart the dashboard
                         if let Err(e) = state.daemon.start().await {
-                            error!("Failed to restart dashboard after channel switch: {}", e);
+                            error!("Failed to restart backend after channel switch: {}", e);
                             let dialog_app = app.clone();
                             let msg = format!(
                                 "Switched to {} channel, but failed to restart dashboard: {}",
@@ -443,12 +621,171 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                         // Try to restart dashboard anyway
                         if let Err(restart_err) = state.daemon.start().await {
                             error!(
-                                "Failed to restart dashboard after failed channel switch: {}",
+                                "Failed to restart backend after failed channel switch: {}",
                                 restart_err
                             );
                         } else {
                             update_status(&app, true);
                         }
+                    }
+                }
+            });
+        }
+        ids::BACKEND_CLASSIC | ids::BACKEND_BUILDER_STABLE | ids::BACKEND_BUILDER_BETA => {
+            let new_backend = match id {
+                ids::BACKEND_CLASSIC => Backend::Classic,
+                ids::BACKEND_BUILDER_STABLE => Backend::BuilderStable,
+                ids::BACKEND_BUILDER_BETA => Backend::BuilderBeta,
+                _ => unreachable!(),
+            };
+
+            let state = state.clone();
+            let app = app_handle.clone();
+            async_runtime::spawn(async move {
+                let old_backend = {
+                    let settings = state.settings.read().await;
+                    settings.backend
+                };
+
+                if new_backend == old_backend {
+                    return;
+                }
+
+                // Confirm the switch with the user.
+                let dialog_app = app.clone();
+                let msg = if new_backend.is_builder() {
+                    format!(
+                        "Switch to {}?\n\n\
+                         This will install the `esphome-device-builder` Python package, \
+                         stop the current backend, and restart with the new one.",
+                        new_backend
+                    )
+                } else {
+                    "Switch back to the classic ESPHome dashboard?\n\n\
+                     This will stop the device builder and restart with the dashboard."
+                        .to_string()
+                };
+                let confirmed = tokio::task::spawn_blocking(move || {
+                    dialog_app
+                        .dialog()
+                        .message(msg)
+                        .title("Switch Backend")
+                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+                            "Switch".to_string(),
+                            "Cancel".to_string(),
+                        ))
+                        .blocking_show()
+                })
+                .await
+                .unwrap_or(false);
+
+                if !confirmed {
+                    update_backend_checks(old_backend);
+                    return;
+                }
+
+                // Update the check marks immediately to show the new selection
+                update_backend_checks(new_backend);
+
+                // Stop the current backend
+                update_status(&app, false);
+                if let Err(e) = state.daemon.stop().await {
+                    error!("Failed to stop daemon for backend switch: {}", e);
+                    let dialog_app = app.clone();
+                    let msg = format!("Failed to stop backend: {}", e);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        dialog_app
+                            .dialog()
+                            .message(msg)
+                            .kind(MessageDialogKind::Error)
+                            .title("Backend Switch Failed")
+                            .blocking_show();
+                    })
+                    .await;
+                    update_backend_checks(old_backend);
+                    return;
+                }
+
+                // When switching to a builder variant, install/upgrade the package first.
+                if new_backend.is_builder() {
+                    if let Err(e) = state
+                        .update_checker
+                        .install_device_builder(&app, new_backend)
+                        .await
+                    {
+                        error!("Failed to install esphome-device-builder: {}", e);
+                        let dialog_app = app.clone();
+                        let msg = format!("Failed to install esphome-device-builder: {}", e);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            dialog_app
+                                .dialog()
+                                .message(msg)
+                                .kind(MessageDialogKind::Error)
+                                .title("Backend Switch Failed")
+                                .blocking_show();
+                        })
+                        .await;
+                        update_backend_checks(old_backend);
+                        // Try to restart the original backend.
+                        if let Err(restart_err) = state.daemon.start().await {
+                            error!(
+                                "Failed to restart backend after failed switch: {}",
+                                restart_err
+                            );
+                        } else {
+                            update_status(&app, true);
+                        }
+                        return;
+                    }
+                }
+
+                // Apply the new backend to the daemon and persist it.
+                state.daemon.set_use_device_builder(new_backend.is_builder());
+                {
+                    let mut settings = state.settings.write().await;
+                    settings.backend = new_backend;
+                    if let Err(e) = settings.save(&app) {
+                        warn!("Failed to save settings: {}", e);
+                    }
+                }
+
+                // Restart with the new backend.
+                if let Err(e) = state.daemon.start().await {
+                    error!("Failed to start daemon after backend switch: {}", e);
+                    let dialog_app = app.clone();
+                    let msg = format!("Failed to start backend: {}", e);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        dialog_app
+                            .dialog()
+                            .message(msg)
+                            .kind(MessageDialogKind::Error)
+                            .title("Backend Switch Failed")
+                            .blocking_show();
+                    })
+                    .await;
+                } else {
+                    update_status(&app, true);
+                    info!("Switched backend to {}", new_backend);
+
+                    // Wait for the new backend to be reachable, then notify.
+                    let port = state.daemon.port();
+                    let ready = crate::wait_for_dashboard_ready(port, 60).await;
+                    let body = if ready {
+                        format!("{} is ready.", new_backend)
+                    } else {
+                        format!(
+                            "Switched to {}, but it didn't become ready in time. Check the logs.",
+                            new_backend
+                        )
+                    };
+                    if let Err(e) = app
+                        .notification()
+                        .builder()
+                        .title("Backend Switched")
+                        .body(body)
+                        .show()
+                    {
+                        warn!("Failed to show backend-switch notification: {}", e);
                     }
                 }
             });
@@ -466,7 +803,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             }
         }
         ids::RESTART => {
-            info!("Restarting ESPHome dashboard");
+            info!("Restarting ESPHome backend");
             let state = state.clone();
             async_runtime::spawn(async move {
                 if let Err(e) = state.daemon.restart().await {

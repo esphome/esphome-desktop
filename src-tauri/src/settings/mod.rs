@@ -42,6 +42,41 @@ impl fmt::Display for ReleaseChannel {
     }
 }
 
+/// Which backend the daemon should run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    /// Classic ESPHome dashboard (`esphome dashboard`)
+    Classic,
+    /// ESPHome device builder, stable release from PyPI
+    BuilderStable,
+    /// ESPHome device builder, beta/pre-release from PyPI
+    BuilderBeta,
+}
+
+impl Default for Backend {
+    fn default() -> Self {
+        Self::Classic
+    }
+}
+
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Classic => write!(f, "Classic ESPHome Dashboard"),
+            Self::BuilderStable => write!(f, "ESPHome Builder (stable)"),
+            Self::BuilderBeta => write!(f, "ESPHome Builder (beta)"),
+        }
+    }
+}
+
+impl Backend {
+    /// True for any of the device-builder variants.
+    pub fn is_builder(self) -> bool {
+        matches!(self, Self::BuilderStable | Self::BuilderBeta)
+    }
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -65,6 +100,10 @@ pub struct Settings {
     #[serde(default)]
     pub release_channel: ReleaseChannel,
 
+    /// Active backend (classic dashboard or device builder variant)
+    #[serde(default)]
+    pub backend: Backend,
+
     /// Installed ESPHome version (detected from venv)
     #[serde(skip)]
     pub installed_version: Option<String>,
@@ -86,6 +125,7 @@ impl Default for Settings {
             open_on_start: true,
             check_updates: true,
             release_channel: ReleaseChannel::default(),
+            backend: Backend::default(),
             installed_version: None,
         }
     }

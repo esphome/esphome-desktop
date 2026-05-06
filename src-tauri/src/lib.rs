@@ -22,9 +22,18 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use daemon::DaemonManager;
-use settings::Settings;
+use settings::{Backend, Settings};
 use tray::build_tray_menu;
 use update::UpdateChecker;
+
+/// CLI selector for the device-builder channel.
+/// Maps onto [`Backend::BuilderStable`]/[`Backend::BuilderBeta`].
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[value(rename_all = "lowercase")]
+pub enum BuilderChannelArg {
+    Stable,
+    Beta,
+}
 
 /// ESPHome Desktop - System tray application for ESPHome
 #[derive(Parser, Debug, Clone)]
@@ -34,6 +43,17 @@ pub struct Cli {
     /// Don't open the dashboard in browser on startup
     #[arg(long = "no-open-dashboard")]
     pub no_open_dashboard: bool,
+
+    /// Switch to the ESPHome Device Builder backend instead of the classic
+    /// dashboard. Persists to settings — useful as a fallback when the tray
+    /// menu is unavailable.
+    #[arg(long = "use-builder")]
+    pub use_builder: bool,
+
+    /// Channel for the ESPHome Device Builder backend.
+    /// Only takes effect together with `--use-builder`.
+    #[arg(long = "builder-channel", value_enum, default_value_t = BuilderChannelArg::Beta)]
+    pub builder_channel: BuilderChannelArg,
 }
 
 /// Application state shared across the app
@@ -66,7 +86,7 @@ fn open_dashboard(port: u16) {
 }
 
 /// Wait for the dashboard to be ready by polling the health endpoint
-async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
+pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -82,14 +102,14 @@ async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
     while start.elapsed() < timeout {
         if let Ok(response) = client.get(&url).send().await {
             if response.status().is_success() {
-                info!("Dashboard is ready");
+                info!("Backend is ready");
                 return true;
             }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    warn!("Timeout waiting for dashboard to be ready");
+    warn!("Timeout waiting for backend to be ready");
     false
 }
 
@@ -118,6 +138,14 @@ pub fn run(cli: Cli) {
 
     // Capture CLI flags before closure
     let no_open_dashboard = cli.no_open_dashboard;
+    let cli_backend_override = if cli.use_builder {
+        Some(match cli.builder_channel {
+            BuilderChannelArg::Stable => Backend::BuilderStable,
+            BuilderChannelArg::Beta => Backend::BuilderBeta,
+        })
+    } else {
+        None
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -148,6 +176,30 @@ pub fn run(cli: Cli) {
             // Initialize app state
             let state = Arc::new(AppState::new(app.handle())?);
             app.manage(state.clone());
+
+            // Apply CLI backend override (persists to settings).
+            // This runs before the daemon starts so the new backend takes
+            // effect immediately, and before the tray menu is built so the
+            // radio buttons reflect the override.
+            let cli_override_needs_install = if let Some(new_backend) = cli_backend_override {
+                let mut settings = async_runtime::block_on(state.settings.write());
+                if settings.backend != new_backend {
+                    info!(
+                        "CLI override: switching backend from {} to {}",
+                        settings.backend, new_backend
+                    );
+                    settings.backend = new_backend;
+                    if let Err(e) = settings.save(app.handle()) {
+                        warn!("Failed to save settings after CLI override: {}", e);
+                    }
+                    state.daemon.set_use_device_builder(new_backend.is_builder());
+                    new_backend.is_builder()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
             // Build and set up the tray menu (if tray support is available)
             let tray_available = if platform::is_tray_supported() {
@@ -216,6 +268,20 @@ pub fn run(cli: Cli) {
             let daemon_state = state.clone();
             let daemon_app = app.handle().clone();
             async_runtime::spawn(async move {
+                // If a CLI override switched us into a builder backend, ensure
+                // the package is installed/upgraded before starting the daemon.
+                if cli_override_needs_install {
+                    let backend = daemon_state.settings.read().await.backend;
+                    info!("Installing/upgrading esphome-device-builder for CLI override");
+                    if let Err(e) = daemon_state
+                        .update_checker
+                        .install_device_builder(&daemon_app, backend)
+                        .await
+                    {
+                        error!("Failed to install esphome-device-builder: {}", e);
+                    }
+                }
+
                 match daemon_state.daemon.start().await {
                     Ok(()) => {
                         // Update tray status to show running
@@ -230,6 +296,8 @@ pub fn run(cli: Cli) {
 
             // Start update checker (check after 30s, then every 24 hours)
             // The dev channel skips automatic update checks entirely.
+            // When the active backend is a builder variant, the
+            // `esphome-device-builder` package is checked on the same schedule.
             let update_state = state.clone();
             let update_app = app.handle().clone();
             async_runtime::spawn(async move {
@@ -237,14 +305,20 @@ pub fn run(cli: Cli) {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
                 loop {
                     interval.tick().await;
-                    let channel = {
+                    let (channel, backend) = {
                         let settings = update_state.settings.read().await;
-                        settings.release_channel
+                        (settings.release_channel, settings.backend)
                     };
                     update_state
                         .update_checker
                         .check_and_notify(&update_app, channel)
                         .await;
+                    if backend.is_builder() {
+                        update_state
+                            .update_checker
+                            .check_and_notify_device_builder(&update_app, backend)
+                            .await;
+                    }
                 }
             });
 
@@ -285,7 +359,7 @@ pub fn run(cli: Cli) {
             let should_open = (settings.open_on_start || !tray_available) && !no_open_dashboard;
             if should_open {
                 let port = settings.port;
-                info!("Opening dashboard on startup");
+                info!("Opening backend in browser on startup");
                 // Wait for dashboard to be ready, then open browser
                 async_runtime::spawn(async move {
                     if wait_for_dashboard_ready(port, 60).await {
@@ -296,7 +370,7 @@ pub fn run(cli: Cli) {
                     }
                 });
             } else if no_open_dashboard {
-                info!("Dashboard opening suppressed by --no-open-dashboard flag");
+                info!("Browser opening suppressed by --no-open-dashboard flag");
             }
 
             Ok(())

@@ -32,6 +32,8 @@ pub struct DaemonManager {
     port: u16,
     /// Whether the daemon is running
     running: Arc<AtomicBool>,
+    /// Use `esphome-device-builder` instead of `esphome dashboard`
+    use_device_builder: Arc<AtomicBool>,
 }
 
 impl DaemonManager {
@@ -61,7 +63,22 @@ impl DaemonManager {
             logs_dir,
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
+            use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
         })
+    }
+
+    /// Update the device-builder flag. Takes effect on the next daemon start.
+    pub fn set_use_device_builder(&self, value: bool) {
+        self.use_device_builder.store(value, Ordering::SeqCst);
+    }
+
+    /// Human-readable name of the current backend, for log messages.
+    fn backend_name(&self) -> &'static str {
+        if self.use_device_builder.load(Ordering::SeqCst) {
+            "ESPHome device builder"
+        } else {
+            "ESPHome dashboard"
+        }
     }
 
     /// Start the ESPHome dashboard
@@ -71,7 +88,9 @@ impl DaemonManager {
             return Ok(());
         }
 
-        info!("Starting ESPHome dashboard on port {}", self.port);
+        let use_device_builder = self.use_device_builder.load(Ordering::SeqCst);
+        let backend_name = self.backend_name();
+        info!("Starting {} on port {}", backend_name, self.port);
         debug!("Python path: {:?}", self.python_path);
         debug!("Python bin: {:?}", self.python_bin_dir);
         debug!("Config dir: {:?}", self.config_dir);
@@ -87,26 +106,42 @@ impl DaemonManager {
         let log_file = File::create(&log_path).context("Failed to create log file")?;
         let log_file_clone = log_file.try_clone().context("Failed to clone log file handle")?;
 
-        info!("Dashboard logs: {:?}", log_path);
+        info!("{} logs: {:?}", backend_name, log_path);
+
+        let config_arg = self.config_dir.to_str().unwrap_or(".");
+        let port_arg = self.port.to_string();
 
         // Build the command
         let mut cmd = Command::new(&self.python_path);
-        cmd.args([
-            "-m",
-            "esphome",
-            "dashboard",
-            self.config_dir.to_str().unwrap_or("."),
-            "--address",
-            "127.0.0.1",
-            "--port",
-            &self.port.to_string(),
-        ])
-        // Set working directory to config dir (required for PlatformIO)
-        .current_dir(&self.config_dir)
-        // Redirect stdout/stderr to single log file
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_clone))
-        .kill_on_drop(true);
+        if use_device_builder {
+            cmd.args([
+                "-m",
+                "esphome_device_builder",
+                config_arg,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port_arg,
+            ]);
+        } else {
+            cmd.args([
+                "-m",
+                "esphome",
+                "dashboard",
+                config_arg,
+                "--address",
+                "127.0.0.1",
+                "--port",
+                &port_arg,
+            ]);
+        }
+        cmd
+            // Set working directory to config dir (required for PlatformIO)
+            .current_dir(&self.config_dir)
+            // Redirect stdout/stderr to single log file
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_clone))
+            .kill_on_drop(true);
 
         // Create new process group on Unix so we can kill all children
         #[cfg(unix)]
@@ -145,13 +180,13 @@ impl DaemonManager {
                 }
                 match health_check(port).await {
                     Ok(true) => debug!("Health check passed"),
-                    Ok(false) => warn!("Health check failed - dashboard may be starting"),
+                    Ok(false) => warn!("Health check failed - backend may be starting"),
                     Err(e) => warn!("Health check error: {}", e),
                 }
             }
         });
 
-        info!("ESPHome dashboard started");
+        info!("{} started", backend_name);
         Ok(())
     }
 
@@ -162,7 +197,8 @@ impl DaemonManager {
             return Ok(());
         }
 
-        info!("Stopping ESPHome dashboard");
+        let backend_name = self.backend_name();
+        info!("Stopping {}", backend_name);
         self.running.store(false, Ordering::SeqCst);
 
         let mut process = self.process.lock().await;
@@ -183,7 +219,7 @@ impl DaemonManager {
             let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), child.wait());
 
             match timeout.await {
-                Ok(Ok(status)) => info!("ESPHome dashboard exited with status: {}", status),
+                Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
                 Err(_) => {
                     warn!("Timeout waiting for graceful shutdown, forcing kill");
@@ -201,7 +237,7 @@ impl DaemonManager {
             }
         }
 
-        info!("ESPHome dashboard stopped");
+        info!("{} stopped", backend_name);
         Ok(())
     }
 
