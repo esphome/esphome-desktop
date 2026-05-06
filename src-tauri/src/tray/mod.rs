@@ -10,6 +10,7 @@ use tauri::{
     AppHandle,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
 use crate::settings::{Backend, ReleaseChannel};
@@ -765,6 +766,27 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 } else {
                     update_status(&app, true);
                     info!("Switched backend to {}", new_backend);
+
+                    // Wait for the new backend to be reachable, then notify.
+                    let port = state.daemon.port();
+                    let ready = crate::wait_for_dashboard_ready(port, 60).await;
+                    let body = if ready {
+                        format!("{} is ready.", new_backend)
+                    } else {
+                        format!(
+                            "Switched to {}, but it didn't become ready in time. Check the logs.",
+                            new_backend
+                        )
+                    };
+                    if let Err(e) = app
+                        .notification()
+                        .builder()
+                        .title("Backend Switched")
+                        .body(body)
+                        .show()
+                    {
+                        warn!("Failed to show backend-switch notification: {}", e);
+                    }
                 }
             });
         }

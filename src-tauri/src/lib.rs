@@ -86,7 +86,7 @@ fn open_dashboard(port: u16) {
 }
 
 /// Wait for the dashboard to be ready by polling the health endpoint
-async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
+pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
