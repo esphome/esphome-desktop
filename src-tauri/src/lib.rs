@@ -373,15 +373,24 @@ pub fn run(cli: Cli) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // RunEvent::Exit is the only event guaranteed to fire on every
-            // macOS quit path. In particular, Dock right-click → Quit does
-            // NOT go through RunEvent::ExitRequested in this Tauri version
-            // — empirically only RunEvent::Exit fires, after the runtime
-            // is already winding down. Send a synchronous SIGTERM to the
-            // dashboard's process group here so the child can never
-            // outlive us regardless of which path dispatched. SIGTERM
-            // only; the dashboard cleans up its own state.
-            if matches!(event, RunEvent::Exit) {
+            // Synchronously SIGTERM the dashboard's process group on any
+            // exit-related event so the signal is in the kernel before
+            // we attempt anything else. Covers two scenarios:
+            //
+            // * macOS Dock right-click → Quit, which on this Tauri
+            //   version only fires `RunEvent::Exit` (not ExitRequested)
+            //   after the runtime is already winding down.
+            // * A future Tauri version that DOES fire ExitRequested for
+            //   Dock-Quit but doesn't honor `prevent_exit()` long enough
+            //   for the spawned graceful-stop task below to actually
+            //   run.
+            //
+            // `terminate_blocking` is idempotent (atomic-swap on the
+            // stored PID), doesn't touch the `running` flag, and is
+            // a no-op once `stop()` has already cleared the PID — so
+            // calling it on both events is safe and double-firing the
+            // SIGTERM is harmless (the kernel coalesces).
+            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     state.daemon.terminate_blocking();
                 }

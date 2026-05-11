@@ -260,9 +260,18 @@ impl DaemonManager {
     /// Synchronously send SIGTERM to the dashboard's process group.
     /// Safe to call from any context (including a tauri `RunEvent::Exit`
     /// callback where the tokio runtime is already winding down) — no
-    /// async involvement. No-op if the daemon is not running. Used as
-    /// a last-resort guard so we never leave the dashboard orphaned,
-    /// regardless of which exit path Tauri dispatches us on.
+    /// async involvement. No-op if the daemon is not running or if a
+    /// previous call already fired the signal.
+    ///
+    /// Idempotent via an atomic swap on `dashboard_pid` — repeated
+    /// calls after the first are cheap no-ops, so it's safe to call
+    /// from both the `ExitRequested` and `Exit` branches of the tauri
+    /// run loop.
+    ///
+    /// Does NOT touch the `running` flag, so a concurrent / subsequent
+    /// `stop()` still runs its graceful 30 s wait. The PID atomic is
+    /// only used for the synchronous kill path; `stop()` reads
+    /// `child.id()` directly off the stored `Child` handle.
     ///
     /// SIGTERM only — the dashboard is expected to honor it and clean
     /// up its own state. If it doesn't, that's a dashboard-side bug.
@@ -271,7 +280,6 @@ impl DaemonManager {
         if pid == 0 {
             return;
         }
-        self.running.store(false, Ordering::SeqCst);
         #[cfg(unix)]
         {
             use nix::sys::signal::{killpg, Signal};
