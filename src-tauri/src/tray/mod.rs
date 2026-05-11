@@ -813,15 +813,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
         }
         ids::QUIT => {
             info!("Quit requested");
-            let state = state.clone();
-            let app = app_handle.clone();
-            // Use block_on to ensure daemon stops before exit
-            async_runtime::block_on(async move {
-                if let Err(e) = state.daemon.stop().await {
-                    error!("Error stopping daemon: {}", e);
-                }
-            });
-            app.exit(0);
+            // Delegate cleanup to the RunEvent::ExitRequested handler in
+            // lib.rs so the shutdown sequence lives in exactly one place.
+            app_handle.exit(0);
         }
         _ => {}
     }
