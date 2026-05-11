@@ -34,7 +34,7 @@ pub struct DaemonManager {
     running: Arc<AtomicBool>,
     /// PID of the dashboard child, mirrored as an atomic so synchronous
     /// exit paths (e.g. macOS Dock-Quit, which fires `RunEvent::Exit`
-    /// without going through `ExitRequested`) can SIGKILL the process
+    /// without going through `ExitRequested`) can SIGTERM the process
     /// group without locking the tokio mutex. Zero when no child is
     /// running.
     dashboard_pid: Arc<AtomicI32>,
@@ -148,12 +148,20 @@ impl DaemonManager {
             // Redirect stdout/stderr to single log file
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_clone));
-        // NOTE: not setting `kill_on_drop(true)`. That would have tokio
-        // send SIGKILL to the Child when it gets dropped (either when
-        // stop()'s wait times out, or when AppState drops at process
-        // teardown), which force-kills the dashboard and corrupts its
-        // state. Our shutdown is SIGTERM only — see `stop()` and
-        // `terminate_blocking()`.
+        // On Unix, intentionally NOT setting `kill_on_drop(true)`. That
+        // would have tokio send SIGKILL to the Child when it gets
+        // dropped (either when stop()'s wait times out, or when
+        // AppState drops at process teardown), which force-kills the
+        // dashboard and corrupts its state. Our Unix shutdown is
+        // SIGTERM only — see `stop()` and `terminate_blocking()`.
+        //
+        // On Windows there is no SIGTERM equivalent; the only way to
+        // stop the child reliably is TerminateProcess (what
+        // `Child::kill()` and `kill_on_drop(true)` invoke). Keep the
+        // drop-time safety net there so the dashboard doesn't orphan
+        // on Windows app exit.
+        #[cfg(windows)]
+        cmd.kill_on_drop(true);
 
         // Create new process group on Unix so we can kill all children
         #[cfg(unix)]
@@ -244,11 +252,24 @@ impl DaemonManager {
             match timeout.await {
                 Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
+                #[cfg(unix)]
                 Err(_) => warn!(
                     "Timeout waiting for {} to honor SIGTERM after 30 s; \
                      proceeding with exit without force-killing.",
                     backend_name
                 ),
+                // On Windows the loop above sent no graceful signal
+                // (there is no SIGTERM analog reachable from here),
+                // so the timeout is really "we waited 30 s for nothing
+                // to happen." TerminateProcess via Child::kill() is
+                // the only termination path; without it the dashboard
+                // would orphan on app exit. State preservation on
+                // Windows is out of scope for this fix.
+                #[cfg(not(unix))]
+                Err(_) => {
+                    warn!("Timeout waiting for {} to exit; force-killing.", backend_name);
+                    let _ = child.kill().await;
+                }
             }
         }
 
@@ -275,6 +296,16 @@ impl DaemonManager {
     ///
     /// SIGTERM only — the dashboard is expected to honor it and clean
     /// up its own state. If it doesn't, that's a dashboard-side bug.
+    ///
+    /// Guards against PID-reuse via `getpgid()`: if the dashboard child
+    /// exited independently (crash / external kill) and tokio reaped
+    /// it before we got here, the kernel may have handed our recorded
+    /// PID to an unrelated process. We spawned the dashboard with
+    /// `process_group(0)`, so the child is its own pgleader (pgid ==
+    /// pid). An unrelated process inheriting the recycled PID is
+    /// almost certainly not its own pgleader, so a `getpgid(pid) !=
+    /// pid` result short-circuits the signal and we don't disturb the
+    /// stranger.
     pub fn terminate_blocking(&self) {
         let pid = self.dashboard_pid.swap(0, Ordering::SeqCst);
         if pid == 0 {
@@ -283,8 +314,21 @@ impl DaemonManager {
         #[cfg(unix)]
         {
             use nix::sys::signal::{killpg, Signal};
-            use nix::unistd::Pid;
-            let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
+            use nix::unistd::{getpgid, Pid};
+            let pid_t = Pid::from_raw(pid);
+            match getpgid(Some(pid_t)) {
+                Ok(pgid) if pgid == pid_t => {
+                    let _ = killpg(pid_t, Signal::SIGTERM);
+                }
+                _ => {
+                    warn!(
+                        "Recorded dashboard pid {} is no longer its own \
+                         process group leader; skipping SIGTERM to avoid \
+                         signaling a recycled-PID stranger.",
+                        pid
+                    );
+                }
+            }
         }
     }
 
