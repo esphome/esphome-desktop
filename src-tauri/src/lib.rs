@@ -322,10 +322,11 @@ pub fn run(cli: Cli) {
                 }
             });
 
-            // Set up signal handlers for graceful shutdown on Ctrl+C
+            // Set up signal handlers for graceful shutdown on Ctrl+C.
+            // The daemon-stop is handled by the RunEvent::ExitRequested
+            // branch in run() below; we just trip the exit here.
             #[cfg(unix)]
             {
-                let signal_state = state.clone();
                 let signal_app = app.handle().clone();
                 async_runtime::spawn(async move {
                     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -342,12 +343,6 @@ pub fn run(cli: Cli) {
                         }
                     }
 
-                    // Stop the daemon
-                    if let Err(e) = signal_state.daemon.stop().await {
-                        error!("Error stopping daemon on signal: {}", e);
-                    }
-
-                    // Exit the app
                     signal_app.exit(0);
                 });
             }
@@ -378,15 +373,52 @@ pub fn run(cli: Cli) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { .. } = event {
-                // Stop the daemon before exiting
+            // Synchronously SIGTERM the dashboard's process group on any
+            // exit-related event so the signal is in the kernel before
+            // we attempt anything else. Covers two scenarios:
+            //
+            // * macOS Dock right-click → Quit, which on this Tauri
+            //   version only fires `RunEvent::Exit` (not ExitRequested)
+            //   after the runtime is already winding down.
+            // * A future Tauri version that DOES fire ExitRequested for
+            //   Dock-Quit but doesn't honor `prevent_exit()` long enough
+            //   for the spawned graceful-stop task below to actually
+            //   run.
+            //
+            // `terminate_blocking` is idempotent (atomic-swap on the
+            // stored PID), doesn't touch the `running` flag, and is
+            // a no-op once `stop()` has already cleared the PID — so
+            // calling it on both events is safe and double-firing the
+            // SIGTERM is harmless (the kernel coalesces).
+            if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                    info!("Stopping ESPHome daemon before exit");
-                    async_runtime::block_on(async {
-                        if let Err(e) = state.daemon.stop().await {
-                            warn!("Error stopping daemon: {}", e);
-                        }
-                    });
+                    state.daemon.terminate_blocking();
+                }
+            }
+
+            if let RunEvent::ExitRequested { api, .. } = event {
+                // Running daemon.stop() via async_runtime::block_on from
+                // inside the run() callback orphans the dashboard child:
+                // the future does not actually run to completion before
+                // Tauri tears the process down, so SIGTERM is never sent.
+                // Prevent the immediate exit, drain the daemon on the
+                // tokio runtime via spawn (the same shape the SIGINT/
+                // SIGTERM handler uses), then call app.exit(0) which
+                // re-enters this branch with running=false and falls
+                // through to a clean exit.
+                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    if state.daemon.is_running() {
+                        api.prevent_exit();
+                        let state_clone: Arc<AppState> = state.inner().clone();
+                        let app = app_handle.clone();
+                        async_runtime::spawn(async move {
+                            info!("Stopping ESPHome daemon before exit");
+                            if let Err(e) = state_clone.daemon.stop().await {
+                                warn!("Error stopping daemon: {}", e);
+                            }
+                            app.exit(0);
+                        });
+                    }
                 }
             }
         });

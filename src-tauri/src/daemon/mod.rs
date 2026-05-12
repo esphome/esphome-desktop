@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::process::{Child, Command};
@@ -32,6 +32,12 @@ pub struct DaemonManager {
     port: u16,
     /// Whether the daemon is running
     running: Arc<AtomicBool>,
+    /// PID of the dashboard child, mirrored as an atomic so synchronous
+    /// exit paths (e.g. macOS Dock-Quit, which fires `RunEvent::Exit`
+    /// without going through `ExitRequested`) can SIGTERM the process
+    /// group without locking the tokio mutex. Zero when no child is
+    /// running.
+    dashboard_pid: Arc<AtomicI32>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
 }
@@ -63,6 +69,7 @@ impl DaemonManager {
             logs_dir,
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
+            dashboard_pid: Arc::new(AtomicI32::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
         })
     }
@@ -140,8 +147,21 @@ impl DaemonManager {
             .current_dir(&self.config_dir)
             // Redirect stdout/stderr to single log file
             .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_file_clone))
-            .kill_on_drop(true);
+            .stderr(Stdio::from(log_file_clone));
+        // On Unix, intentionally NOT setting `kill_on_drop(true)`. That
+        // would have tokio send SIGKILL to the Child when it gets
+        // dropped (either when stop()'s wait times out, or when
+        // AppState drops at process teardown), which force-kills the
+        // dashboard and corrupts its state. Our Unix shutdown is
+        // SIGTERM only — see `stop()` and `terminate_blocking()`.
+        //
+        // On Windows there is no SIGTERM equivalent; the only way to
+        // stop the child reliably is TerminateProcess (what
+        // `Child::kill()` and `kill_on_drop(true)` invoke). Keep the
+        // drop-time safety net there so the dashboard doesn't orphan
+        // on Windows app exit.
+        #[cfg(windows)]
+        cmd.kill_on_drop(true);
 
         // Create new process group on Unix so we can kill all children
         #[cfg(unix)]
@@ -164,6 +184,9 @@ impl DaemonManager {
         cmd.env("PYTHONIOENCODING", "utf-8");
 
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
+        if let Some(pid) = child.id() {
+            self.dashboard_pid.store(pid as i32, Ordering::SeqCst);
+        }
 
         let mut process = self.process.lock().await;
         *process = Some(child);
@@ -215,30 +238,98 @@ impl DaemonManager {
                 }
             }
 
-            // Wait for process to exit (with timeout)
-            let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(5), child.wait());
+            // Wait up to 30 s for the dashboard to honor SIGTERM and exit
+            // cleanly. The dashboard's shutdown can drain in-flight work
+            // (firmware queue, partial writes, lock release) and we have
+            // measured this taking up to 30 s in the wild. We do NOT
+            // escalate to SIGKILL on timeout — force-killing here
+            // corrupts dashboard state. If the dashboard doesn't honor
+            // SIGTERM within the window, that's a dashboard-side bug;
+            // we log a warning and let the child finish on its own
+            // (it may briefly outlive us as an orphan of launchd).
+            let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(30), child.wait());
 
             match timeout.await {
                 Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
+                #[cfg(unix)]
+                Err(_) => warn!(
+                    "Timeout waiting for {} to honor SIGTERM after 30 s; \
+                     proceeding with exit without force-killing.",
+                    backend_name
+                ),
+                // On Windows the loop above sent no graceful signal
+                // (there is no SIGTERM analog reachable from here),
+                // so the timeout is really "we waited 30 s for nothing
+                // to happen." TerminateProcess via Child::kill() is
+                // the only termination path; without it the dashboard
+                // would orphan on app exit. State preservation on
+                // Windows is out of scope for this fix.
+                #[cfg(not(unix))]
                 Err(_) => {
-                    warn!("Timeout waiting for graceful shutdown, forcing kill");
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        if let Some(pid) = child.id() {
-                            // Force kill the process group
-                            let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
-                        }
-                    }
+                    warn!("Timeout waiting for {} to exit; force-killing.", backend_name);
                     let _ = child.kill().await;
                 }
             }
         }
 
+        self.dashboard_pid.store(0, Ordering::SeqCst);
         info!("{} stopped", backend_name);
         Ok(())
+    }
+
+    /// Synchronously send SIGTERM to the dashboard's process group.
+    /// Safe to call from any context (including a tauri `RunEvent::Exit`
+    /// callback where the tokio runtime is already winding down) — no
+    /// async involvement. No-op if the daemon is not running or if a
+    /// previous call already fired the signal.
+    ///
+    /// Idempotent via an atomic swap on `dashboard_pid` — repeated
+    /// calls after the first are cheap no-ops, so it's safe to call
+    /// from both the `ExitRequested` and `Exit` branches of the tauri
+    /// run loop.
+    ///
+    /// Does NOT touch the `running` flag, so a concurrent / subsequent
+    /// `stop()` still runs its graceful 30 s wait. The PID atomic is
+    /// only used for the synchronous kill path; `stop()` reads
+    /// `child.id()` directly off the stored `Child` handle.
+    ///
+    /// SIGTERM only — the dashboard is expected to honor it and clean
+    /// up its own state. If it doesn't, that's a dashboard-side bug.
+    ///
+    /// Guards against PID-reuse via `getpgid()`: if the dashboard child
+    /// exited independently (crash / external kill) and tokio reaped
+    /// it before we got here, the kernel may have handed our recorded
+    /// PID to an unrelated process. We spawned the dashboard with
+    /// `process_group(0)`, so the child is its own pgleader (pgid ==
+    /// pid). An unrelated process inheriting the recycled PID is
+    /// almost certainly not its own pgleader, so a `getpgid(pid) !=
+    /// pid` result short-circuits the signal and we don't disturb the
+    /// stranger.
+    pub fn terminate_blocking(&self) {
+        let pid = self.dashboard_pid.swap(0, Ordering::SeqCst);
+        if pid == 0 {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::{getpgid, Pid};
+            let pid_t = Pid::from_raw(pid);
+            match getpgid(Some(pid_t)) {
+                Ok(pgid) if pgid == pid_t => {
+                    let _ = killpg(pid_t, Signal::SIGTERM);
+                }
+                _ => {
+                    warn!(
+                        "Recorded dashboard pid {} is no longer its own \
+                         process group leader; skipping SIGTERM to avoid \
+                         signaling a recycled-PID stranger.",
+                        pid
+                    );
+                }
+            }
+        }
     }
 
     /// Restart the daemon
