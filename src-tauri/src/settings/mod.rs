@@ -56,7 +56,7 @@ pub enum Backend {
 
 impl Default for Backend {
     fn default() -> Self {
-        Self::Classic
+        Self::BuilderBeta
     }
 }
 
