@@ -1,0 +1,118 @@
+name: PR Comment
+
+# Runs in the base-repo context after the "Build" workflow completes, which
+# gives us write access to PR comments even for PRs from forks (the Build
+# workflow's pull_request trigger only has read tokens for forks).
+
+on:
+  workflow_run:
+    workflows: ["Build"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    permissions: {}
+
+    steps:
+      - name: Generate a token
+        id: generate-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
+
+      - name: Download PR info
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-info.json
+          github-token: ${{ steps.generate-token.outputs.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read PR info
+        id: pr
+        run: |
+          set -euo pipefail
+          number=$(jq -r '.pr_number' pr-info.json)
+          if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number: $number"
+            exit 1
+          fi
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: Build artifact comment
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          run_id="${{ github.event.workflow_run.id }}"
+          repo="${{ github.repository }}"
+
+          artifacts_json=$(gh api "repos/${repo}/actions/runs/${run_id}/artifacts" --paginate)
+          artifacts=$(echo "$artifacts_json" | jq -s '[.[].artifacts[]]')
+
+          write_links() {
+            local ext="$1"
+            echo "$artifacts" | jq -r --arg ext "$ext" \
+              '.[] | select(.name | test("\\." + $ext + "$"; "i")) | "- [\(.name)](https://github.com/'"$repo"'/actions/runs/'"$run_id"'/artifacts/\(.id))"' >> comment.md
+          }
+
+          cat > comment.md <<'EOF'
+          <!-- build-artifacts-comment -->
+          ## 📦 Build Artifacts
+
+          The following artifacts are available from this build:
+
+          ### Windows
+          EOF
+
+          write_links "exe"
+
+          cat >> comment.md <<'EOF'
+
+          ### Linux
+          EOF
+
+          write_links "AppImage"
+          write_links "deb"
+          write_links "rpm"
+
+          cat >> comment.md <<'EOF'
+
+          ### macOS
+          EOF
+
+          write_links "dmg"
+
+          cat >> comment.md <<EOF
+
+          ---
+          *Last updated: ${{ github.event.workflow_run.head_sha }} - Run #${{ github.event.workflow_run.run_number }} - $(date -u +'%Y-%m-%d %H:%M:%S UTC')*
+          EOF
+
+      - name: Post or update comment
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          repo="${{ github.repository }}"
+          pr_number="${{ steps.pr.outputs.number }}"
+
+          comment_id=$(gh api "repos/${repo}/issues/${pr_number}/comments" --paginate \
+            --jq '.[] | select(.body | contains("<!-- build-artifacts-comment -->")) | .id' \
+            | head -n1)
+
+          if [ -n "$comment_id" ]; then
+            gh api "repos/${repo}/issues/comments/${comment_id}" \
+              --method PATCH -f body=@comment.md
+          else
+            gh api "repos/${repo}/issues/${pr_number}/comments" \
+              --method POST -f body=@comment.md
+          fi

@@ -8,10 +8,14 @@ on:
   release:
     types: [published]
 
+permissions: {}
+
 jobs:
   generate:
     name: Generate PKGBUILD
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
