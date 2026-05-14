@@ -392,6 +392,7 @@ jobs:
           if [ "$new_body" != "$body" ]; then
             gh api "repos/${{ github.repository }}/releases/${release_id}" \
               --method PATCH \
+              --field "tag_name=${{ steps.find-release.outputs.tag_name }}" \
               --field "body=${new_body}" \
               --field "draft=true" \
               --silent
