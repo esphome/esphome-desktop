@@ -14,6 +14,8 @@ on:
     types: [completed]
   workflow_dispatch:
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,6 +25,8 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -239,81 +243,26 @@ jobs:
           path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
           archive: false
 
-  # Comment on PR with artifact links
-  comment:
-    needs: build
+  # Persist PR metadata so the companion "PR Comment" workflow (which runs
+  # in the base-repo context via workflow_run, granting write access to fork
+  # PRs too) knows which PR to comment on. JSON so we can add more fields
+  # later without changing the file format.
+  pr-info:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    permissions:
-      pull-requests: write
-
+    permissions: {}
     steps:
-      - name: Find Comment
-        uses: peter-evans/find-comment@b30e6a3c0ed37e7c023ccd3f1db5c6c0b0c23aad # v4.0.0
-        id: fc
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: '<!-- build-artifacts-comment -->'
-
-      - name: Build artifact comment
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Write PR info
         run: |
-          set -euo pipefail
-
-          run_id="${{ github.run_id }}"
-          repo="${{ github.repository }}"
-
-          artifacts_json=$(gh api "repos/${repo}/actions/runs/${run_id}/artifacts" --paginate)
-          artifacts=$(echo "$artifacts_json" | jq -s '[.[].artifacts[]]')
-
-          write_links() {
-            local ext="$1"
-            echo "$artifacts" | jq -r --arg ext "$ext" \
-              '.[] | select(.name | test("\\." + $ext + "$"; "i")) | "- [\(.name)](https://github.com/'"$repo"'/actions/runs/'"$run_id"'/artifacts/\(.id))"' >> comment.md
+          cat > pr-info.json <<EOF
+          {
+            "pr_number": ${{ github.event.pull_request.number }}
           }
-
-          cat > comment.md <<'EOF'
-          <!-- build-artifacts-comment -->
-          ## 📦 Build Artifacts
-
-          The following artifacts are available from this build:
-
-          ### Windows
           EOF
-
-          write_links "exe"
-
-          cat >> comment.md <<'EOF'
-
-          ### Linux
-          EOF
-
-          write_links "AppImage"
-          write_links "deb"
-          write_links "rpm"
-
-          cat >> comment.md <<'EOF'
-
-          ### macOS
-          EOF
-
-          write_links "dmg"
-
-          cat >> comment.md <<EOF
-
-          ---
-          *Last updated: ${{ github.event.pull_request.head.sha }} - Run #${{ github.run_number }}*
-          EOF
-
-      - name: Create or update comment
-        uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: ${{ github.event.pull_request.number }}
-          edit-mode: replace
-          body-path: comment.md
+          path: pr-info.json
+          archive: false
 
   release:
     needs: build
