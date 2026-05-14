@@ -3,7 +3,8 @@
 #
 # This script:
 # 1. Downloads python-build-standalone
-# 2. Installs ESPHome directly into the standalone Python (no venv)
+# 2. Installs ESPHome and ESPHome Device Builder directly into the
+#    standalone Python (no venv)
 # 3. Prepares it for bundling with the app
 #
 # Note: No venv is used to avoid absolute path issues in bundled executables
@@ -116,6 +117,18 @@ echo "=== Installing ESPHome ==="
 echo ""
 echo "=== Verifying ESPHome ==="
 "$PYTHON_DIR/$PYTHON_BIN" -m esphome version
+
+# Install ESPHome Device Builder (the default backend). Pre-releases are
+# allowed so the bundle tracks the BuilderBeta channel that's wired up as
+# Backend::default() in src-tauri/src/settings/mod.rs.
+echo ""
+echo "=== Installing ESPHome Device Builder ==="
+"$PYTHON_DIR/$PYTHON_BIN" -m pip install --pre esphome-device-builder
+
+# Verify ESPHome Device Builder
+echo ""
+echo "=== Verifying ESPHome Device Builder ==="
+"$PYTHON_DIR/$PYTHON_BIN" -c "from importlib.metadata import version; print('esphome-device-builder', version('esphome-device-builder'))"
 
 # Copy Python directory to bundle location
 echo ""
