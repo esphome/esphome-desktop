@@ -111,8 +111,8 @@ jobs:
 
           if [ -n "$comment_id" ]; then
             gh api "repos/${repo}/issues/comments/${comment_id}" \
-              --method PATCH -f body=@comment.md
+              --method PATCH -F body=@comment.md
           else
             gh api "repos/${repo}/issues/${pr_number}/comments" \
-              --method POST -f body=@comment.md
+              --method POST -F body=@comment.md
           fi
