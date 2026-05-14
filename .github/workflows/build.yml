@@ -82,6 +82,9 @@ jobs:
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
+          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
+          # produces broken cargo/rustc symlinks on the new macOS runner image.
+          cache-bin: false
 
       - name: Install Tauri CLI
         run: |
