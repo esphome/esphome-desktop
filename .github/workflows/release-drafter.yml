@@ -55,12 +55,52 @@ jobs:
           cd src-tauri
           cargo update --workspace
 
-      # github actions email from here: https://github.community/t/github-actions-bot-email-address/17204
+      # Commit via the GraphQL API so the commit is signed/verified as the GitHub App.
       - name: Commit changes
-        run: |
-          if ! git diff --quiet; then
-            git config --global user.name "esphomebot"
-            git config --global user.email "68923041+esphomebot@users.noreply.github.com"
-            git commit -am "Bump version to ${{ steps.version.outputs.version }}"
-            git push
-          fi
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        with:
+          github-token: ${{ steps.generate-token.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            const changed = execSync('git diff --name-only', { encoding: 'utf8' })
+              .split('\n')
+              .map(s => s.trim())
+              .filter(Boolean);
+
+            if (changed.length === 0) {
+              core.info('No changes to commit.');
+              return;
+            }
+
+            const additions = changed.map(path => ({
+              path,
+              contents: fs.readFileSync(path).toString('base64'),
+            }));
+
+            const expectedHeadOid = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+            const branchName = context.ref.replace(/^refs\/heads\//, '');
+
+            const result = await github.graphql(`
+              mutation($input: CreateCommitOnBranchInput!) {
+                createCommitOnBranch(input: $input) {
+                  commit { oid url }
+                }
+              }
+            `, {
+              input: {
+                branch: {
+                  repositoryNameWithOwner: `${context.repo.owner}/${context.repo.repo}`,
+                  branchName,
+                },
+                message: { headline: `Bump version to ${process.env.VERSION}` },
+                expectedHeadOid,
+                fileChanges: { additions },
+              },
+            });
+
+            core.info(`Created signed commit ${result.createCommitOnBranch.commit.oid}`);
+            core.info(result.createCommitOnBranch.commit.url);
