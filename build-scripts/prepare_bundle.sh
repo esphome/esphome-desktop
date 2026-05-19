@@ -130,9 +130,63 @@ echo ""
 echo "=== Verifying ESPHome Device Builder ==="
 "$PYTHON_DIR/$PYTHON_BIN" -c "from importlib.metadata import version; print('esphome-device-builder', version('esphome-device-builder'))"
 
-# Copy Python directory to bundle location
+# Rewrite pip-generated script shebangs so the bundle is relocatable.
+# pip bakes the build-time python path into every console-script shebang
+# (`#!$PYTHON_DIR/bin/python3`), so when the bundle ships to a user's
+# machine the kernel can't find the interpreter and every `esphome`,
+# `platformio`, `pip`, … invocation fails silently (see issue #34).
+# Replace each shebang with the same sh/Python polyglot that
+# python-build-standalone uses for its own scripts (idle3, pydoc3.13, …),
+# so the whole bin/ directory is consistent and relocatable.
+# Windows uses .exe launchers (not text scripts) so it's skipped here.
+if [[ "$PLATFORM" != "windows-x64" ]]; then
+    echo ""
+    echo "=== Making scripts relocatable ==="
+    PY_MAJOR_MINOR="${PYTHON_VERSION%.*}"
+    REWRITTEN=0
+    for script in "$PYTHON_DIR/bin"/*; do
+        [[ -f "$script" ]] || continue
+        # Skip symlinks (their targets are processed as regular files in this
+        # same loop, and the symlinks pick up the rewritten content).
+        [[ -L "$script" ]] && continue
+        # Skip the python3 executable itself and any other Mach-O / ELF binary.
+        if file -b "$script" | grep -qE 'Mach-O|ELF'; then
+            continue
+        fi
+        # Only rewrite scripts whose shebang points into the build python.
+        first_line=$(head -n1 "$script" 2>/dev/null) || continue
+        case "$first_line" in
+            "#!$PYTHON_DIR/"*) ;;
+            *) continue ;;
+        esac
+        {
+            printf '%s\n' '#!/bin/sh'
+            printf '%s\n' "'''exec' \"\$(dirname -- \"\$(realpath -- \"\$0\")\")/python${PY_MAJOR_MINOR}\" \"\$0\" \"\$@\""
+            printf '%s\n' "' '''"
+            tail -n +2 "$script"
+        } > "$script.relocatable"
+        chmod +x "$script.relocatable"
+        mv "$script.relocatable" "$script"
+        REWRITTEN=$((REWRITTEN + 1))
+    done
+    echo "Rewrote shebangs in $REWRITTEN scripts"
+fi
+
+# Strip __pycache__ directories. Python regenerates .pyc files at runtime
+# from the .py source, and the build-time .pyc files bake in absolute paths
+# to the build directory (visible in tracebacks), so shipping them just
+# bloats the bundle and leaks build paths to users.
+echo ""
+echo "=== Stripping __pycache__ ==="
+PYCACHE_COUNT=$(find "$PYTHON_DIR" -type d -name __pycache__ | wc -l)
+find "$PYTHON_DIR" -type d -name __pycache__ -exec rm -rf {} +
+echo "Removed $PYCACHE_COUNT __pycache__ directories"
+
+# Copy Python directory to bundle location. Wipe any prior bundle first so
+# `cp -R` can't fall back to merge behavior on top of a partial previous run.
 echo ""
 echo "=== Preparing bundle ==="
+rm -rf "$BUNDLE_DIR"
 cp -R "$PYTHON_DIR" "$BUNDLE_DIR"
 
 # Get size
