@@ -56,19 +56,19 @@ fi
 # Set platform-specific variables
 case $PLATFORM in
     macos-x64)
-        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-apple-darwin-install_only.tar.gz"
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-apple-darwin-install_only_stripped.tar.gz"
         PYTHON_BIN="bin/python3"
         ;;
     macos-arm64)
-        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-aarch64-apple-darwin-install_only.tar.gz"
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-aarch64-apple-darwin-install_only_stripped.tar.gz"
         PYTHON_BIN="bin/python3"
         ;;
     windows-x64)
-        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-pc-windows-msvc-install_only.tar.gz"
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
         PYTHON_BIN="python.exe"
         ;;
     linux-x64)
-        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-unknown-linux-gnu-install_only.tar.gz"
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
         PYTHON_BIN="bin/python3"
         ;;
 esac
