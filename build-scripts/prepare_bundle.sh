@@ -35,7 +35,11 @@ detect_platform() {
             fi
             ;;
         Linux)
-            echo "linux-x64"
+            if [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+                echo "linux-arm64"
+            else
+                echo "linux-x64"
+            fi
             ;;
         MINGW*|MSYS*|CYGWIN*)
             echo "windows-x64"
@@ -49,7 +53,7 @@ detect_platform() {
 PLATFORM="${1:-$(detect_platform)}"
 
 if [[ "$PLATFORM" == "unknown" ]]; then
-    echo "Could not detect platform. Please specify: macos-x64, macos-arm64, windows-x64, linux-x64"
+    echo "Could not detect platform. Please specify: macos-x64, macos-arm64, windows-x64, linux-x64, linux-arm64"
     exit 1
 fi
 
@@ -69,6 +73,10 @@ case $PLATFORM in
         ;;
     linux-x64)
         FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+        PYTHON_BIN="bin/python3"
+        ;;
+    linux-arm64)
+        FILENAME="cpython-${PYTHON_VERSION}+${PBS_VERSION}-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
         PYTHON_BIN="bin/python3"
         ;;
 esac

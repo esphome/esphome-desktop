@@ -16,12 +16,13 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 
 Download the latest release for your platform from the [Releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
 
-| Platform | Installer |
-|----------|-----------|
-| macOS (Apple Silicon) | `ESPHome.Builder_x.x.x_aarch64.dmg` |
-| macOS (Intel) | `ESPHome.Builder_x.x.x_x64.dmg` |
-| Windows | `ESPHome.Builder_x.x.x_x64-setup.exe` |
-| Linux | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb` |
+| Platform              | Installer                                                |
+| --------------------- | -------------------------------------------------------- |
+| macOS (Apple Silicon) | `ESPHome.Builder_x.x.x_aarch64.dmg`                      |
+| macOS (Intel)         | `ESPHome.Builder_x.x.x_x64.dmg`                          |
+| Windows               | `ESPHome.Builder_x.x.x_x64-setup.exe`                    |
+| Linux (x86_64)        | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb`         |
+| Linux (aarch64)       | `ESPHome.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
 
 ### First Run
 
