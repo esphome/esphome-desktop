@@ -59,8 +59,11 @@ jobs:
 
           write_links() {
             local ext="$1"
+            # Sort by name so the ordering is stable across builds — with
+            # multiple architectures in the same category (e.g. amd64 + arm64
+            # .deb files) the API otherwise returns them in completion order.
             echo "$artifacts" | jq -r --arg ext "$ext" \
-              '.[] | select(.name | test("\\." + $ext + "$"; "i")) | "- [\(.name)](https://github.com/'"$repo"'/actions/runs/'"$run_id"'/artifacts/\(.id))"' >> comment.md
+              '[.[] | select(.name | test("\\." + $ext + "$"; "i"))] | sort_by(.name) | .[] | "- [\(.name)](https://github.com/'"$repo"'/actions/runs/'"$run_id"'/artifacts/\(.id))"' >> comment.md
           }
 
           cat > comment.md <<'EOF'
