@@ -44,6 +44,15 @@ jobs:
             os: ubuntu-22.04
             target: linux-x64
             bundles: deb,rpm
+          - platform: linux
+            os: ubuntu-22.04-arm
+            target: linux-arm64
+            bundles: appimage
+            tauri_branch: feat/truly-portable-appimage
+          - platform: linux
+            os: ubuntu-22.04-arm
+            target: linux-arm64
+            bundles: deb,rpm
           - platform: macos
             os: macos-15
             target: macos-arm64
@@ -193,9 +202,11 @@ jobs:
           OFFSET=$("$APPIMAGE" --appimage-offset)
           dd if="$APPIMAGE" of=runtime.bin bs="$OFFSET" count=1
 
-          # Download mkdwarfs (same version used by quick-sharun.sh)
+          # Download mkdwarfs (same version used by quick-sharun.sh). The
+          # release asset name uses uname -m verbatim (x86_64 / aarch64).
           DWARFS_VERSION="0.14.1"
-          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-x86_64"
+          DWARFS_ARCH=$(uname -m)
+          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
           curl -L -o mkdwarfs "$DWARFS_URL"
           chmod +x mkdwarfs
 
