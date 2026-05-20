@@ -46,12 +46,9 @@ jobs:
             bundles: deb,rpm
           - platform: macos
             os: macos-15
-            target: macos-arm64
-            bundles: dmg
-          - platform: macos
-            os: macos-15
-            target: macos-x64
-            rust_target: x86_64-apple-darwin
+            target: macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            rust_build_target: universal-apple-darwin
             bundles: dmg
 
     runs-on: ${{ matrix.os }}
@@ -79,7 +76,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
         with:
-          targets: ${{ matrix.rust_target }}
+          targets: ${{ matrix.rust_targets }}
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -155,11 +152,11 @@ jobs:
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: cargo tauri build ${{ matrix.rust_build_target && format('--target {0}', matrix.rust_build_target) || '' }}
 
       - name: Build (macOS Release with signing)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: cargo tauri build ${{ matrix.rust_build_target && format('--target {0}', matrix.rust_build_target) || '' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -167,6 +164,23 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Normalize macOS universal DMG filename
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          DMG_DIR="src-tauri/target/${{ matrix.rust_build_target && format('{0}/', matrix.rust_build_target) || '' }}release/bundle/dmg"
+          DMG_FILE=$(find "$DMG_DIR" -maxdepth 1 -name '*.dmg' -print -quit)
+          if [[ -z "$DMG_FILE" ]]; then
+            echo "::error::No DMG produced in $DMG_DIR"
+            exit 1
+          fi
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          UNIVERSAL_DMG="$DMG_DIR/ESPHome.Builder_${VERSION}_universal.dmg"
+          if [[ "$DMG_FILE" != "$UNIVERSAL_DMG" ]]; then
+            mv "$DMG_FILE" "$UNIVERSAL_DMG"
+          fi
+          echo "Universal DMG: $UNIVERSAL_DMG"
 
       # The sharun-based AppImage format uses DwarFS and does not include Tauri
       # resources. The build leaves the AppDir intact, so we inject Python into
@@ -243,7 +257,7 @@ jobs:
         if: contains(matrix.bundles, 'dmg')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
+          path: src-tauri/target/${{ matrix.rust_build_target && format('{0}/', matrix.rust_build_target) || '' }}release/bundle/dmg/ESPHome.Builder_*_universal.dmg
           archive: false
 
   # Persist PR metadata so the companion "PR Comment" workflow (which runs
