@@ -162,7 +162,17 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(bundled_bin)
 }
 
-/// Ensure the user Python exists by copying from bundled Python if needed
+/// Filename of the marker recording which desktop-app version copied the
+/// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
+const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
+
+/// Ensure the user Python exists by copying from bundled Python if needed.
+///
+/// A version marker file is written into the user Python directory after the
+/// copy. On subsequent runs, if the marker is missing or doesn't match the
+/// current desktop-app version, the directory is wiped and re-copied so that
+/// updated app releases ship a fresh Python tree (e.g. new ESPHome version,
+/// changed dependencies). Without this, the first-run copy persisted forever.
 pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -183,8 +193,14 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
         let data_dir = get_data_dir(app_handle)?;
         let user_python = data_dir.join("python");
         let python_check = user_python.join("bin").join("python3");
+        let marker_path = user_python.join(PYTHON_VERSION_MARKER);
+        let current_version = env!("CARGO_PKG_VERSION");
 
-        let needs_copy = !python_check.exists();
+        let marker_matches = std::fs::read_to_string(&marker_path)
+            .map(|s| s.trim() == current_version)
+            .unwrap_or(false);
+
+        let needs_copy = !python_check.exists() || !marker_matches;
 
         if needs_copy {
             let resource_dir = get_bundled_resource_dir(app_handle)?;
@@ -194,14 +210,29 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                 anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
             }
 
-            info!("Copying bundled Python to user data directory...");
+            if user_python.exists() {
+                info!(
+                    "Removing stale user Python at {:?} (version marker missing or mismatched)",
+                    user_python
+                );
+                std::fs::remove_dir_all(&user_python)
+                    .context("Failed to remove stale user Python directory")?;
+            }
+
+            info!(
+                "Copying bundled Python to user data directory (version {})...",
+                current_version
+            );
 
             // Copy the bundled Python to user data
             copy_dir_recursive(&bundled_python, &user_python)?;
 
+            std::fs::write(&marker_path, current_version)
+                .context("Failed to write Python version marker")?;
+
             info!("User Python ready at {:?}", user_python);
         } else {
-            debug!("User Python already exists");
+            debug!("User Python already up-to-date (version {})", current_version);
         }
 
         Ok(())
