@@ -14,7 +14,7 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 
 ### Pre-built Installers
 
-Download the latest release for your platform from the [Releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
+Download the latest release for your platform from [desktop.esphome.io](https://desktop.esphome.io), or grab the files directly from the [GitHub releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
 
 | Platform | Installer |
 |----------|-----------|
