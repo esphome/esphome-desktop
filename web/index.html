@@ -399,14 +399,10 @@
         <h2 class="panel-title">For macOS</h2>
         <p class="panel-sub">macOS 10.15 Catalina or newer.</p>
         <div class="download-row">
-          <a class="btn" id="mac-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Builder_${VERSION}_aarch64.dmg">
+          <a class="btn" id="mac-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Builder_${VERSION}_universal.dmg">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
             Download disk image
           </a>
-          <div class="segmented" role="group" aria-label="Mac architecture">
-            <button type="button" data-arch="arm64" aria-pressed="true">Apple Silicon</button>
-            <button type="button" data-arch="x64" aria-pressed="false">Intel</button>
-          </div>
         </div>
         <div class="steps">
           <h3>Install</h3>
@@ -416,7 +412,7 @@
             <li>Open the Applications folder and double-click <strong>ESPHome Builder</strong>.</li>
             <li>The first time you run it, macOS may ask you to confirm — click <strong>Open</strong>.</li>
           </ol>
-          <div class="note">Not sure which Mac you have? Click the Apple menu → <strong>About This Mac</strong>. If you see <em>Apple M1/M2/M3/M4</em>, pick Apple Silicon. If you see <em>Intel</em>, pick Intel.</div>
+          <div class="note">One download supports both Apple Silicon and Intel Macs.</div>
         </div>
       </section>
 
@@ -533,28 +529,8 @@
 
       document.getElementById('windows-download').href = BASE + 'ESPHome.Builder_' + VERSION + '_x64-setup.exe';
 
-      const macFiles = {
-        arm64: BASE + 'ESPHome.Builder_' + VERSION + '_aarch64.dmg',
-        x64: BASE + 'ESPHome.Builder_' + VERSION + '_x64.dmg',
-      };
       const macBtn = document.getElementById('mac-download');
-      const macArchButtons = document.querySelectorAll('#panel-macos .segmented button');
-      function setMacArch(arch) {
-        macArchButtons.forEach(function (b) {
-          b.setAttribute('aria-pressed', b.dataset.arch === arch ? 'true' : 'false');
-        });
-        macBtn.href = macFiles[arch];
-      }
-      setMacArch('arm64');
-      macArchButtons.forEach(function (b) {
-        b.addEventListener('click', function () { setMacArch(b.dataset.arch); });
-      });
-
-      if (detected === 'macos' && navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
-        navigator.userAgentData.getHighEntropyValues(['architecture']).then(function (info) {
-          setMacArch(info.architecture === 'x86' ? 'x64' : 'arm64');
-        }).catch(function () {});
-      }
+      macBtn.href = BASE + 'ESPHome.Builder_' + VERSION + '_universal.dmg';
 
       const linuxFiles = {
         deb: { url: BASE + 'ESPHome.Builder_' + VERSION + '_amd64.deb', label: 'Download .deb' },

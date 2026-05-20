@@ -16,13 +16,12 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 
 Download the latest release for your platform from [desktop.esphome.io](https://desktop.esphome.io), or grab the files directly from the [GitHub releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
 
-| Platform              | Installer                                                |
-| --------------------- | -------------------------------------------------------- |
-| macOS (Apple Silicon) | `ESPHome.Builder_x.x.x_aarch64.dmg`                      |
-| macOS (Intel)         | `ESPHome.Builder_x.x.x_x64.dmg`                          |
-| Windows               | `ESPHome.Builder_x.x.x_x64-setup.exe`                    |
-| Linux (x86_64)        | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb`         |
-| Linux (aarch64)       | `ESPHome.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
+| Platform                      | Installer                                                |
+| ----------------------------- | -------------------------------------------------------- |
+| macOS (Apple Silicon + Intel) | `ESPHome.Builder_x.x.x_universal.dmg`                    |
+| Windows                       | `ESPHome.Builder_x.x.x_x64-setup.exe`                    |
+| Linux (x86_64)                | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb`         |
+| Linux (aarch64)               | `ESPHome.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
 
 ### First Run
 
@@ -101,11 +100,13 @@ On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Build
    ```bash
    ./build-scripts/prepare_bundle.sh
    ```
+   On macOS, use `./build-scripts/prepare_bundle.sh macos-universal` if you want a universal package that supports both Apple Silicon and Intel.
 
 4. Build:
    ```bash
    cargo tauri build
    ```
+   On macOS, use `cargo tauri build --target universal-apple-darwin` to produce the universal DMG.
 
 The installer will be in `src-tauri/target/release/bundle/`.
 
