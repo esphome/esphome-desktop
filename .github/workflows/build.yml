@@ -366,9 +366,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Only need the JSON Schema for latest.json validation; skip LFS / submodules.
+          # Need the latest.json generator script + the JSON Schema it produces;
+          # nothing else from the source tree is required by the release job.
           sparse-checkout: |
             .github/latest.schema.json
+            .github/scripts
           sparse-checkout-cone-mode: false
 
       - name: Find draft release

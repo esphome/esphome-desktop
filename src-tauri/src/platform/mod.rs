@@ -339,6 +339,33 @@ fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Maximum length of pip stderr included in a failure error message. pip's
+/// resolver and progress output can run to many kilobytes; the actionable
+/// failure reason is almost always at the tail, so we truncate to the last
+/// N bytes to keep log lines (and downstream UI surfaces) bounded.
+#[cfg(not(target_os = "windows"))]
+const PIP_STDERR_TAIL_BYTES: usize = 4096;
+
+/// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
+/// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
+/// char boundary so the result is always valid `str`.
+#[cfg(not(target_os = "windows"))]
+fn tail_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
+        return trimmed.to_string();
+    }
+    let mut start = trimmed.len() - PIP_STDERR_TAIL_BYTES;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "...(stderr truncated to last {} bytes)\n{}",
+        PIP_STDERR_TAIL_BYTES,
+        &trimmed[start..]
+    )
+}
+
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
 /// needing `--pre`. On timeout the child is killed and an error is returned;
@@ -381,7 +408,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
                 if status.success() {
                     return Ok(());
                 }
-                anyhow::bail!("pip install {} failed: {}", spec, stderr.trim());
+                anyhow::bail!("pip install {} failed: {}", spec, tail_for_log(&stderr));
             }
             None => {
                 if Instant::now() >= deadline {
@@ -395,7 +422,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
                         "pip install {} timed out after {:?}; partial stderr: {}",
                         spec,
                         PIP_INSTALL_TIMEOUT,
-                        stderr.trim()
+                        tail_for_log(&stderr)
                     );
                 }
                 std::thread::sleep(Duration::from_millis(500));
