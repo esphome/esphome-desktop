@@ -58,6 +58,20 @@ jobs:
           envsubst '$VERSION $TAG' < web/index.html > _site/index.html
           cp src-tauri/icons/128x128.png _site/icon.png
 
+      # Mirror the release manifest to the Pages site so consumers (download
+      # pages, integrations, etc.) can fetch a stable
+      # https://desktop.esphome.io/latest.json without hitting the GitHub
+      # releases API. The schema is published alongside it so the manifest's
+      # `$schema` reference resolves on the same domain.
+      - name: Mirror latest.json + schema to site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern latest.json --dir _site --clobber
+          cp .github/latest.schema.json _site/latest.schema.json
+
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 

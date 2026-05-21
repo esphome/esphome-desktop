@@ -6,7 +6,8 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 
 - **System Tray Integration**: Runs in the background with a system tray icon
 - **Single-Instance**: Only one instance runs at a time; launching again opens the browser
-- **Auto-Updates**: Checks for ESPHome updates and notifies you
+- **Auto-Updates**: Checks for ESPHome (Python) updates and notifies you
+- **Self-Updating App**: macOS DMG, Windows NSIS, and Linux AppImage installs can update themselves in-place from GitHub Releases
 - **Cross-Platform**: Native installers for macOS (DMG), Windows (NSIS), and Linux (AppImage/deb)
 - **Bundled Python**: Includes a full Python 3.13 runtime - no system Python required
 
@@ -49,7 +50,8 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Open Dashboard** - Open the dashboard in your browser
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
-- **Check for Updates** - Check for new ESPHome versions
+- **Check for Updates** - Check for new ESPHome (Python) versions
+- **Check for App Updates** - Check for a new ESPHome Builder desktop release and install it in-place
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
@@ -116,6 +118,19 @@ For development with hot-reload:
 ```bash
 cargo tauri dev
 ```
+
+### Releasing & Self-Update Signing
+
+The desktop app uses `tauri-plugin-updater` to check
+`https://github.com/esphome/esphome-desktop/releases/latest/download/latest.json`
+for new versions and install them in-place. When a release builds via
+`.github/workflows/build.yml`, every supported installer is signed with the
+Tauri Ed25519 key and a `latest.json` manifest is uploaded to the draft
+release. Once the release is published, existing installs pick it up on their
+next update check.
+
+Linux `.deb` / `.rpm` and AUR installs do **not** self-update — those users
+update through their system package manager.
 
 ## Configuration
 
