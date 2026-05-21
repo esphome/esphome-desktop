@@ -422,79 +422,17 @@ jobs:
             gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
           done
 
-      # Build the Tauri updater manifest from the per-platform .sig files now
-      # attached to the draft release, then upload it as latest.json. The app's
-      # updater plugin fetches this from
-      # https://github.com/<repo>/releases/latest/download/latest.json once the
-      # release is published.
+      # Build latest.json from the per-platform .sig files now attached to
+      # the draft release. See .github/scripts/generate_latest_json.py for
+      # the full manifest shape and the rationale around the `downloads`
+      # section (formats the Tauri updater doesn't ship — .deb, .rpm, .dmg)
+      # and the desktop.esphome.io schema reference.
       - name: Generate latest.json for updater
-        shell: python
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.find-release.outputs.tag_name }}
           REPO: ${{ github.repository }}
-        run: |
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          tag = os.environ['TAG']
-          repo = os.environ['REPO']
-          version = tag.lstrip('v')
-
-          release = json.loads(subprocess.check_output([
-              'gh', 'release', 'view', tag, '--repo', repo,
-              '--json', 'body,publishedAt,assets',
-          ], text=True))
-
-          assets_by_name = {a['name']: a for a in release.get('assets', [])}
-
-          # Each entry: (Tauri updater target, regex matching the .sig asset name)
-          platform_matchers = [
-              ('windows-x86_64', re.compile(r'.+-setup\.exe\.sig$')),
-              ('linux-x86_64',   re.compile(r'.+_amd64\.AppImage\.sig$')),
-              ('linux-aarch64',  re.compile(r'.+_aarch64\.AppImage\.sig$')),
-              ('darwin-aarch64', re.compile(r'.+_aarch64\.app\.tar\.gz\.sig$')),
-              ('darwin-x86_64',  re.compile(r'.+_x64\.app\.tar\.gz\.sig$')),
-          ]
-
-          platforms = {}
-          for plat, regex in platform_matchers:
-              candidates = [a for a in assets_by_name.values() if regex.match(a['name'])]
-              if not candidates:
-                  print(f'::warning::No signature asset found for {plat}', file=sys.stderr)
-                  continue
-              sig_asset = candidates[0]
-              bin_name = sig_asset['name'][:-len('.sig')]
-              bin_asset = assets_by_name.get(bin_name)
-              if not bin_asset:
-                  print(f'::warning::No matching binary asset for {sig_asset["name"]}', file=sys.stderr)
-                  continue
-              sig_files = list(Path('artifacts').rglob(sig_asset['name']))
-              if not sig_files:
-                  print(f'::warning::Signature file not found locally: {sig_asset["name"]}', file=sys.stderr)
-                  continue
-              signature = sig_files[0].read_text().strip()
-              platforms[plat] = {
-                  'signature': signature,
-                  'url': bin_asset['url'],
-              }
-
-          pub_date = release.get('publishedAt') or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-          manifest = {
-              'version': version,
-              'notes': release.get('body') or '',
-              'pub_date': pub_date,
-              'platforms': platforms,
-          }
-
-          Path('latest.json').write_text(json.dumps(manifest, indent=2))
-          print(json.dumps(manifest, indent=2))
+        run: python3 .github/scripts/generate_latest_json.py
 
       - name: Validate latest.json against schema
         run: |
