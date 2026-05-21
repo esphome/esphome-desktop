@@ -135,7 +135,7 @@ pub async fn check_and_notify(app_handle: &AppHandle) -> NextStep {
                 .builder()
                 .title("ESPHome Builder Update Available")
                 .body(format!(
-                    "Version {} is available (you have {}). Open the tray menu and choose \"Check for App Updates…\" to install.",
+                    "Version {} is available (you have {}). Open the tray menu and choose \"Check for App Updates...\" to install.",
                     update.version, update.current_version
                 ))
                 .show()

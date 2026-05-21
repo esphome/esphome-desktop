@@ -358,15 +358,28 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
     let mut child = cmd.spawn().context("Failed to spawn pip install")?;
     let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
 
+    // Drain stderr in a background thread. pip's progress bars and resolver
+    // diagnostics can easily exceed the OS pipe buffer (~64 KiB on Linux);
+    // if nothing reads the parent's end, pip blocks on `write()` mid-install,
+    // which would defeat the deadline and hang startup. The reader exits
+    // naturally once the child closes its stderr fd (normal exit or kill).
+    let mut stderr_thread = child.stderr.take().map(|mut handle| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = handle.read_to_string(&mut buf);
+            buf
+        })
+    });
+
     loop {
         match child.try_wait().context("Failed to poll pip install")? {
             Some(status) => {
+                let stderr = stderr_thread
+                    .take()
+                    .and_then(|t| t.join().ok())
+                    .unwrap_or_default();
                 if status.success() {
                     return Ok(());
-                }
-                let mut stderr = String::new();
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_string(&mut stderr);
                 }
                 anyhow::bail!("pip install {} failed: {}", spec, stderr.trim());
             }
@@ -374,10 +387,15 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let stderr = stderr_thread
+                        .take()
+                        .and_then(|t| t.join().ok())
+                        .unwrap_or_default();
                     anyhow::bail!(
-                        "pip install {} timed out after {:?}",
+                        "pip install {} timed out after {:?}; partial stderr: {}",
                         spec,
-                        PIP_INSTALL_TIMEOUT
+                        PIP_INSTALL_TIMEOUT,
+                        stderr.trim()
                     );
                 }
                 std::thread::sleep(Duration::from_millis(500));
