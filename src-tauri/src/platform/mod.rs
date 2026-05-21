@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use tracing::debug;
 
@@ -210,6 +210,23 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                 anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
             }
 
+            // Snapshot the user's pre-existing package versions BEFORE the
+            // wipe so we can restore them after the bundled tree is in place.
+            // Without this, a user who pip-bumped ESPHome past the bundled
+            // version would silently get downgraded by every app self-update.
+            let preserved = if python_check.exists() {
+                let old_python_bin = python_check.clone();
+                PreservedVersions {
+                    esphome: read_package_version(&old_python_bin, "esphome"),
+                    esphome_device_builder: read_package_version(
+                        &old_python_bin,
+                        "esphome-device-builder",
+                    ),
+                }
+            } else {
+                PreservedVersions::default()
+            };
+
             if user_python.exists() {
                 info!(
                     "Removing stale user Python at {:?} (version marker missing or mismatched)",
@@ -230,6 +247,8 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             std::fs::write(&marker_path, current_version)
                 .context("Failed to write Python version marker")?;
 
+            restore_preserved_versions(&python_check, &preserved);
+
             info!("User Python ready at {:?}", user_python);
         } else {
             debug!("User Python already up-to-date (version {})", current_version);
@@ -237,6 +256,95 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
 
         Ok(())
     }
+}
+
+/// User-preferred package versions captured before the bundled Python tree
+/// is wiped during an app-version refresh. See [`ensure_user_python`].
+#[derive(Debug, Default)]
+struct PreservedVersions {
+    esphome: Option<String>,
+    esphome_device_builder: Option<String>,
+}
+
+/// Reinstall any preserved package whose pinned version is newer than the
+/// version that just shipped in the new bundled Python tree. Bundled wins
+/// for ties and for when bundled is newer (so users always benefit from the
+/// app's fresher bundle when they haven't explicitly bumped past it). Each
+/// reinstall is best-effort — a network failure here logs a warning and
+/// falls through to the bundled version rather than blocking app start.
+#[cfg(not(target_os = "windows"))]
+fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) {
+    use tracing::{info, warn};
+
+    for (package, saved) in [
+        ("esphome", preserved.esphome.as_deref()),
+        ("esphome-device-builder", preserved.esphome_device_builder.as_deref()),
+    ] {
+        let Some(saved) = saved else { continue };
+        let Some(bundled) = read_package_version(python_bin, package) else {
+            // Package isn't in the bundled tree (shouldn't happen for these
+            // two, but don't fight it). Skip the restore.
+            continue;
+        };
+        if !crate::update::is_newer_version(saved, &bundled) {
+            debug!(
+                "Bundled {} {} satisfies user preference {}; not reinstalling",
+                package, bundled, saved
+            );
+            continue;
+        }
+        info!(
+            "Restoring user-preferred {} {} over bundled {}",
+            package, saved, bundled
+        );
+        if let Err(e) = pip_install_blocking(python_bin, package, saved) {
+            warn!(
+                "Failed to restore {} {}: {}. Continuing with bundled {}.",
+                package, saved, e, bundled
+            );
+        }
+    }
+}
+
+/// Read the installed version of a Python package via `importlib.metadata`.
+/// Returns `None` if the package isn't installed or the call fails.
+#[cfg(not(target_os = "windows"))]
+fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
+    let script = format!(
+        "from importlib.metadata import version, PackageNotFoundError\n\
+         try: print(version('{}'))\n\
+         except PackageNotFoundError: pass",
+        package
+    );
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-c", &script]);
+    configure_no_window_command(&mut cmd);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// Synchronously run `pip install <package>==<version>`. Pinning the exact
+/// version lets pip resolve pre-releases without needing `--pre`.
+#[cfg(not(target_os = "windows"))]
+fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
+    let spec = format!("{}=={}", package, version);
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-m", "pip", "install", &spec]);
+    configure_no_window_command(&mut cmd);
+    let output = cmd.output().context("Failed to run pip install")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("pip install {} failed: {}", spec, stderr.trim());
+    }
+    Ok(())
 }
 
 /// Recursively copy a directory

@@ -35,11 +35,13 @@ jobs:
             os: windows-latest
             target: windows-x64
             bundles: nsis
+            updater_target: windows-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
             bundles: appimage
             tauri_branch: feat/truly-portable-appimage
+            updater_target: linux-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
@@ -49,6 +51,7 @@ jobs:
             target: linux-arm64
             bundles: appimage
             tauri_branch: feat/truly-portable-appimage
+            updater_target: linux-aarch64
           - platform: linux
             os: ubuntu-22.04-arm
             target: linux-arm64
@@ -57,11 +60,13 @@ jobs:
             os: macos-15
             target: macos-arm64
             bundles: dmg
+            updater_target: darwin-aarch64
           - platform: macos
             os: macos-15
             target: macos-x64
             rust_target: x86_64-apple-darwin
             bundles: dmg
+            updater_target: darwin-x86_64
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
@@ -145,9 +150,17 @@ jobs:
 
       - name: Build (Linux Release)
         if: matrix.platform == 'linux' && github.event_name == 'workflow_run'
-        run: cargo tauri build --verbose --bundles ${{ matrix.bundles }}
+        shell: bash
+        run: |
+          extra_args=""
+          if [[ -n "${{ matrix.updater_target }}" ]]; then
+            extra_args="--config src-tauri/tauri.release.conf.json"
+          fi
+          cargo tauri build --verbose --bundles ${{ matrix.bundles }} $extra_args
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Build step - Windows CI
       - name: Build (Windows CI)
@@ -156,7 +169,7 @@ jobs:
 
       - name: Build (Windows Release with signing)
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
-        run: cargo tauri build
+        run: cargo tauri build --config src-tauri/tauri.release.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -168,7 +181,7 @@ jobs:
 
       - name: Build (macOS Release with signing)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -176,6 +189,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # The sharun-based AppImage format uses DwarFS and does not include Tauri
       # resources. The build leaves the AppDir intact, so we inject Python into
@@ -221,6 +236,45 @@ jobs:
           # Clean up
           rm -f runtime.bin new.dwarfs mkdwarfs
 
+      # The .AppImage.sig produced by `cargo tauri build` was signed before the
+      # Python bundle was injected and the file repacked, so it's stale. Re-sign
+      # the final AppImage so the Tauri updater can verify it.
+      - name: Re-sign AppImage for updater
+        if: contains(matrix.bundles, 'appimage') && github.event_name == 'workflow_run'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          cargo tauri signer sign \
+            --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
+            --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
+            "$APPIMAGE"
+          echo "Signed: $APPIMAGE"
+          ls -la "${APPIMAGE}.sig"
+
+      # The macOS updater format is .app.tar.gz, which Tauri names after the
+      # product (no version or arch). Rename per-arch so the two macOS jobs'
+      # uploads don't collide on the release.
+      - name: Stage macOS updater artifact
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos"
+          arch="${{ matrix.target == 'macos-arm64' && 'aarch64' || 'x64' }}"
+          shopt -s nullglob
+          for f in "$bundle_dir"/*.app.tar.gz; do
+            base="$(basename "$f" .app.tar.gz)"
+            new="$bundle_dir/${base}_${arch}.app.tar.gz"
+            mv "$f" "$new"
+            if [[ -f "${f}.sig" ]]; then
+              mv "${f}.sig" "${new}.sig"
+            fi
+            echo "Staged: $new"
+          done
+
       # Upload artifacts
       - name: Upload NSIS
         if: contains(matrix.bundles, 'nsis')
@@ -229,11 +283,25 @@ jobs:
           path: src-tauri/target/release/bundle/nsis/*.exe
           archive: false
 
+      - name: Upload NSIS updater signature
+        if: contains(matrix.bundles, 'nsis') && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: src-tauri/target/release/bundle/nsis/*.exe.sig
+          archive: false
+
       - name: Upload AppImage
         if: contains(matrix.bundles, 'appimage')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/appimage/*.AppImage
+          archive: false
+
+      - name: Upload AppImage updater signature
+        if: contains(matrix.bundles, 'appimage') && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: src-tauri/target/release/bundle/appimage/*.AppImage.sig
           archive: false
 
       - name: Upload deb
@@ -255,6 +323,15 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
+          archive: false
+
+      - name: Upload macOS updater bundle
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: |
+            src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz.sig
           archive: false
 
   # Persist PR metadata so the companion "PR Comment" workflow (which runs
@@ -286,6 +363,14 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Only need the JSON Schema for latest.json validation; skip LFS / submodules.
+          sparse-checkout: |
+            .github/latest.schema.json
+          sparse-checkout-cone-mode: false
+
       - name: Find draft release
         id: find-release
         env:
@@ -336,6 +421,94 @@ jobs:
             echo "Uploading: $file"
             gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
           done
+
+      # Build the Tauri updater manifest from the per-platform .sig files now
+      # attached to the draft release, then upload it as latest.json. The app's
+      # updater plugin fetches this from
+      # https://github.com/<repo>/releases/latest/download/latest.json once the
+      # release is published.
+      - name: Generate latest.json for updater
+        shell: python
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.find-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          tag = os.environ['TAG']
+          repo = os.environ['REPO']
+          version = tag.lstrip('v')
+
+          release = json.loads(subprocess.check_output([
+              'gh', 'release', 'view', tag, '--repo', repo,
+              '--json', 'body,publishedAt,assets',
+          ], text=True))
+
+          assets_by_name = {a['name']: a for a in release.get('assets', [])}
+
+          # Each entry: (Tauri updater target, regex matching the .sig asset name)
+          platform_matchers = [
+              ('windows-x86_64', re.compile(r'.+-setup\.exe\.sig$')),
+              ('linux-x86_64',   re.compile(r'.+_amd64\.AppImage\.sig$')),
+              ('linux-aarch64',  re.compile(r'.+_aarch64\.AppImage\.sig$')),
+              ('darwin-aarch64', re.compile(r'.+_aarch64\.app\.tar\.gz\.sig$')),
+              ('darwin-x86_64',  re.compile(r'.+_x64\.app\.tar\.gz\.sig$')),
+          ]
+
+          platforms = {}
+          for plat, regex in platform_matchers:
+              candidates = [a for a in assets_by_name.values() if regex.match(a['name'])]
+              if not candidates:
+                  print(f'::warning::No signature asset found for {plat}', file=sys.stderr)
+                  continue
+              sig_asset = candidates[0]
+              bin_name = sig_asset['name'][:-len('.sig')]
+              bin_asset = assets_by_name.get(bin_name)
+              if not bin_asset:
+                  print(f'::warning::No matching binary asset for {sig_asset["name"]}', file=sys.stderr)
+                  continue
+              sig_files = list(Path('artifacts').rglob(sig_asset['name']))
+              if not sig_files:
+                  print(f'::warning::Signature file not found locally: {sig_asset["name"]}', file=sys.stderr)
+                  continue
+              signature = sig_files[0].read_text().strip()
+              platforms[plat] = {
+                  'signature': signature,
+                  'url': bin_asset['url'],
+              }
+
+          pub_date = release.get('publishedAt') or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+          manifest = {
+              'version': version,
+              'notes': release.get('body') or '',
+              'pub_date': pub_date,
+              'platforms': platforms,
+          }
+
+          Path('latest.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
+
+      - name: Validate latest.json against schema
+        run: |
+          set -euo pipefail
+          pip install --quiet check-jsonschema
+          check-jsonschema --schemafile .github/latest.schema.json latest.json
+
+      - name: Upload latest.json to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.find-release.outputs.tag_name }}"
+          gh release upload "$tag" latest.json --repo "${{ github.repository }}" --clobber
 
       - name: Remove assets-pending warning from release body
         env:

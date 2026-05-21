@@ -49,6 +49,15 @@
   "plugins": {
     "shell": {
       "open": true
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/esphome/esphome-desktop/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI3MDI1M0QwQTJFNTc2QkEKUldTNmR1V2kwRk1DdHcwMnBvb1E1eEFOQUVHK1k0MXRLMUFzUzZQZWUwZVpVWHYxVXRJM2xTTEgK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

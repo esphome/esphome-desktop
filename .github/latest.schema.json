@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/esphome/esphome-desktop/blob/main/.github/latest.schema.json",
+  "title": "Tauri Updater Manifest (latest.json)",
+  "description": "Shape of the latest.json manifest consumed by tauri-plugin-updater. The release workflow generates this from the per-platform .sig files and uploads it as a release asset.",
+  "type": "object",
+  "required": ["version", "pub_date", "platforms"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Application version (semver, no leading 'v').",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Release notes shown to the user before installing."
+    },
+    "pub_date": {
+      "type": "string",
+      "description": "ISO 8601 timestamp of when the release was published.",
+      "format": "date-time"
+    },
+    "platforms": {
+      "type": "object",
+      "description": "Per-platform updater bundles. At least one platform must be present.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["url", "signature"],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Download URL for the platform's updater bundle. Must point at a GitHub release asset on this repo and end in a supported updater bundle extension.",
+            "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/.+\\.(exe|AppImage|app\\.tar\\.gz)$"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Tauri-generated signature (full .sig file contents).",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
