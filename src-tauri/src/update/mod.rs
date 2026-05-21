@@ -766,7 +766,7 @@ fn parse_version(s: &str) -> Vec<(u32, u8, u32)> {
 }
 
 /// Compare two version strings and return true if `latest` is newer than `installed`
-pub fn is_newer_version(latest: &str, installed: &str) -> bool {
+pub(crate) fn is_newer_version(latest: &str, installed: &str) -> bool {
     let latest_parts = parse_version(latest);
     let installed_parts = parse_version(installed);
 
