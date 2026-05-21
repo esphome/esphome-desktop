@@ -434,6 +434,10 @@
             <button type="button" data-format="aur" aria-pressed="false">Arch (AUR)</button>
             <button type="button" data-format="appimage" aria-pressed="false">AppImage</button>
           </div>
+          <div class="segmented" role="group" aria-label="Linux architecture">
+            <button type="button" data-arch="x64" aria-pressed="true">x86_64</button>
+            <button type="button" data-arch="arm64" aria-pressed="false">arm64</button>
+          </div>
         </div>
         <div class="steps">
           <h3>Install</h3>
@@ -490,101 +494,149 @@
     (function () {
       const TAG = document.querySelector('meta[name="esphome-tag"]').content;
       const VERSION = document.querySelector('meta[name="esphome-version"]').content;
-      const BASE = 'https://github.com/esphome/esphome-desktop/releases/download/' + TAG + '/';
+      const BASE = `https://github.com/esphome/esphome-desktop/releases/download/${TAG}/`;
+      const asset = (filename) => BASE + filename;
 
       const ua = navigator.userAgent;
       const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
-      let detected = 'windows';
-      if (/Mac/i.test(platform) || /Mac OS X/i.test(ua)) detected = 'macos';
-      else if (/Linux|X11|CrOS/i.test(platform + ' ' + ua) && !/Android/i.test(ua)) detected = 'linux';
-      else if (/Win/i.test(platform) || /Windows/i.test(ua)) detected = 'windows';
 
+      function detectOS() {
+        if (/Mac/i.test(platform) || /Mac OS X/i.test(ua)) return 'macos';
+        if (/Linux|X11|CrOS/i.test(`${platform} ${ua}`) && !/Android/i.test(ua)) return 'linux';
+        return 'windows';
+      }
+
+      // Resolve CPU architecture via UA-CH high-entropy values. Returns 'arm64',
+      // 'x64', or null when unknown (older browsers, blocked permission, etc).
+      function detectArchAsync() {
+        if (!navigator.userAgentData || !navigator.userAgentData.getHighEntropyValues) {
+          return Promise.resolve(null);
+        }
+        return navigator.userAgentData.getHighEntropyValues(['architecture'])
+          .then((info) => {
+            if (!info.architecture) return null;
+            return /arm/i.test(info.architecture) ? 'arm64' : 'x64';
+          })
+          .catch(() => null);
+      }
+
+      // Wire a segmented (radio-like) button group. Paints the initial state but
+      // does not fire onChange — callers do the initial render themselves so
+      // refresh callbacks can safely close over peer controls.
+      function segmented(selector, dataKey, initial, onChange) {
+        const buttons = document.querySelectorAll(selector);
+        let value = initial;
+        const paint = () => buttons.forEach((b) => {
+          b.setAttribute('aria-pressed', b.dataset[dataKey] === value ? 'true' : 'false');
+        });
+        const set = (v) => { value = v; paint(); onChange(v); };
+        buttons.forEach((b) => {
+          b.addEventListener('click', () => set(b.dataset[dataKey]));
+        });
+        paint();
+        return { set, get: () => value };
+      }
+
+      // ---- Tabs ----
+      const TAB_ORDER = ['windows', 'macos', 'linux'];
       const tabs = document.querySelectorAll('[role="tab"]');
       const panels = document.querySelectorAll('[role="tabpanel"]');
+
       function selectTab(os) {
-        tabs.forEach(function (t) {
+        tabs.forEach((t) => {
           const on = t.dataset.os === os;
           t.setAttribute('aria-selected', on ? 'true' : 'false');
           t.tabIndex = on ? 0 : -1;
         });
-        panels.forEach(function (p) {
-          p.hidden = p.id !== 'panel-' + os;
-        });
+        panels.forEach((p) => { p.hidden = p.id !== `panel-${os}`; });
       }
-      tabs.forEach(function (t) {
-        t.addEventListener('click', function () { selectTab(t.dataset.os); });
-        t.addEventListener('keydown', function (e) {
-          const order = ['windows', 'macos', 'linux'];
-          const i = order.indexOf(t.dataset.os);
-          if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            const next = order[(i + 1) % order.length];
-            selectTab(next);
-            document.getElementById('tab-' + next).focus();
-          } else if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            const prev = order[(i - 1 + order.length) % order.length];
-            selectTab(prev);
-            document.getElementById('tab-' + prev).focus();
-          }
+
+      tabs.forEach((t) => {
+        t.addEventListener('click', () => selectTab(t.dataset.os));
+        t.addEventListener('keydown', (e) => {
+          if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+          e.preventDefault();
+          const i = TAB_ORDER.indexOf(t.dataset.os);
+          const delta = e.key === 'ArrowRight' ? 1 : -1;
+          const next = TAB_ORDER[(i + delta + TAB_ORDER.length) % TAB_ORDER.length];
+          selectTab(next);
+          document.getElementById(`tab-${next}`).focus();
         });
       });
+
+      // ---- Windows ----
+      function setupWindows() {
+        document.getElementById('windows-download').href = asset(`ESPHome.Builder_${VERSION}_x64-setup.exe`);
+      }
+
+      // ---- macOS ----
+      function setupMacOS(detected) {
+        const files = {
+          arm64: asset(`ESPHome.Builder_${VERSION}_aarch64.dmg`),
+          x64: asset(`ESPHome.Builder_${VERSION}_x64.dmg`),
+        };
+        const btn = document.getElementById('mac-download');
+        const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', (a) => {
+          btn.href = files[a];
+        });
+        btn.href = files[arch.get()];
+
+        if (detected === 'macos') {
+          detectArchAsync().then((a) => { if (a) arch.set(a); });
+        }
+      }
+
+      // ---- Linux ----
+      function setupLinux(detected) {
+        const AUR = { url: 'https://aur.archlinux.org/packages/esphome-desktop-bin', label: 'View on AUR' };
+        const files = {
+          x64: {
+            deb: { url: asset(`ESPHome.Builder_${VERSION}_amd64.deb`), label: 'Download .deb' },
+            rpm: { url: asset(`ESPHome.Builder-${VERSION}-1.x86_64.rpm`), label: 'Download .rpm' },
+            aur: AUR,
+            appimage: { url: asset(`ESPHome.Builder_${VERSION}_amd64.AppImage`), label: 'Download AppImage' },
+          },
+          arm64: {
+            deb: { url: asset(`ESPHome.Builder_${VERSION}_arm64.deb`), label: 'Download .deb' },
+            rpm: { url: asset(`ESPHome.Builder-${VERSION}-1.aarch64.rpm`), label: 'Download .rpm' },
+            aur: AUR,
+            appimage: { url: asset(`ESPHome.Builder_${VERSION}_aarch64.AppImage`), label: 'Download AppImage' },
+          },
+        };
+        const btn = document.getElementById('linux-download');
+        const label = document.getElementById('linux-download-label');
+        const installBlocks = {
+          deb: document.getElementById('linux-install-deb'),
+          rpm: document.getElementById('linux-install-rpm'),
+          aur: document.getElementById('linux-install-aur'),
+          appimage: document.getElementById('linux-install-appimage'),
+        };
+
+        function refresh() {
+          const entry = files[arch.get()][format.get()];
+          btn.href = entry.url;
+          label.textContent = entry.label;
+          Object.keys(installBlocks).forEach((k) => {
+            installBlocks[k].hidden = k !== format.get();
+          });
+        }
+
+        const format = segmented('#panel-linux [aria-label="Linux package format"] button', 'format', 'deb', refresh);
+        const arch = segmented('#panel-linux [aria-label="Linux architecture"] button', 'arch', 'x64', refresh);
+        refresh();
+
+        if (detected === 'linux') {
+          if (/aarch64|arm64/i.test(`${platform} ${ua}`)) arch.set('arm64');
+          detectArchAsync().then((a) => { if (a) arch.set(a); });
+        }
+      }
+
+      // ---- Init ----
+      const detected = detectOS();
       selectTab(detected);
-
-      document.getElementById('windows-download').href = BASE + 'ESPHome.Builder_' + VERSION + '_x64-setup.exe';
-
-      const macFiles = {
-        arm64: BASE + 'ESPHome.Builder_' + VERSION + '_aarch64.dmg',
-        x64: BASE + 'ESPHome.Builder_' + VERSION + '_x64.dmg',
-      };
-      const macBtn = document.getElementById('mac-download');
-      const macArchButtons = document.querySelectorAll('#panel-macos .segmented button');
-      function setMacArch(arch) {
-        macArchButtons.forEach(function (b) {
-          b.setAttribute('aria-pressed', b.dataset.arch === arch ? 'true' : 'false');
-        });
-        macBtn.href = macFiles[arch];
-      }
-      setMacArch('arm64');
-      macArchButtons.forEach(function (b) {
-        b.addEventListener('click', function () { setMacArch(b.dataset.arch); });
-      });
-
-      if (detected === 'macos' && navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
-        navigator.userAgentData.getHighEntropyValues(['architecture']).then(function (info) {
-          setMacArch(info.architecture === 'x86' ? 'x64' : 'arm64');
-        }).catch(function () {});
-      }
-
-      const linuxFiles = {
-        deb: { url: BASE + 'ESPHome.Builder_' + VERSION + '_amd64.deb', label: 'Download .deb' },
-        rpm: { url: BASE + 'ESPHome.Builder-' + VERSION + '-1.x86_64.rpm', label: 'Download .rpm' },
-        aur: { url: 'https://aur.archlinux.org/packages/esphome-desktop-bin', label: 'View on AUR' },
-        appimage: { url: BASE + 'ESPHome.Builder_' + VERSION + '_amd64.AppImage', label: 'Download AppImage' },
-      };
-      const linuxBtn = document.getElementById('linux-download');
-      const linuxLabel = document.getElementById('linux-download-label');
-      const linuxFormatButtons = document.querySelectorAll('#panel-linux .segmented button');
-      const linuxInstallBlocks = {
-        deb: document.getElementById('linux-install-deb'),
-        rpm: document.getElementById('linux-install-rpm'),
-        aur: document.getElementById('linux-install-aur'),
-        appimage: document.getElementById('linux-install-appimage'),
-      };
-      function setLinuxFormat(format) {
-        linuxFormatButtons.forEach(function (b) {
-          b.setAttribute('aria-pressed', b.dataset.format === format ? 'true' : 'false');
-        });
-        linuxBtn.href = linuxFiles[format].url;
-        linuxLabel.textContent = linuxFiles[format].label;
-        Object.keys(linuxInstallBlocks).forEach(function (k) {
-          linuxInstallBlocks[k].hidden = k !== format;
-        });
-      }
-      setLinuxFormat('deb');
-      linuxFormatButtons.forEach(function (b) {
-        b.addEventListener('click', function () { setLinuxFormat(b.dataset.format); });
-      });
+      setupWindows();
+      setupMacOS(detected);
+      setupLinux(detected);
     })();
   </script>
 </body>
