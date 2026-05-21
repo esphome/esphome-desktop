@@ -310,10 +310,11 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 /// Returns `None` if the package isn't installed or the call fails.
 #[cfg(not(target_os = "windows"))]
 fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
+    // Written as a single-line literal with explicit `\n` so each Python
+    // statement starts at column zero — avoids any ambiguity about whether
+    // a Rust line-continuation strips the source-line indentation.
     let script = format!(
-        "from importlib.metadata import version, PackageNotFoundError\n\
-         try: print(version('{}'))\n\
-         except PackageNotFoundError: pass",
+        "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
     );
     let mut cmd = std::process::Command::new(python_bin);
@@ -331,20 +332,58 @@ fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
     }
 }
 
-/// Synchronously run `pip install <package>==<version>`. Pinning the exact
-/// version lets pip resolve pre-releases without needing `--pre`.
+/// Hard upper bound on a single `pip install` invocation during the
+/// version-restore path. Five minutes is well over the time needed to
+/// upgrade `esphome` on a working connection; bounding it prevents a
+/// stalled network from hanging app startup indefinitely.
+#[cfg(not(target_os = "windows"))]
+const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Synchronously run `pip install <package>==<version>` with a wall-clock
+/// timeout. Pinning the exact version lets pip resolve pre-releases without
+/// needing `--pre`. On timeout the child is killed and an error is returned;
+/// the caller logs a warning and falls back to the bundled version, so a
+/// stalled pip can't block app launch.
 #[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
     let spec = format!("{}=={}", package, version);
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
+    cmd.stderr(std::process::Stdio::piped());
     configure_no_window_command(&mut cmd);
-    let output = cmd.output().context("Failed to run pip install")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("pip install {} failed: {}", spec, stderr.trim());
+
+    let mut child = cmd.spawn().context("Failed to spawn pip install")?;
+    let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
+
+    loop {
+        match child.try_wait().context("Failed to poll pip install")? {
+            Some(status) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                anyhow::bail!("pip install {} failed: {}", spec, stderr.trim());
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!(
+                        "pip install {} timed out after {:?}",
+                        spec,
+                        PIP_INSTALL_TIMEOUT
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
     }
-    Ok(())
 }
 
 /// Recursively copy a directory
