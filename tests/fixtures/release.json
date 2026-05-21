@@ -1,5 +1,5 @@
 {
-  "_comment": "Mock output of `gh release view <tag> --json body,publishedAt,assets`. Used by tests/run_generate_latest_json.sh and as a manual fixture for .github/scripts/generate_latest_json.py. Asset URLs are dot-substituted GitHub release download URLs; sizes are illustrative.",
+  "_comment": "Mock output of `gh release view <tag> --json body,publishedAt,assets`. Used as a manual fixture for `.github/scripts/generate_latest_json.py`. Asset URLs are dot-substituted GitHub release download URLs; sizes are illustrative.",
   "body": "## What's Changed\n\n* Fixture release used to exercise the latest.json generator.\n\n**Full Changelog**: https://github.com/esphome/esphome-desktop/compare/v0.9.0...v0.10.0",
   "publishedAt": "2026-05-22T14:31:08Z",
   "assets": [
