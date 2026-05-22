@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for ESPHome Desktop",
+  "description": "Default capabilities for ESPHome Device Builder",
   "windows": [],
   "permissions": [
     "core:default",

@@ -201,7 +201,7 @@ jobs:
           set -euo pipefail
 
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
-          APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Builder.AppDir"
+          APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Device Builder.AppDir"
           echo "Found AppImage: $APPIMAGE"
           echo "AppDir: $APPDIR"
 

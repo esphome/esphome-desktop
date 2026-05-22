@@ -1,4 +1,4 @@
-# Contributing to ESPHome Builder [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome-desktop.svg)](https://GitHub.com/esphome/esphome-desktop/releases/)
+# Contributing to ESPHome Device Builder [![Discord Chat](https://img.shields.io/discord/429907082951524364.svg)](https://discord.gg/KhAMKrd) [![GitHub release](https://img.shields.io/github/release/esphome/esphome-desktop.svg)](https://GitHub.com/esphome/esphome-desktop/releases/)
 
 We welcome contributions to the ESPHome suite of code and documentation!
 

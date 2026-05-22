@@ -1,7 +1,7 @@
 //! Desktop application self-updater.
 //!
 //! Wraps `tauri-plugin-updater` to check GitHub Releases for a new version
-//! of the ESPHome Builder desktop app itself (not the bundled ESPHome
+//! of the ESPHome Device Builder desktop app itself (not the bundled ESPHome
 //! Python package — that lives in [`crate::update`]).
 //!
 //! The app self-update ships with a fresh Python bundle (ESPHome and
@@ -90,7 +90,7 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             info!("Desktop app is up to date ({})", current);
             if show_no_update_dialog {
                 let dialog_app = app_handle.clone();
-                let msg = format!("ESPHome Builder {} is the latest version.", current);
+                let msg = format!("ESPHome Device Builder {} is the latest version.", current);
                 let _ = tokio::task::spawn_blocking(move || {
                     dialog_app
                         .dialog()
@@ -133,7 +133,7 @@ pub async fn check_and_notify(app_handle: &AppHandle) -> NextStep {
             if let Err(e) = app_handle
                 .notification()
                 .builder()
-                .title("ESPHome Builder Update Available")
+                .title("ESPHome Device Builder Update Available")
                 .body(format!(
                     "Version {} is available (you have {}). Open the tray menu and choose \"Check for App Updates...\" to install.",
                     update.version, update.current_version
@@ -187,7 +187,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             info!("Desktop update {} installed", new_version);
             let dialog_app = app_handle.clone();
             let msg = format!(
-                "ESPHome Builder {} has been installed.\n\nRestart now to use the new version?",
+                "ESPHome Device Builder {} has been installed.\n\nRestart now to use the new version?",
                 new_version
             );
             let restart = tokio::task::spawn_blocking(move || {
@@ -233,7 +233,7 @@ fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
     let trimmed_notes = notes.trim();
     if trimmed_notes.is_empty() {
         format!(
-            "ESPHome Builder {} is available.\n\nYou currently have version {}.\n\nWould you like to download and install it now?",
+            "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nWould you like to download and install it now?",
             new, current
         )
     } else {
@@ -245,7 +245,7 @@ fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
             ""
         };
         format!(
-            "ESPHome Builder {} is available.\n\nYou currently have version {}.\n\nRelease notes:\n{}{}\n\nWould you like to download and install it now?",
+            "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nRelease notes:\n{}{}\n\nWould you like to download and install it now?",
             new, current, preview, elided
         )
     }

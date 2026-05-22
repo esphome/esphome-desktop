@@ -64,8 +64,8 @@ impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Classic => write!(f, "Classic ESPHome Dashboard"),
-            Self::BuilderStable => write!(f, "ESPHome Builder (stable)"),
-            Self::BuilderBeta => write!(f, "ESPHome Builder (beta)"),
+            Self::BuilderStable => write!(f, "ESPHome Device Builder (stable)"),
+            Self::BuilderBeta => write!(f, "ESPHome Device Builder (beta)"),
         }
     }
 }

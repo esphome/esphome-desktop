@@ -1,4 +1,4 @@
-//! ESPHome Builder Application
+//! ESPHome Device Builder Application
 //!
 //! A cross-platform desktop application that manages ESPHome as a background daemon
 //! with system tray integration.
@@ -36,10 +36,10 @@ pub enum BuilderChannelArg {
     Beta,
 }
 
-/// ESPHome Desktop - System tray application for ESPHome
+/// ESPHome Device Builder - System tray application for ESPHome
 #[derive(Parser, Debug, Clone)]
 #[command(name = "esphome-desktop")]
-#[command(about = "ESPHome Desktop Builder", long_about = None)]
+#[command(about = "ESPHome Device Builder", long_about = None)]
 pub struct Cli {
     /// Don't open the dashboard in browser on startup
     #[arg(long = "no-open-dashboard")]
@@ -134,7 +134,7 @@ fn handle_tray_click(_app: &AppHandle, state: &AppState) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(cli: Cli) {
     init_logging();
-    info!("Starting ESPHome Builder");
+    info!("Starting ESPHome Device Builder");
     info!("CLI args: {:?}", cli);
 
     // Capture CLI flags before closure
@@ -166,7 +166,7 @@ pub fn run(cli: Cli) {
             }
         }))
         .setup(move |app| {
-            info!("Setting up ESPHome Builder");
+            info!("Setting up ESPHome Device Builder");
 
             // Ensure user Python exists (copy from bundled on first run for non-Windows)
             // This must happen before AppState::new() so paths are correct
@@ -174,6 +174,10 @@ pub fn run(cli: Cli) {
                 error!("Failed to set up user Python: {}", e);
                 // Continue anyway - might work with bundled Python
             }
+
+            // One-shot prompt to remove the pre-rename `/Applications/ESPHome Builder.app`.
+            // No-op on non-macOS and after the user has answered once.
+            platform::cleanup_legacy_macos_app(app.handle());
 
             // Initialize app state
             let state = Arc::new(AppState::new(app.handle())?);
@@ -218,7 +222,7 @@ pub fn run(cli: Cli) {
                     let tray = TrayIconBuilder::with_id("main")
                         .icon(icon)
                         .icon_as_template(false)
-                        .tooltip("ESPHome Builder")
+                        .tooltip("ESPHome Device Builder")
                         .build(app)?;
 
                     let menu = build_tray_menu(app.handle(), &state)?;

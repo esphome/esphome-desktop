@@ -1,2 +1,0 @@
-untrusted comment: placeholder fixture signature for ESPHome Builder_aarch64.app.tar.gz.sig
-FIXTUREONLYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx==

@@ -1,10 +1,10 @@
-name: Report an issue with ESPHome Builder
-description: Report a bug with the ESPHome Builder desktop application.
+name: Report an issue with ESPHome Device Builder
+description: Report a bug with the ESPHome Device Builder desktop application.
 body:
   - type: markdown
     attributes:
       value: |
-        This issue form is for reporting bugs with the **ESPHome Builder desktop application** only!
+        This issue form is for reporting bugs with the **ESPHome Device Builder desktop application** only!
 
         - For issues with ESPHome firmware compilation, validation, or components, please [report them here][esphome].
         - For feature requests or enhancements, please [request them here][fr].
@@ -32,7 +32,7 @@ body:
     validations:
       required: true
     attributes:
-      label: Which version of ESPHome Builder has the issue?
+      label: Which version of ESPHome Device Builder has the issue?
       description: >
         The version shown in the app, e.g. 0.5.1.
   - type: dropdown

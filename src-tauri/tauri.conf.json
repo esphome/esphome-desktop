@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ESPHome Builder",
+  "productName": "ESPHome Device Builder",
   "version": "0.9.0",
   "identifier": "io.esphome.builder",
   "build": {
@@ -34,7 +34,8 @@
       "digestAlgorithm": "sha256",
       "timestampUrl": "",
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer-hooks.nsi"
       }
     },
     "linux": {

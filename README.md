@@ -1,4 +1,4 @@
-# ESPHome Builder
+# ESPHome Device Builder
 
 A cross-platform desktop application that bundles ESPHome with Python and runs the dashboard as a background daemon with system tray integration.
 
@@ -17,17 +17,17 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 
 Download the latest release for your platform from [desktop.esphome.io](https://desktop.esphome.io), or grab the files directly from the [GitHub releases](https://github.com/esphome/esphome-desktop/releases/latest) page.
 
-| Platform              | Installer                                                |
-| --------------------- | -------------------------------------------------------- |
-| macOS (Apple Silicon) | `ESPHome.Builder_x.x.x_aarch64.dmg`                      |
-| macOS (Intel)         | `ESPHome.Builder_x.x.x_x64.dmg`                          |
-| Windows               | `ESPHome.Builder_x.x.x_x64-setup.exe`                    |
-| Linux (x86_64)        | `ESPHome.Builder_x.x.x_amd64.AppImage` or `.deb`         |
-| Linux (aarch64)       | `ESPHome.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
+| Platform              | Installer                                                       |
+| --------------------- | --------------------------------------------------------------- |
+| macOS (Apple Silicon) | `ESPHome.Device.Builder_x.x.x_aarch64.dmg`                      |
+| macOS (Intel)         | `ESPHome.Device.Builder_x.x.x_x64.dmg`                          |
+| Windows               | `ESPHome.Device.Builder_x.x.x_x64-setup.exe`                    |
+| Linux (x86_64)        | `ESPHome.Device.Builder_x.x.x_amd64.AppImage` or `.deb`         |
+| Linux (aarch64)       | `ESPHome.Device.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
 
 ### First Run
 
-On first launch, ESPHome Builder will:
+On first launch, ESPHome Device Builder will:
 1. Install ESPHome and its dependencies
 2. Start the dashboard
 3. Open your browser to `http://localhost:6052`
@@ -38,7 +38,7 @@ This initial setup may take a few minutes depending on your internet connection.
 
 ### Starting the App
 
-Simply launch ESPHome Builder. It will:
+Simply launch ESPHome Device Builder. It will:
 - Start the ESPHome dashboard in the background
 - Show a system tray icon
 - Open your browser to the dashboard
@@ -51,7 +51,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
 - **Check for Updates** - Check for new ESPHome (Python) versions
-- **Check for App Updates** - Check for a new ESPHome Builder desktop release and install it in-place
+- **Check for App Updates** - Check for a new ESPHome Device Builder desktop release and install it in-place
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
@@ -74,7 +74,7 @@ This directory contains:
 
 Your ESPHome configuration files are stored at `~/esphome/` on all platforms by default (configurable via `config_dir` in `settings.json`).
 
-On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Builder\`.
+On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Device Builder\`.
 
 ## Building from Source
 
@@ -157,7 +157,7 @@ Settings are stored in `settings.json`:
 The app is code-signed and notarized. If you still encounter this message (e.g., from a development build), run:
 
 ```bash
-xattr -c "/Applications/ESPHome Builder.app"
+xattr -c "/Applications/ESPHome Device Builder.app"
 ```
 
 Then try opening the app again.
