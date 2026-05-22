@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Download ESPHome Builder</title>
+  <title>Download ESPHome Device Builder</title>
   <link rel="icon" type="image/png" href="icon.png">
-  <meta name="description" content="Download ESPHome Builder, the ESPHome Device Builder as a desktop app for macOS, Windows, and Linux.">
+  <meta name="description" content="Download ESPHome Device Builder, the desktop app for macOS, Windows, and Linux.">
   <meta name="esphome-version" content="$VERSION">
   <meta name="esphome-tag" content="$TAG">
   <meta name="theme-color" content="#038fc7">
@@ -378,7 +378,7 @@
         <h2 class="panel-title">For Windows</h2>
         <p class="panel-sub">Works on Windows 10 and Windows 11.</p>
         <div class="download-row">
-          <a class="btn" id="windows-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Builder_${VERSION}_x64-setup.exe">
+          <a class="btn" id="windows-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Device.Builder_${VERSION}_x64-setup.exe">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
             Download installer
           </a>
@@ -389,7 +389,7 @@
             <li>Open the downloaded <code>.exe</code> file.</li>
             <li>If Windows asks <em>"Do you want to allow this app to make changes?"</em>, choose <strong>Yes</strong>.</li>
             <li>Follow the installer prompts.</li>
-            <li>Launch <strong>ESPHome Builder</strong> from the Start menu.</li>
+            <li>Launch <strong>ESPHome Device Builder</strong> from the Start menu.</li>
           </ol>
           <div class="note">If you see <em>"Windows protected your PC"</em>, click <strong>More info</strong> → <strong>Run anyway</strong>.</div>
         </div>
@@ -399,7 +399,7 @@
         <h2 class="panel-title">For macOS</h2>
         <p class="panel-sub">macOS 10.15 Catalina or newer.</p>
         <div class="download-row">
-          <a class="btn" id="mac-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Builder_${VERSION}_aarch64.dmg">
+          <a class="btn" id="mac-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Device.Builder_${VERSION}_aarch64.dmg">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
             Download disk image
           </a>
@@ -412,8 +412,8 @@
           <h3>Install</h3>
           <ol>
             <li>Open the downloaded <code>.dmg</code> file.</li>
-            <li>Drag <strong>ESPHome Builder</strong> into the <strong>Applications</strong> folder.</li>
-            <li>Open the Applications folder and double-click <strong>ESPHome Builder</strong>.</li>
+            <li>Drag <strong>ESPHome Device Builder</strong> into the <strong>Applications</strong> folder.</li>
+            <li>Open the Applications folder and double-click <strong>ESPHome Device Builder</strong>.</li>
             <li>The first time you run it, macOS may ask you to confirm — click <strong>Open</strong>.</li>
           </ol>
           <div class="note">Not sure which Mac you have? Click the Apple menu → <strong>About This Mac</strong>. If you see <em>Apple M1/M2/M3/M4</em>, pick Apple Silicon. If you see <em>Intel</em>, pick Intel.</div>
@@ -424,7 +424,7 @@
         <h2 class="panel-title">For Linux</h2>
         <p class="panel-sub">Choose the format that matches your distribution.</p>
         <div class="download-row">
-          <a class="btn" id="linux-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Builder_${VERSION}_amd64.deb">
+          <a class="btn" id="linux-download" href="https://github.com/esphome/esphome-desktop/releases/download/$TAG/ESPHome.Device.Builder_${VERSION}_amd64.deb">
             <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
             <span id="linux-download-label">Download .deb</span>
           </a>
@@ -443,11 +443,11 @@
           <h3>Install</h3>
           <div id="linux-install-deb">
             <p>Double-click the file in your file manager, or run:</p>
-            <pre><code>sudo apt install ./ESPHome.Builder_*.deb</code></pre>
+            <pre><code>sudo apt install ./ESPHome.Device.Builder_*.deb</code></pre>
           </div>
           <div id="linux-install-rpm" hidden>
             <p>Double-click the file in your file manager, or run:</p>
-            <pre><code>sudo dnf install ./ESPHome.Builder-*.rpm</code></pre>
+            <pre><code>sudo dnf install ./ESPHome.Device.Builder-*.rpm</code></pre>
           </div>
           <div id="linux-install-aur" hidden>
             <p>Install the <code>esphome-desktop-bin</code> package with your favourite AUR helper:</p>
@@ -457,8 +457,8 @@
           </div>
           <div id="linux-install-appimage" hidden>
             <p>Make it executable and run it:</p>
-            <pre><code>chmod +x ESPHome.Builder_*.AppImage
-./ESPHome.Builder_*.AppImage</code></pre>
+            <pre><code>chmod +x ESPHome.Device.Builder_*.AppImage
+./ESPHome.Device.Builder_*.AppImage</code></pre>
           </div>
           <div class="note">If serial devices don't show up, add your user to the <code>dialout</code> group and log out and back in: <code>sudo usermod -a -G dialout $USER</code>.</div>
         </div>
@@ -566,14 +566,14 @@
 
       // ---- Windows ----
       function setupWindows() {
-        document.getElementById('windows-download').href = asset(`ESPHome.Builder_${VERSION}_x64-setup.exe`);
+        document.getElementById('windows-download').href = asset(`ESPHome.Device.Builder_${VERSION}_x64-setup.exe`);
       }
 
       // ---- macOS ----
       function setupMacOS(detected) {
         const files = {
-          arm64: asset(`ESPHome.Builder_${VERSION}_aarch64.dmg`),
-          x64: asset(`ESPHome.Builder_${VERSION}_x64.dmg`),
+          arm64: asset(`ESPHome.Device.Builder_${VERSION}_aarch64.dmg`),
+          x64: asset(`ESPHome.Device.Builder_${VERSION}_x64.dmg`),
         };
         const btn = document.getElementById('mac-download');
         const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', (a) => {
@@ -591,16 +591,16 @@
         const AUR = { url: 'https://aur.archlinux.org/packages/esphome-desktop-bin', label: 'View on AUR' };
         const files = {
           x64: {
-            deb: { url: asset(`ESPHome.Builder_${VERSION}_amd64.deb`), label: 'Download .deb' },
-            rpm: { url: asset(`ESPHome.Builder-${VERSION}-1.x86_64.rpm`), label: 'Download .rpm' },
+            deb: { url: asset(`ESPHome.Device.Builder_${VERSION}_amd64.deb`), label: 'Download .deb' },
+            rpm: { url: asset(`ESPHome.Device.Builder-${VERSION}-1.x86_64.rpm`), label: 'Download .rpm' },
             aur: AUR,
-            appimage: { url: asset(`ESPHome.Builder_${VERSION}_amd64.AppImage`), label: 'Download AppImage' },
+            appimage: { url: asset(`ESPHome.Device.Builder_${VERSION}_amd64.AppImage`), label: 'Download AppImage' },
           },
           arm64: {
-            deb: { url: asset(`ESPHome.Builder_${VERSION}_arm64.deb`), label: 'Download .deb' },
-            rpm: { url: asset(`ESPHome.Builder-${VERSION}-1.aarch64.rpm`), label: 'Download .rpm' },
+            deb: { url: asset(`ESPHome.Device.Builder_${VERSION}_arm64.deb`), label: 'Download .deb' },
+            rpm: { url: asset(`ESPHome.Device.Builder-${VERSION}-1.aarch64.rpm`), label: 'Download .rpm' },
             aur: AUR,
-            appimage: { url: asset(`ESPHome.Builder_${VERSION}_aarch64.AppImage`), label: 'Download AppImage' },
+            appimage: { url: asset(`ESPHome.Device.Builder_${VERSION}_aarch64.AppImage`), label: 'Download AppImage' },
           },
         };
         const btn = document.getElementById('linux-download');

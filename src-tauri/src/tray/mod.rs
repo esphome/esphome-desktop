@@ -95,7 +95,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let backend_builder_stable = MenuItemBuilder::with_id(
         ids::BACKEND_BUILDER_STABLE,
         radio_label(
-            "ESPHome Builder (stable)",
+            "ESPHome Device Builder (stable)",
             current_backend == Backend::BuilderStable,
         ),
     )
@@ -104,7 +104,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let backend_builder_beta = MenuItemBuilder::with_id(
         ids::BACKEND_BUILDER_BETA,
         radio_label(
-            "ESPHome Builder (beta)",
+            "ESPHome Device Builder (beta)",
             current_backend == Backend::BuilderBeta,
         ),
     )
@@ -241,13 +241,13 @@ fn update_backend_checks(backend: Backend) {
     }
     if let Some(item) = BACKEND_BUILDER_STABLE_ITEM.get() {
         let _ = item.set_text(radio_label(
-            "ESPHome Builder (stable)",
+            "ESPHome Device Builder (stable)",
             backend == Backend::BuilderStable,
         ));
     }
     if let Some(item) = BACKEND_BUILDER_BETA_ITEM.get() {
         let _ = item.set_text(radio_label(
-            "ESPHome Builder (beta)",
+            "ESPHome Device Builder (beta)",
             backend == Backend::BuilderBeta,
         ));
     }

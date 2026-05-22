@@ -37,7 +37,7 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 ///
 /// On Linux we resolve this ourselves so the path is always
 /// `<prefix>/lib/esphome-desktop/` — no spaces, no dependence on
-/// Tauri's `resource_dir()` which uses the product name ("ESPHome Builder").
+/// Tauri's `resource_dir()` which uses the product name ("ESPHome Device Builder").
 ///
 /// The sharun-based AppImage format patches `/usr/…` paths in the binary
 /// with random `/tmp/…` tokens, so `std::env::current_exe()` returns a
@@ -546,6 +546,97 @@ mod linux {
             }
         }
         false
+    }
+}
+
+/// One-shot cleanup of the legacy `/Applications/ESPHome Builder.app` bundle
+/// left behind when the desktop app was renamed to "ESPHome Device Builder".
+///
+/// On the first launch after the rename the user is prompted (via a native
+/// dialog) to move the old bundle to the Trash. The decision is recorded as
+/// a marker file in the app data directory so the prompt is not repeated.
+///
+/// User settings and the bundled Python tree live under the bundle
+/// identifier (`io.esphome.builder/`), which did not change with the rename,
+/// so no data migration is needed.
+pub fn cleanup_legacy_macos_app(app_handle: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        use tracing::{info, warn};
+
+        const OLD_APP: &str = "/Applications/ESPHome Builder.app";
+        const MARKER_NAME: &str = ".legacy_macos_app_cleanup";
+
+        if !PathBuf::from(OLD_APP).exists() {
+            return;
+        }
+
+        let data_dir = match get_data_dir(app_handle) {
+            Ok(d) => d,
+            Err(e) => {
+                debug!("Skipping legacy app cleanup; data dir unavailable: {}", e);
+                return;
+            }
+        };
+
+        let marker = data_dir.join(MARKER_NAME);
+        if marker.exists() {
+            return;
+        }
+
+        info!("Legacy {} detected; prompting user to remove it", OLD_APP);
+
+        let dialog_app = app_handle.clone();
+        std::thread::spawn(move || {
+            let confirmed = dialog_app
+                .dialog()
+                .message(
+                    "An older version of this app named \u{201C}ESPHome Builder\u{201D} \
+                     was found in your Applications folder. Move it to the Trash?\n\n\
+                     Your settings and configs are not affected.",
+                )
+                .title("Remove old ESPHome Builder")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Move to Trash".to_string(),
+                    "Keep".to_string(),
+                ))
+                .blocking_show();
+
+            if confirmed {
+                let script = format!(
+                    "tell application \"Finder\" to delete POSIX file \"{}\"",
+                    OLD_APP
+                );
+                match std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output()
+                {
+                    Ok(out) if out.status.success() => {
+                        info!("Moved {} to Trash", OLD_APP);
+                    }
+                    Ok(out) => {
+                        warn!(
+                            "Failed to move {} to Trash: {}",
+                            OLD_APP,
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        );
+                    }
+                    Err(e) => warn!("Failed to spawn osascript: {}", e),
+                }
+            }
+
+            // Marker is written regardless so the user is not nagged.
+            if let Err(e) = std::fs::write(&marker, "") {
+                warn!("Failed to write legacy-cleanup marker: {}", e);
+            }
+        });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_handle;
     }
 }
 

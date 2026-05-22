@@ -36,7 +36,7 @@ jobs:
         if: github.event_name == 'release'
         id: checksum
         run: |
-          DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${{ steps.release.outputs.version }}/ESPHome.Builder_${{ steps.release.outputs.version }}_amd64.deb"
+          DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${{ steps.release.outputs.version }}/ESPHome.Device.Builder_${{ steps.release.outputs.version }}_amd64.deb"
           curl -L -o /tmp/package.deb "$DEB_URL"
           SHA256SUM=$(sha256sum /tmp/package.deb | awk '{print $1}')
           echo "sha256=$SHA256SUM" >> $GITHUB_OUTPUT
