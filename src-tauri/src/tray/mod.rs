@@ -75,17 +75,25 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let _ = VERSION_ITEM.set(version_item.clone());
 
     // Create esphome-device-builder version display item. Always shown so the
-    // menu structure is stable; reads "not installed" when the package is
-    // absent (e.g. when the classic backend is active on a fresh install).
-    let builder_version_text = format!(
-        "Device Builder: {}",
-        crate::update::get_installed_device_builder_version(app_handle)
-            .unwrap_or_else(|_| "not installed".to_string())
-    );
-    let builder_version_item = MenuItemBuilder::with_id(ids::BUILDER_VERSION, builder_version_text)
-        .enabled(false)
-        .build(app_handle)?;
+    // menu structure is stable. Detection spawns a Python subprocess which is
+    // too slow / too risky (could hang) to run synchronously in the setup
+    // path, so we start with a "detecting…" placeholder and refresh from a
+    // background task immediately below.
+    let builder_version_item =
+        MenuItemBuilder::with_id(ids::BUILDER_VERSION, "Device Builder: detecting…")
+            .enabled(false)
+            .build(app_handle)?;
     let _ = BUILDER_VERSION_ITEM.set(builder_version_item.clone());
+
+    // Kick off async detection of the installed `esphome-device-builder`
+    // version. The blocking Python call runs on a dedicated thread so it
+    // can't stall tray creation or other setup work.
+    {
+        let app = app_handle.clone();
+        async_runtime::spawn(async move {
+            refresh_builder_version_display(&app).await;
+        });
+    }
 
     // Create release channel items
     let current_channel = settings.release_channel;
@@ -296,11 +304,27 @@ fn refresh_version_display(app_handle: &AppHandle) {
 }
 
 /// Re-detect the installed `esphome-device-builder` package version and
-/// update the tray display.
-fn refresh_builder_version_display(app_handle: &AppHandle) {
-    let version = crate::update::get_installed_device_builder_version(app_handle)
-        .unwrap_or_else(|_| "not installed".to_string());
-    update_builder_version(&version);
+/// update the tray display. Runs the blocking Python call off the caller's
+/// thread, and distinguishes "package not installed" from "detection
+/// failed" so the latter doesn't get silently misreported.
+async fn refresh_builder_version_display(app_handle: &AppHandle) {
+    let app = app_handle.clone();
+    let label = tokio::task::spawn_blocking(move || {
+        match crate::update::get_installed_device_builder_version(&app) {
+            Ok(Some(v)) => v,
+            Ok(None) => "not installed".to_string(),
+            Err(e) => {
+                warn!("Could not detect esphome-device-builder version: {}", e);
+                "unknown".to_string()
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|e| {
+        warn!("Device-builder version detection task failed: {}", e);
+        "unknown".to_string()
+    });
+    update_builder_version(&label);
 }
 
 /// Handle menu item clicks
@@ -465,7 +489,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                                 );
 
                                 // Refresh the device-builder version display in the tray menu
-                                refresh_builder_version_display(&app);
+                                refresh_builder_version_display(&app).await;
 
                                 if let Err(e) = state.daemon.start().await {
                                     error!(
@@ -808,7 +832,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                         return;
                     }
                     // Install succeeded — refresh the tray version display.
-                    refresh_builder_version_display(&app);
+                    refresh_builder_version_display(&app).await;
                 }
 
                 // Apply the new backend to the daemon and persist it.

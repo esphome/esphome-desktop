@@ -451,9 +451,13 @@ impl UpdateChecker {
         }
 
         let installed = match get_installed_device_builder_version(app_handle) {
-            Ok(v) => v,
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                debug!("esphome-device-builder is not installed; skipping update check");
+                return;
+            }
             Err(e) => {
-                debug!("esphome-device-builder version not detected: {}", e);
+                warn!("esphome-device-builder version detection failed: {}", e);
                 return;
             }
         };
@@ -505,7 +509,11 @@ impl UpdateChecker {
         }
 
         let installed = match get_installed_device_builder_version(app_handle) {
-            Ok(v) => v,
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                warn!("esphome-device-builder is not installed");
+                return None;
+            }
             Err(e) => {
                 warn!(
                     "Could not detect installed esphome-device-builder version: {}",
@@ -669,7 +677,14 @@ fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Strin
 }
 
 /// Get the installed `esphome-device-builder` package version.
-pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<String> {
+///
+/// - `Ok(Some(v))` — package is installed, returns the version string.
+/// - `Ok(None)` — Python ran successfully but the package is not installed
+///   (importlib.metadata raised `PackageNotFoundError`).
+/// - `Err(e)` — detection itself failed (bundled Python missing, spawn
+///   error, etc.); the caller should surface this rather than treat it as
+///   "not installed".
+pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
     let mut cmd = std::process::Command::new(&python_path);
@@ -686,9 +701,12 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<St
         if version.is_empty() {
             anyhow::bail!("esphome-device-builder version is empty");
         }
-        Ok(version)
+        Ok(Some(version))
     } else {
-        anyhow::bail!("esphome-device-builder not installed")
+        // Non-zero exit means importlib.metadata raised PackageNotFoundError —
+        // the package isn't installed. That's a distinct state from a
+        // detection failure (which would have errored out above).
+        Ok(None)
     }
 }
 
