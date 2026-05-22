@@ -329,9 +329,14 @@ jobs:
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          path: |
-            src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz
-            src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz.sig
+          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz
+          archive: false
+
+      - name: Upload macOS updater signature
+        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz.sig
           archive: false
 
   # Persist PR metadata so the companion "PR Comment" workflow (which runs
