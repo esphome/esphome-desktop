@@ -100,8 +100,11 @@ def build_platforms(
     """Build the Tauri updater `platforms` block from release assets + local .sig files."""
     # GitHub normalizes spaces to dots in release-asset names, but
     # actions/download-artifact preserves the original (spaced) filenames.
-    # Match local sig files by regex so either naming works.
-    local_sigs = list(artifacts_dir.rglob("*.sig"))
+    # Match local sig files by regex so either naming works. Filter to
+    # files: actions/download-artifact creates a directory per artifact
+    # named after the file, so an unfiltered glob also yields the parent
+    # directory, which read_text() would choke on.
+    local_sigs = [p for p in artifacts_dir.rglob("*.sig") if p.is_file()]
     platforms: dict[str, dict[str, str]] = {}
     for plat, regex in PLATFORM_SIG_MATCHERS:
         candidates = [a for a in assets_by_name.values() if regex.match(a["name"])]
