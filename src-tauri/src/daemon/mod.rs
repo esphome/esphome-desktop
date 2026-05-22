@@ -42,7 +42,9 @@ pub struct DaemonManager {
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
     /// AppHandle for emitting notifications / updating the tray when the
-    /// child process exits independently of an explicit `stop()`.
+    /// child process exits independently of an explicit `stop()`. Also used
+    /// to read the desktop app version (forwarded to the backend via
+    /// `ESPHOME_DESKTOP_VERSION` at `start()` time).
     app_handle: AppHandle,
 }
 
@@ -177,6 +179,13 @@ impl DaemonManager {
 
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
+        // Surface the desktop app version to the backend so it can be shown
+        // in the frontend (e.g. an "About" page). Set unconditionally — both
+        // backends get it; classic dashboard can ignore it.
+        cmd.env(
+            "ESPHOME_DESKTOP_VERSION",
+            self.app_handle.package_info().version.to_string(),
+        );
 
         // On Windows, force the spawned Python (and any subprocesses it
         // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.
