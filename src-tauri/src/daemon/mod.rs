@@ -9,9 +9,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
+use tauri_plugin_notification::NotificationExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::platform;
 use crate::settings::Settings;
@@ -40,6 +41,9 @@ pub struct DaemonManager {
     dashboard_pid: Arc<AtomicI32>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
+    /// AppHandle for emitting notifications / updating the tray when the
+    /// child process exits independently of an explicit `stop()`.
+    app_handle: AppHandle,
 }
 
 impl DaemonManager {
@@ -71,6 +75,7 @@ impl DaemonManager {
             running: Arc::new(AtomicBool::new(false)),
             dashboard_pid: Arc::new(AtomicI32::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
+            app_handle: app_handle.clone(),
         })
     }
 
@@ -206,6 +211,67 @@ impl DaemonManager {
                     Ok(false) => warn!("Health check failed - backend may be starting"),
                     Err(e) => warn!("Health check error: {}", e),
                 }
+            }
+        });
+
+        // Start exit watcher. Polls `child.try_wait()` so an unexpected
+        // exit (e.g. the dashboard process dying on startup because of a
+        // missing module) flips the running flag back to false instead
+        // of leaving the tray stuck on "Status: Running". Exits cleanly
+        // when `stop()` clears the running flag.
+        let process = self.process.clone();
+        let running = self.running.clone();
+        let dashboard_pid = self.dashboard_pid.clone();
+        let app_handle = self.app_handle.clone();
+        let log_path_for_watcher = log_path.clone();
+        let backend_label = backend_name.to_string();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                if !running.load(Ordering::SeqCst) {
+                    // stop() already cleaned up.
+                    return;
+                }
+                let mut guard = process.lock().await;
+                let exited = match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => Some(status),
+                        Ok(None) => None,
+                        Err(e) => {
+                            warn!("try_wait on {} failed: {}", backend_label, e);
+                            None
+                        }
+                    },
+                    // stop() took the child out from under us
+                    None => return,
+                };
+
+                let Some(status) = exited else { continue };
+
+                error!(
+                    "{} exited unexpectedly with status: {}. See log at {:?}.",
+                    backend_label, status, log_path_for_watcher
+                );
+                *guard = None;
+                drop(guard);
+                running.store(false, Ordering::SeqCst);
+                dashboard_pid.store(0, Ordering::SeqCst);
+
+                crate::tray::update_status(&app_handle, false);
+                if let Err(e) = app_handle
+                    .notification()
+                    .builder()
+                    .title("ESPHome Dashboard Stopped")
+                    .body(format!(
+                        "{} exited unexpectedly ({}). \
+                         Open the tray menu and choose \"View Logs...\" for details.",
+                        backend_label, status
+                    ))
+                    .show()
+                {
+                    warn!("Failed to show daemon-crash notification: {}", e);
+                }
+                return;
             }
         });
 
