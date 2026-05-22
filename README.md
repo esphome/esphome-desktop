@@ -157,7 +157,7 @@ Settings are stored in `settings.json`:
 The app is code-signed and notarized. If you still encounter this message (e.g., from a development build), run:
 
 ```bash
-xattr -c "/Applications/ESPHome Device Builder.app"
+xattr -c "/Applications/ESPHome Builder.app"
 ```
 
 Then try opening the app again.
