@@ -219,6 +219,14 @@ impl DaemonManager {
         // missing module) flips the running flag back to false instead
         // of leaving the tray stuck on "Status: Running". Exits cleanly
         // when `stop()` clears the running flag.
+        //
+        // Captures the child's PID at spawn time and exits as soon as
+        // `dashboard_pid` no longer matches. Without this, a stop()/start()
+        // pair faster than the 500 ms poll interval would let an old
+        // watcher wake up to a new child (running=true again, fresh PID,
+        // possibly different backend) and start reporting on it with the
+        // stale `backend_label` and log path it captured at its own start.
+        let watcher_pid = self.dashboard_pid.load(Ordering::SeqCst);
         let process = self.process.clone();
         let running = self.running.clone();
         let dashboard_pid = self.dashboard_pid.clone();
@@ -232,7 +240,19 @@ impl DaemonManager {
                     // stop() already cleaned up.
                     return;
                 }
+                if dashboard_pid.load(Ordering::SeqCst) != watcher_pid {
+                    // The child this watcher was created for has been
+                    // replaced by a newer start(); the new spawn has its
+                    // own watcher.
+                    return;
+                }
                 let mut guard = process.lock().await;
+                // Re-check under the lock: stop() takes the child and
+                // resets the PID without holding the lock for the entire
+                // window, so a stale watcher could otherwise still race in.
+                if dashboard_pid.load(Ordering::SeqCst) != watcher_pid {
+                    return;
+                }
                 let exited = match guard.as_mut() {
                     Some(child) => match child.try_wait() {
                         Ok(Some(status)) => Some(status),
@@ -261,7 +281,7 @@ impl DaemonManager {
                 if let Err(e) = app_handle
                     .notification()
                     .builder()
-                    .title("ESPHome Dashboard Stopped")
+                    .title(format!("{} stopped", backend_label))
                     .body(format!(
                         "{} exited unexpectedly ({}). \
                          Open the tray menu and choose \"View Logs...\" for details.",
