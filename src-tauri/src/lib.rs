@@ -3,6 +3,7 @@
 //! A cross-platform desktop application that manages ESPHome as a background daemon
 //! with system tray integration.
 
+mod app_update;
 mod daemon;
 mod platform;
 mod settings;
@@ -152,6 +153,7 @@ pub fn run(cli: Cli) {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // Another instance tried to start - open the dashboard instead
             info!(
@@ -295,8 +297,13 @@ pub fn run(cli: Cli) {
             });
 
             // Start update checker (check after 30s, then every 24 hours)
-            // The dev channel skips automatic update checks entirely.
-            // When the active backend is a builder variant, the
+            // Order matters: check the desktop app first. A self-update ships
+            // a fresh Python bundle that overwrites the user's `python/`
+            // directory, so any pip-installed ESPHome / device-builder bump
+            // we'd do now would be wiped by the next launch. Skip the Python
+            // checks while an app update is pending.
+            // The dev channel skips automatic update checks entirely. When
+            // the active backend is a builder variant, the
             // `esphome-device-builder` package is checked on the same schedule.
             let update_state = state.clone();
             let update_app = app.handle().clone();
@@ -305,6 +312,11 @@ pub fn run(cli: Cli) {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
                 loop {
                     interval.tick().await;
+                    if app_update::check_and_notify(&update_app).await == app_update::NextStep::Skip
+                    {
+                        // App update pending — leave the Python packages alone.
+                        continue;
+                    }
                     let (channel, backend) = {
                         let settings = update_state.settings.read().await;
                         (settings.release_channel, settings.backend)

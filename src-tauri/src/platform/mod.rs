@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use tracing::debug;
 
@@ -210,6 +210,23 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                 anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
             }
 
+            // Snapshot the user's pre-existing package versions BEFORE the
+            // wipe so we can restore them after the bundled tree is in place.
+            // Without this, a user who pip-bumped ESPHome past the bundled
+            // version would silently get downgraded by every app self-update.
+            let preserved = if python_check.exists() {
+                let old_python_bin = python_check.clone();
+                PreservedVersions {
+                    esphome: read_package_version(&old_python_bin, "esphome"),
+                    esphome_device_builder: read_package_version(
+                        &old_python_bin,
+                        "esphome-device-builder",
+                    ),
+                }
+            } else {
+                PreservedVersions::default()
+            };
+
             if user_python.exists() {
                 info!(
                     "Removing stale user Python at {:?} (version marker missing or mismatched)",
@@ -230,12 +247,187 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             std::fs::write(&marker_path, current_version)
                 .context("Failed to write Python version marker")?;
 
+            restore_preserved_versions(&python_check, &preserved);
+
             info!("User Python ready at {:?}", user_python);
         } else {
             debug!("User Python already up-to-date (version {})", current_version);
         }
 
         Ok(())
+    }
+}
+
+/// User-preferred package versions captured before the bundled Python tree
+/// is wiped during an app-version refresh. See [`ensure_user_python`].
+#[derive(Debug, Default)]
+struct PreservedVersions {
+    esphome: Option<String>,
+    esphome_device_builder: Option<String>,
+}
+
+/// Reinstall any preserved package whose pinned version is newer than the
+/// version that just shipped in the new bundled Python tree. Bundled wins
+/// for ties and for when bundled is newer (so users always benefit from the
+/// app's fresher bundle when they haven't explicitly bumped past it). Each
+/// reinstall is best-effort — a network failure here logs a warning and
+/// falls through to the bundled version rather than blocking app start.
+#[cfg(not(target_os = "windows"))]
+fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) {
+    use tracing::{info, warn};
+
+    for (package, saved) in [
+        ("esphome", preserved.esphome.as_deref()),
+        ("esphome-device-builder", preserved.esphome_device_builder.as_deref()),
+    ] {
+        let Some(saved) = saved else { continue };
+        let Some(bundled) = read_package_version(python_bin, package) else {
+            // Package isn't in the bundled tree (shouldn't happen for these
+            // two, but don't fight it). Skip the restore.
+            continue;
+        };
+        if !crate::update::is_newer_version(saved, &bundled) {
+            debug!(
+                "Bundled {} {} satisfies user preference {}; not reinstalling",
+                package, bundled, saved
+            );
+            continue;
+        }
+        info!(
+            "Restoring user-preferred {} {} over bundled {}",
+            package, saved, bundled
+        );
+        if let Err(e) = pip_install_blocking(python_bin, package, saved) {
+            warn!(
+                "Failed to restore {} {}: {}. Continuing with bundled {}.",
+                package, saved, e, bundled
+            );
+        }
+    }
+}
+
+/// Read the installed version of a Python package via `importlib.metadata`.
+/// Returns `None` if the package isn't installed or the call fails.
+#[cfg(not(target_os = "windows"))]
+fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
+    // Written as a single-line literal with explicit `\n` so each Python
+    // statement starts at column zero — avoids any ambiguity about whether
+    // a Rust line-continuation strips the source-line indentation.
+    let script = format!(
+        "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
+        package
+    );
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-c", &script]);
+    configure_no_window_command(&mut cmd);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// Hard upper bound on a single `pip install` invocation during the
+/// version-restore path. Five minutes is well over the time needed to
+/// upgrade `esphome` on a working connection; bounding it prevents a
+/// stalled network from hanging app startup indefinitely.
+#[cfg(not(target_os = "windows"))]
+const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Maximum length of pip stderr included in a failure error message. pip's
+/// resolver and progress output can run to many kilobytes; the actionable
+/// failure reason is almost always at the tail, so we truncate to the last
+/// N bytes to keep log lines (and downstream UI surfaces) bounded.
+#[cfg(not(target_os = "windows"))]
+const PIP_STDERR_TAIL_BYTES: usize = 4096;
+
+/// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
+/// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
+/// char boundary so the result is always valid `str`.
+#[cfg(not(target_os = "windows"))]
+fn tail_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
+        return trimmed.to_string();
+    }
+    let mut start = trimmed.len() - PIP_STDERR_TAIL_BYTES;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "...(stderr truncated to last {} bytes)\n{}",
+        PIP_STDERR_TAIL_BYTES,
+        &trimmed[start..]
+    )
+}
+
+/// Synchronously run `pip install <package>==<version>` with a wall-clock
+/// timeout. Pinning the exact version lets pip resolve pre-releases without
+/// needing `--pre`. On timeout the child is killed and an error is returned;
+/// the caller logs a warning and falls back to the bundled version, so a
+/// stalled pip can't block app launch.
+#[cfg(not(target_os = "windows"))]
+fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    let spec = format!("{}=={}", package, version);
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-m", "pip", "install", &spec]);
+    cmd.stderr(std::process::Stdio::piped());
+    configure_no_window_command(&mut cmd);
+
+    let mut child = cmd.spawn().context("Failed to spawn pip install")?;
+    let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
+
+    // Drain stderr in a background thread. pip's progress bars and resolver
+    // diagnostics can easily exceed the OS pipe buffer (~64 KiB on Linux);
+    // if nothing reads the parent's end, pip blocks on `write()` mid-install,
+    // which would defeat the deadline and hang startup. The reader exits
+    // naturally once the child closes its stderr fd (normal exit or kill).
+    let mut stderr_thread = child.stderr.take().map(|mut handle| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = handle.read_to_string(&mut buf);
+            buf
+        })
+    });
+
+    loop {
+        match child.try_wait().context("Failed to poll pip install")? {
+            Some(status) => {
+                let stderr = stderr_thread
+                    .take()
+                    .and_then(|t| t.join().ok())
+                    .unwrap_or_default();
+                if status.success() {
+                    return Ok(());
+                }
+                anyhow::bail!("pip install {} failed: {}", spec, tail_for_log(&stderr));
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let stderr = stderr_thread
+                        .take()
+                        .and_then(|t| t.join().ok())
+                        .unwrap_or_default();
+                    anyhow::bail!(
+                        "pip install {} timed out after {:?}; partial stderr: {}",
+                        spec,
+                        PIP_INSTALL_TIMEOUT,
+                        tail_for_log(&stderr)
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
     }
 }
 

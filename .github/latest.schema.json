@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://desktop.esphome.io/latest.schema.json",
+  "title": "ESPHome Builder release manifest (latest.json)",
+  "description": "Shape of the latest.json manifest published to https://desktop.esphome.io/latest.json (and attached to each GitHub release as `latest.json`). `platforms` is consumed by tauri-plugin-updater for in-app self-updates; `downloads` and `release_url` are extra fields for download pages and other consumers that just want to know what the latest version is and where to fetch each installer.",
+  "type": "object",
+  "required": ["version", "pub_date", "platforms"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional pointer to the JSON Schema that validates this manifest. Convention for instance documents; ignored by tauri-plugin-updater.",
+      "pattern": "^https://desktop\\.esphome\\.io/latest\\.schema\\.json$"
+    },
+    "version": {
+      "type": "string",
+      "description": "Application version (semver, no leading 'v').",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$"
+    },
+    "notes": {
+      "type": "string",
+      "description": "Release notes shown to the user before installing."
+    },
+    "pub_date": {
+      "type": "string",
+      "description": "ISO 8601 timestamp of when the release was published.",
+      "format": "date-time"
+    },
+    "release_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Canonical link to the release page on GitHub.",
+      "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/tag/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$"
+    },
+    "platforms": {
+      "type": "object",
+      "description": "Per-platform updater bundles (Tauri updater format). At least one platform must be present.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["url", "signature"],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Download URL for the platform's updater bundle. Must point at a GitHub release asset on this repo and end in a supported updater bundle extension.",
+            "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?/.+\\.(exe|AppImage|app\\.tar\\.gz)$"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Tauri-generated signature (full .sig file contents).",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "downloads": {
+      "type": "object",
+      "description": "All distributable installer URLs grouped by Tauri platform target. Includes formats not covered by the in-app updater (.deb, .rpm, .dmg) so download pages can offer the right installer per OS/arch.",
+      "propertyNames": {
+        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": ["kind", "url", "size"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "description": "Canonical short name for the installer format.",
+              "enum": ["nsis", "dmg", "appimage", "deb", "rpm"]
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "description": "GitHub release asset download URL for the installer.",
+              "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?/.+$"
+            },
+            "size": {
+              "type": "integer",
+              "description": "Installer file size in bytes.",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

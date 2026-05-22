@@ -1,0 +1,2 @@
+untrusted comment: placeholder fixture signature for ESPHome Builder_0.10.0_x64-setup.exe.sig
+FIXTUREONLYxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx==
