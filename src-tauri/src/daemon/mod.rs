@@ -9,9 +9,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
+use tauri_plugin_notification::NotificationExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::platform;
 use crate::settings::Settings;
@@ -40,10 +41,11 @@ pub struct DaemonManager {
     dashboard_pid: Arc<AtomicI32>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
-    /// Desktop app version (from tauri.conf.json), forwarded to the child
-    /// via `ESPHOME_DESKTOP_VERSION` so the backend can surface it to the
-    /// frontend. Captured at construction since it doesn't change at runtime.
-    desktop_version: String,
+    /// AppHandle for emitting notifications / updating the tray when the
+    /// child process exits independently of an explicit `stop()`. Also used
+    /// to read the desktop app version (forwarded to the backend via
+    /// `ESPHOME_DESKTOP_VERSION` at `start()` time).
+    app_handle: AppHandle,
 }
 
 impl DaemonManager {
@@ -75,7 +77,7 @@ impl DaemonManager {
             running: Arc::new(AtomicBool::new(false)),
             dashboard_pid: Arc::new(AtomicI32::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
-            desktop_version: app_handle.package_info().version.to_string(),
+            app_handle: app_handle.clone(),
         })
     }
 
@@ -180,7 +182,10 @@ impl DaemonManager {
         // Surface the desktop app version to the backend so it can be shown
         // in the frontend (e.g. an "About" page). Set unconditionally — both
         // backends get it; classic dashboard can ignore it.
-        cmd.env("ESPHOME_DESKTOP_VERSION", &self.desktop_version);
+        cmd.env(
+            "ESPHOME_DESKTOP_VERSION",
+            self.app_handle.package_info().version.to_string(),
+        );
 
         // On Windows, force the spawned Python (and any subprocesses it
         // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.
@@ -215,6 +220,87 @@ impl DaemonManager {
                     Ok(false) => warn!("Health check failed - backend may be starting"),
                     Err(e) => warn!("Health check error: {}", e),
                 }
+            }
+        });
+
+        // Start exit watcher. Polls `child.try_wait()` so an unexpected
+        // exit (e.g. the dashboard process dying on startup because of a
+        // missing module) flips the running flag back to false instead
+        // of leaving the tray stuck on "Status: Running". Exits cleanly
+        // when `stop()` clears the running flag.
+        //
+        // Captures the child's PID at spawn time and exits as soon as
+        // `dashboard_pid` no longer matches. Without this, a stop()/start()
+        // pair faster than the 500 ms poll interval would let an old
+        // watcher wake up to a new child (running=true again, fresh PID,
+        // possibly different backend) and start reporting on it with the
+        // stale `backend_label` and log path it captured at its own start.
+        let watcher_pid = self.dashboard_pid.load(Ordering::SeqCst);
+        let process = self.process.clone();
+        let running = self.running.clone();
+        let dashboard_pid = self.dashboard_pid.clone();
+        let app_handle = self.app_handle.clone();
+        let log_path_for_watcher = log_path.clone();
+        let backend_label = backend_name.to_string();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                if !running.load(Ordering::SeqCst) {
+                    // stop() already cleaned up.
+                    return;
+                }
+                if dashboard_pid.load(Ordering::SeqCst) != watcher_pid {
+                    // The child this watcher was created for has been
+                    // replaced by a newer start(); the new spawn has its
+                    // own watcher.
+                    return;
+                }
+                let mut guard = process.lock().await;
+                // Re-check under the lock: stop() takes the child and
+                // resets the PID without holding the lock for the entire
+                // window, so a stale watcher could otherwise still race in.
+                if dashboard_pid.load(Ordering::SeqCst) != watcher_pid {
+                    return;
+                }
+                let exited = match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => Some(status),
+                        Ok(None) => None,
+                        Err(e) => {
+                            warn!("try_wait on {} failed: {}", backend_label, e);
+                            None
+                        }
+                    },
+                    // stop() took the child out from under us
+                    None => return,
+                };
+
+                let Some(status) = exited else { continue };
+
+                error!(
+                    "{} exited unexpectedly with status: {}. See log at {:?}.",
+                    backend_label, status, log_path_for_watcher
+                );
+                *guard = None;
+                drop(guard);
+                running.store(false, Ordering::SeqCst);
+                dashboard_pid.store(0, Ordering::SeqCst);
+
+                crate::tray::update_status(&app_handle, false);
+                if let Err(e) = app_handle
+                    .notification()
+                    .builder()
+                    .title(format!("{} stopped", backend_label))
+                    .body(format!(
+                        "{} exited unexpectedly ({}). \
+                         Open the tray menu and choose \"View Logs...\" for details.",
+                        backend_label, status
+                    ))
+                    .show()
+                {
+                    warn!("Failed to show daemon-crash notification: {}", e);
+                }
+                return;
             }
         });
 
