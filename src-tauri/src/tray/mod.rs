@@ -20,7 +20,9 @@ use crate::AppState;
 mod ids {
     pub const OPEN_DASHBOARD: &str = "open_dashboard";
     pub const STATUS: &str = "status";
+    pub const APP_VERSION: &str = "app_version";
     pub const VERSION: &str = "version";
+    pub const BUILDER_VERSION: &str = "builder_version";
     pub const PORT: &str = "port";
     pub const CHECK_UPDATES: &str = "check_updates";
     pub const CHECK_APP_UPDATES: &str = "check_app_updates";
@@ -55,15 +57,35 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .build(app_handle)?;
     let _ = STATUS_ITEM.set(status_item.clone());
 
-    // Create version display item
+    // Create desktop app version display item (Tauri app version from
+    // tauri.conf.json — fixed for the lifetime of the process, never updated).
+    let app_version_text = format!("Desktop: {}", app_handle.package_info().version);
+    let app_version_item = MenuItemBuilder::with_id(ids::APP_VERSION, app_version_text)
+        .enabled(false)
+        .build(app_handle)?;
+
+    // Create ESPHome version display item
     let version_text = match &settings.installed_version {
-        Some(v) => format!("Version: {}", v),
-        None => "Version: unknown".to_string(),
+        Some(v) => format!("ESPHome: {}", v),
+        None => "ESPHome: unknown".to_string(),
     };
     let version_item = MenuItemBuilder::with_id(ids::VERSION, version_text)
         .enabled(false)
         .build(app_handle)?;
     let _ = VERSION_ITEM.set(version_item.clone());
+
+    // Create esphome-device-builder version display item. Always shown so the
+    // menu structure is stable; reads "not installed" when the package is
+    // absent (e.g. when the classic backend is active on a fresh install).
+    let builder_version_text = format!(
+        "Device Builder: {}",
+        crate::update::get_installed_device_builder_version(app_handle)
+            .unwrap_or_else(|_| "not installed".to_string())
+    );
+    let builder_version_item = MenuItemBuilder::with_id(ids::BUILDER_VERSION, builder_version_text)
+        .enabled(false)
+        .build(app_handle)?;
+    let _ = BUILDER_VERSION_ITEM.set(builder_version_item.clone());
 
     // Create release channel items
     let current_channel = settings.release_channel;
@@ -128,7 +150,9 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         )
         .separator()
         .item(&status_item)
+        .item(&app_version_item)
         .item(&version_item)
+        .item(&builder_version_item)
         .item(
             &MenuItemBuilder::with_id(ids::PORT, format!("Port: {}", settings.port))
                 .enabled(false)
@@ -173,6 +197,10 @@ static STATUS_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceL
 /// Version menu item stored globally for updates
 static VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
+/// `esphome-device-builder` version menu item stored globally for updates
+static BUILDER_VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
 /// Release channel items stored globally for radio-button behavior
 static CHANNEL_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
@@ -205,7 +233,14 @@ pub fn update_status(_app_handle: &AppHandle, running: bool) {
 /// Update the version display in the tray menu.
 pub fn update_version(version: &str) {
     if let Some(item) = VERSION_ITEM.get() {
-        let _ = item.set_text(format!("Version: {}", version));
+        let _ = item.set_text(format!("ESPHome: {}", version));
+    }
+}
+
+/// Update the `esphome-device-builder` version display in the tray menu.
+pub fn update_builder_version(version: &str) {
+    if let Some(item) = BUILDER_VERSION_ITEM.get() {
+        let _ = item.set_text(format!("Device Builder: {}", version));
     }
 }
 
@@ -258,6 +293,14 @@ fn refresh_version_display(app_handle: &AppHandle) {
     let version = crate::update::get_installed_version(app_handle)
         .unwrap_or_else(|_| "unknown".to_string());
     update_version(&version);
+}
+
+/// Re-detect the installed `esphome-device-builder` package version and
+/// update the tray display.
+fn refresh_builder_version_display(app_handle: &AppHandle) {
+    let version = crate::update::get_installed_device_builder_version(app_handle)
+        .unwrap_or_else(|_| "not installed".to_string());
+    update_builder_version(&version);
 }
 
 /// Handle menu item clicks
@@ -420,6 +463,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                                     "Device builder updated successfully to {}",
                                     builder_version
                                 );
+
+                                // Refresh the device-builder version display in the tray menu
+                                refresh_builder_version_display(&app);
 
                                 if let Err(e) = state.daemon.start().await {
                                     error!(
@@ -761,6 +807,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                         }
                         return;
                     }
+                    // Install succeeded — refresh the tray version display.
+                    refresh_builder_version_display(&app);
                 }
 
                 // Apply the new backend to the daemon and persist it.

@@ -40,6 +40,10 @@ pub struct DaemonManager {
     dashboard_pid: Arc<AtomicI32>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
+    /// Desktop app version (from tauri.conf.json), forwarded to the child
+    /// via `ESPHOME_DESKTOP_VERSION` so the backend can surface it to the
+    /// frontend. Captured at construction since it doesn't change at runtime.
+    desktop_version: String,
 }
 
 impl DaemonManager {
@@ -71,6 +75,7 @@ impl DaemonManager {
             running: Arc::new(AtomicBool::new(false)),
             dashboard_pid: Arc::new(AtomicI32::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
+            desktop_version: app_handle.package_info().version.to_string(),
         })
     }
 
@@ -172,6 +177,10 @@ impl DaemonManager {
 
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
+        // Surface the desktop app version to the backend so it can be shown
+        // in the frontend (e.g. an "About" page). Set unconditionally — both
+        // backends get it; classic dashboard can ignore it.
+        cmd.env("ESPHOME_DESKTOP_VERSION", &self.desktop_version);
 
         // On Windows, force the spawned Python (and any subprocesses it
         // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.
