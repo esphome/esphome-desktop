@@ -79,11 +79,29 @@ def _warn(msg: str) -> None:
     print(f"::warning::{msg}", file=sys.stderr)
 
 
+def _asset_url(download_base: str, name: str) -> str:
+    """Build the post-publish download URL for an asset.
+
+    `gh release view` on a draft release returns `url`s under
+    `/download/untagged-<hash>/…` which flip to `/download/<tag>/…` once
+    the release is published. `latest.json` is generated and validated
+    while the release is still a draft, so we construct the eventual
+    tagged URL from the tag + asset name instead of trusting the
+    draft-state URL.
+    """
+    return f"{download_base}/{name}"
+
+
 def build_platforms(
     assets_by_name: dict[str, dict[str, Any]],
     artifacts_dir: Path,
+    download_base: str,
 ) -> dict[str, dict[str, str]]:
     """Build the Tauri updater `platforms` block from release assets + local .sig files."""
+    # GitHub normalizes spaces to dots in release-asset names, but
+    # actions/download-artifact preserves the original (spaced) filenames.
+    # Match local sig files by regex so either naming works.
+    local_sigs = list(artifacts_dir.rglob("*.sig"))
     platforms: dict[str, dict[str, str]] = {}
     for plat, regex in PLATFORM_SIG_MATCHERS:
         candidates = [a for a in assets_by_name.values() if regex.match(a["name"])]
@@ -96,19 +114,20 @@ def build_platforms(
         if not bin_asset:
             _warn(f"No matching binary asset for {sig_asset['name']}")
             continue
-        sig_files = list(artifacts_dir.rglob(sig_asset["name"]))
-        if not sig_files:
+        local_matches = [p for p in local_sigs if regex.match(p.name)]
+        if not local_matches:
             _warn(f"Signature file not found locally: {sig_asset['name']}")
             continue
         platforms[plat] = {
-            "signature": sig_files[0].read_text().strip(),
-            "url": bin_asset["url"],
+            "signature": local_matches[0].read_text().strip(),
+            "url": _asset_url(download_base, bin_asset["name"]),
         }
     return platforms
 
 
 def build_downloads(
     release_assets: list[dict[str, Any]],
+    download_base: str,
 ) -> dict[str, list[dict[str, Any]]]:
     """Group every distributable installer URL by platform."""
     downloads: dict[str, list[dict[str, Any]]] = {}
@@ -118,7 +137,7 @@ def build_downloads(
             if regex.search(name):
                 downloads.setdefault(plat, []).append({
                     "kind": kind,
-                    "url": asset["url"],
+                    "url": _asset_url(download_base, name),
                     "size": asset["size"],
                 })
                 break
@@ -150,9 +169,10 @@ def build_manifest(
     version = tag.lstrip("v")
     assets = release.get("assets") or []
     assets_by_name = {a["name"]: a for a in assets}
+    download_base = f"https://github.com/{repo}/releases/download/{tag}"
 
-    platforms = build_platforms(assets_by_name, artifacts_dir)
-    downloads = build_downloads(assets)
+    platforms = build_platforms(assets_by_name, artifacts_dir, download_base)
+    downloads = build_downloads(assets, download_base)
 
     pub_date = release.get("publishedAt") or datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
