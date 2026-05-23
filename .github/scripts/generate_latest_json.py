@@ -73,10 +73,28 @@ DOWNLOAD_MATCHERS: list[tuple[str, str, re.Pattern[str]]] = [
 
 SCHEMA_URL = "https://desktop.esphome.io/latest.schema.json"
 
+# Matches the assets-pending caution block emitted by release-drafter
+# (see .github/release-drafter.yml). The release body still carries this
+# block while latest.json is generated because the workflow only strips
+# it from the release body *after* the manifest is uploaded — so we
+# strip it here too, to keep the warning out of the published notes.
+ASSETS_PENDING_BLOCK_RE = re.compile(
+    r"^> \[!CAUTION\].*?<!-- ASSETS_PENDING -->\n?",
+    re.DOTALL | re.MULTILINE,
+)
+
 
 def _warn(msg: str) -> None:
     """Emit a GitHub-Actions-style warning to stderr (also readable locally)."""
     print(f"::warning::{msg}", file=sys.stderr)
+
+
+def _strip_assets_pending_warning(body: str) -> str:
+    """Remove the release-drafter assets-pending caution block from a release body."""
+    stripped = ASSETS_PENDING_BLOCK_RE.sub("", body)
+    # Belt-and-braces: drop any stray markers left behind by manual edits.
+    stripped = stripped.replace("<!-- ASSETS_PENDING -->", "")
+    return stripped.lstrip("\n")
 
 
 def _asset_url(download_base: str, name: str) -> str:
@@ -184,7 +202,7 @@ def build_manifest(
     return {
         "$schema": SCHEMA_URL,
         "version": version,
-        "notes": release.get("body") or "",
+        "notes": _strip_assets_pending_warning(release.get("body") or ""),
         "pub_date": pub_date,
         "release_url": f"https://github.com/{repo}/releases/tag/{tag}",
         "platforms": platforms,
