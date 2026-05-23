@@ -1,6 +1,6 @@
 {
   "_comment": "Mock output of `gh release view <tag> --json body,publishedAt,assets`. Used as a manual fixture for `.github/scripts/generate_latest_json.py`. Asset names and URLs are the dot-substituted form GitHub serves (spaces in productName become dots); sizes are illustrative.",
-  "body": "## What's Changed\n\n* Fixture release used to exercise the latest.json generator.\n\n**Full Changelog**: https://github.com/esphome/esphome-desktop/compare/v0.9.0...v0.10.0",
+  "body": "> [!CAUTION]\n> **DO NOT PUBLISH THIS RELEASE YET!**\n> Build assets have not been uploaded. Wait for the build workflow to complete\n> and this notice to be removed before publishing.\n<!-- ASSETS_PENDING -->\n\n## What's Changed\n\n* Fixture release used to exercise the latest.json generator.\n\n**Full Changelog**: https://github.com/esphome/esphome-desktop/compare/v0.9.0...v0.10.0",
   "publishedAt": "2026-05-22T14:31:08Z",
   "assets": [
     {"name": "ESPHome.Device.Builder_0.10.0_x64-setup.exe",         "url": "https://github.com/esphome/esphome-desktop/releases/download/v0.10.0/ESPHome.Device.Builder_0.10.0_x64-setup.exe",         "size": 175342211},
