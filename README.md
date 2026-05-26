@@ -50,8 +50,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Open Dashboard** - Open the dashboard in your browser
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
-- **Check for Updates** - Check for new ESPHome (Python) versions
-- **Check for App Updates** - Check for a new ESPHome Device Builder desktop release and install it in-place
+- **Check for Updates** - Check for a new ESPHome Device Builder desktop release, then new ESPHome (Python) and device-builder versions
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
