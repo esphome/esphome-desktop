@@ -25,7 +25,6 @@ mod ids {
     pub const BUILDER_VERSION: &str = "builder_version";
     pub const PORT: &str = "port";
     pub const CHECK_UPDATES: &str = "check_updates";
-    pub const CHECK_APP_UPDATES: &str = "check_app_updates";
     pub const VIEW_LOGS: &str = "view_logs";
     pub const OPEN_CONFIG: &str = "open_config";
     pub const RESTART: &str = "restart";
@@ -171,10 +170,6 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&channel_submenu)
         .item(
             &MenuItemBuilder::with_id(ids::CHECK_UPDATES, "Check for Updates...")
-                .build(app_handle)?,
-        )
-        .item(
-            &MenuItemBuilder::with_id(ids::CHECK_APP_UPDATES, "Check for App Updates...")
                 .build(app_handle)?,
         )
         .separator()
@@ -555,14 +550,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                         }
                     }
                 }
-            });
-        }
-        ids::CHECK_APP_UPDATES => {
-            let app = app_handle.clone();
-            async_runtime::spawn(async move {
-                // Verbose mode: this menu item is app-only, so surface "no
-                // updates available" feedback too.
-                crate::app_update::check_for_user(&app, true).await;
             });
         }
         ids::CHANNEL_STABLE | ids::CHANNEL_BETA | ids::CHANNEL_DEV => {
