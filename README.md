@@ -193,6 +193,17 @@ The app uses pip to update ESPHome. If updates fail:
 1. Check your internet connection
 2. Check the logs for specific error messages
 
+### No system tray icon (Linux)
+
+Some Linux desktops (notably certain KDE Plasma and GNOME setups) don't expose a
+StatusNotifier host to the **AppImage** build, so the tray icon — and the
+"Check for Updates" menu it hosts — never appears. The app detects this and
+falls back to opening the dashboard in your browser, and update notifications
+say so instead of pointing at a tray menu that isn't there.
+
+To get a working tray (and the in-app updater), install the **deb/rpm/AUR**
+package for your distribution instead of the AppImage.
+
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) for details.
