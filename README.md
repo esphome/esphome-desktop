@@ -175,6 +175,15 @@ Then try opening the app again.
   ```
   Then log out and back in.
 
+### `github://` packages or external components fail
+
+ESPHome shells out to **Git** to download configurations that reference
+`github://` packages, external components, or dashboard imports. The app
+bundles Python but not Git, so these configs fail on machines without Git
+installed. If you see errors only on configs that pull from GitHub, install
+[Git](https://git-scm.com/downloads) and restart the app. The app shows a
+notification at startup when Git can't be found on your `PATH`.
+
 ### Updates not working
 
 The app uses pip to update ESPHome. If updates fail:

@@ -5,6 +5,7 @@
 
 mod app_update;
 mod daemon;
+mod git_check;
 mod platform;
 mod settings;
 mod tray;
@@ -298,6 +299,11 @@ pub fn run(cli: Cli) {
                         tray::update_status(&daemon_app, false);
                     }
                 }
+
+                // Warn (once, non-blocking) if git is missing. ESPHome needs
+                // it for github:// packages; without it those configs fail
+                // with a cryptic Python traceback instead of a clear message.
+                git_check::notify_if_git_missing(&daemon_app);
             });
 
             // Start update checker (check after 30s, then every 24 hours)
