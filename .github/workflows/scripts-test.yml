@@ -44,7 +44,7 @@ jobs:
       # breaking/yanked pytest release can't fail this gate on unrelated PRs
       # (same reasoning the repo pins the Rust toolchain).
       - name: Install pytest
-        run: python3 -m pip install --user 'pytest~=8.0'
+        run: python3 -m pip install 'pytest~=8.0'
 
       - name: Run script tests
         run: python3 -m pytest tests/ -v
