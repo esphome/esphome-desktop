@@ -119,6 +119,13 @@ impl DaemonManager {
         // Unix we deliberately don't set `kill_on_drop`, so that dropped
         // child is never signaled and orphans a stray dashboard process.
         // stop() also takes this lock, so start()/stop() are serialized too.
+        //
+        // Consequence: stop() holds this lock across its up-to-30s child drain,
+        // so a stop-then-start sequence (Restart, or rapid Stop->Start) makes
+        // start() await the lock until stop() finishes — up to 30s. This is the
+        // intended serialization (prevents the new dashboard racing the old one
+        // for the port). start() is async, so it yields rather than blocking a
+        // thread, keeping the tray/UI responsive.
         let mut process = self.process.lock().await;
 
         if self.running.load(Ordering::SeqCst) {
