@@ -535,8 +535,8 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
 #[cfg(target_os = "windows")]
 pub fn send_ctrl_break(pid: u32) -> bool {
     use ::windows::Win32::System::Console::{
-        AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
-        CTRL_BREAK_EVENT,
+        AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetStdHandle, SetConsoleCtrlHandler,
+        SetStdHandle, CTRL_BREAK_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
     // Serialize: AttachConsole/FreeConsole/SetConsoleCtrlHandler mutate
@@ -545,16 +545,45 @@ pub fn send_ctrl_break(pid: u32) -> bool {
     static CONSOLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = CONSOLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    // SAFETY: serialized Win32 console FFI. We restore the ctrl handler and
-    // detach the console before returning regardless of outcome; no handle or
-    // console state escapes this function.
+    // SAFETY: serialized Win32 console FFI. We restore the ctrl handler, the
+    // standard handles, and detach the console before returning regardless of
+    // outcome; no handle or console state escapes this function.
     unsafe {
+        // Save our standard handles up front and restore them on every exit
+        // path. AttachConsole/FreeConsole mutate whole-process console state
+        // and leave this (GUI, console-less) process's STD_INPUT_HANDLE
+        // dangling — NULL at launch, but an invalid non-NULL value once we
+        // attach to and then free the child's console. Anything we spawn after
+        // a shutdown attempt (notably the daemon respawn on restart) would then
+        // inherit that invalid handle, and because the daemon command
+        // redirects stdout/stderr (setting STARTF_USESTDHANDLES, which requires
+        // all three standard handles to be valid) CreateProcess fails with
+        // ERROR_INVALID_HANDLE. Restoring the saved values keeps our handle
+        // state exactly as it was before the call. (The daemon command also
+        // pins stdin to NUL as a belt-and-suspenders measure; this restore
+        // protects any other post-shutdown spawn too.)
+        let saved_in = GetStdHandle(STD_INPUT_HANDLE);
+        let saved_out = GetStdHandle(STD_OUTPUT_HANDLE);
+        let saved_err = GetStdHandle(STD_ERROR_HANDLE);
+        let restore_std_handles = || {
+            if let Ok(h) = saved_in {
+                let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+            }
+            if let Ok(h) = saved_out {
+                let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+            }
+            if let Ok(h) = saved_err {
+                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+            }
+        };
+
         // Detach from any console we currently hold; otherwise AttachConsole
         // fails with ERROR_ACCESS_DENIED (a process can attach to at most one
         // console). Harmless if we have none.
         let _ = FreeConsole();
         if AttachConsole(pid).is_err() {
             // Child gone, or its console is not reachable.
+            restore_std_handles();
             return false;
         }
         // Make ourselves ignore the event we are about to broadcast so we
@@ -564,6 +593,7 @@ pub fn send_ctrl_break(pid: u32) -> bool {
         let delivered = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid).is_ok();
         let _ = SetConsoleCtrlHandler(None, false);
         let _ = FreeConsole();
+        restore_std_handles();
         delivered
     }
 }
