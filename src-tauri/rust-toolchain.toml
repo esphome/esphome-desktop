@@ -1,0 +1,9 @@
+# Pin the toolchain so local rustup resolves the same Rust version the
+# `Lint & Test` CI workflow enforces (see toolchain: in
+# .github/workflows/lint-test.yml). Keeping clippy and rustfmt deterministic
+# means a new Rust release can't introduce a fresh lint on an unrelated change.
+# Bump this deliberately to adopt newer lints, and keep it in sync with the
+# toolchain: value in lint-test.yml.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]

@@ -29,16 +29,19 @@ repos:
         entry: "\\x00"
         types: [text]
 
+      # Run inside src-tauri so rustup discovers src-tauri/rust-toolchain.toml
+      # and resolves the same pinned toolchain CI uses (requires git-bash on
+      # Windows).
       - id: cargo-fmt
         name: cargo fmt (src-tauri)
-        entry: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+        entry: bash -c 'cd src-tauri && cargo fmt --all --check'
         language: system
         types: [rust]
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo clippy (src-tauri)
-        entry: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+        entry: bash -c 'cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings'
         language: system
         types: [rust]
         pass_filenames: false
