@@ -1,0 +1,44 @@
+# Install with: pre-commit install
+#
+# Base hooks mirror the esphome/device-builder-frontend config. The local cargo
+# hooks mirror the required Rust gates in the `Lint & Test` CI workflow
+# (.github/workflows/lint-test.yml). PR #134 made clippy and rustfmt blocking
+# gates for the src-tauri crate; these hooks catch the same failures before a
+# commit instead of after CI runs.
+#
+# CI pins Rust to a fixed toolchain (see `toolchain:` in lint-test.yml) so a new
+# release can't introduce a fresh lint on an unrelated PR. The cargo hooks use
+# your default toolchain; if a result differs locally, match the pinned version.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+        args: [--fix=lf]
+  - repo: local
+    hooks:
+      - id: forbid-nul-bytes
+        name: forbid NUL bytes in source files
+        language: pygrep
+        entry: "\\x00"
+        types: [text]
+
+      - id: cargo-fmt
+        name: cargo fmt (src-tauri)
+        entry: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (src-tauri)
+        entry: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
