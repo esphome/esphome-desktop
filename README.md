@@ -75,6 +75,8 @@ Your ESPHome configuration files are stored at `~/esphome/` on all platforms by 
 
 On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Device Builder\`.
 
+**Windows build data (`C:\esphb\<id>\`).** On Windows the ESPHome Device Builder backend puts its build tree and PlatformIO toolchain under a short folder nested in one `C:\esphb` parent, `C:\esphb\<id>\` (one per config dir), instead of under your profile or config dir. This keeps deep ESP-IDF build paths under Windows' 260-character path limit and clear of spaces in your profile name (e.g. `C:\Users\First Last\…`), both of which otherwise break the build. This folder is **not** removed when you uninstall ESPHome Device Builder, so a reinstall keeps the (multi-GB) toolchain warm and avoids a long re-download. If you want to reclaim the disk space, delete the `C:\esphb` folder by hand after uninstalling. (Only native Windows is affected; running the backend in a Linux container uses the normal data dir.)
+
 ## Building from Source
 
 ### Prerequisites

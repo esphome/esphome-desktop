@@ -15,21 +15,16 @@ use crate::platform;
 const DEFAULT_PORT: u16 = 6052;
 
 /// ESPHome release channel
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReleaseChannel {
     /// Latest stable release from PyPI
+    #[default]
     Stable,
     /// Latest beta/pre-release from PyPI
     Beta,
     /// Latest development build from GitHub (no auto-updates)
     Dev,
-}
-
-impl Default for ReleaseChannel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 impl fmt::Display for ReleaseChannel {
@@ -43,7 +38,7 @@ impl fmt::Display for ReleaseChannel {
 }
 
 /// Which backend the daemon should run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     /// Classic ESPHome dashboard (`esphome dashboard`)
@@ -51,13 +46,8 @@ pub enum Backend {
     /// ESPHome device builder, stable release from PyPI
     BuilderStable,
     /// ESPHome device builder, beta/pre-release from PyPI
+    #[default]
     BuilderBeta,
-}
-
-impl Default for Backend {
-    fn default() -> Self {
-        Self::BuilderBeta
-    }
 }
 
 impl fmt::Display for Backend {
@@ -148,8 +138,10 @@ impl Settings {
             Ok(settings)
         } else {
             info!("No settings file found, using defaults");
-            let mut settings = Settings::default();
-            settings.installed_version = detect_installed_version(app_handle).ok();
+            let settings = Settings {
+                installed_version: detect_installed_version(app_handle).ok(),
+                ..Default::default()
+            };
             Ok(settings)
         }
     }

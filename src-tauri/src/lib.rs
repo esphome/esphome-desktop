@@ -198,7 +198,9 @@ pub fn run(cli: Cli) {
                     if let Err(e) = settings.save(app.handle()) {
                         warn!("Failed to save settings after CLI override: {}", e);
                     }
-                    state.daemon.set_use_device_builder(new_backend.is_builder());
+                    state
+                        .daemon
+                        .set_use_device_builder(new_backend.is_builder());
                     new_backend.is_builder()
                 } else {
                     false
@@ -251,7 +253,10 @@ pub fn run(cli: Cli) {
                         true
                     }
                     Ok(Err(e)) => {
-                        warn!("Failed to create system tray icon: {}. Running without tray.", e);
+                        warn!(
+                            "Failed to create system tray icon: {}. Running without tray.",
+                            e
+                        );
                         false
                     }
                     Err(_) => {
@@ -345,10 +350,12 @@ pub fn run(cli: Cli) {
             {
                 let signal_app = app.handle().clone();
                 async_runtime::spawn(async move {
-                    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                        .expect("Failed to set up SIGINT handler");
-                    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("Failed to set up SIGTERM handler");
+                    let mut sigint =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                            .expect("Failed to set up SIGINT handler");
+                    let mut sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                            .expect("Failed to set up SIGTERM handler");
 
                     tokio::select! {
                         _ = sigint.recv() => {
