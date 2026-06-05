@@ -112,6 +112,15 @@ impl DaemonManager {
 
     /// Start the ESPHome dashboard
     pub async fn start(&self) -> Result<()> {
+        // Hold the process lock for the entire start sequence (check ->
+        // spawn -> store) so two concurrent start() calls can't both pass
+        // the running check and each spawn a child. Without this, the
+        // second `*process = Some(child)` would drop the first Child; on
+        // Unix we deliberately don't set `kill_on_drop`, so that dropped
+        // child is never signaled and orphans a stray dashboard process.
+        // stop() also takes this lock, so start()/stop() are serialized too.
+        let mut process = self.process.lock().await;
+
         if self.running.load(Ordering::SeqCst) {
             info!("Daemon already running");
             return Ok(());
@@ -240,9 +249,11 @@ impl DaemonManager {
             self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
         }
 
-        let mut process = self.process.lock().await;
         *process = Some(child);
         self.running.store(true, Ordering::SeqCst);
+        // Release the lock before spawning the watcher tasks below; they
+        // re-acquire it on their own polling cadence.
+        drop(process);
 
         // Start health check task
         let running = self.running.clone();
