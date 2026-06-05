@@ -46,8 +46,8 @@ REPO = "esphome/esphome-desktop"
 def _load_generator() -> ModuleType:
     """Import the generator script by path (it isn't an installable package)."""
     spec = importlib.util.spec_from_file_location("generate_latest_json", SCRIPT_PATH)
+    assert spec and spec.loader, f"cannot load {SCRIPT_PATH}"
     module = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
     spec.loader.exec_module(module)
     return module
 
@@ -172,9 +172,7 @@ def test_build_platforms_reads_sig_nested_in_artifact_dir() -> None:
         assert entry["signature"].strip(), f"empty signature for {plat}"
 
 
-def test_build_platforms_also_handles_flat_sig_layout(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_build_platforms_also_handles_flat_sig_layout() -> None:
     """A flat ``<name>.sig`` file (not nested) must work too."""
     with TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
@@ -182,8 +180,8 @@ def test_build_platforms_also_handles_flat_sig_layout(
             "flat-sig-contents\n"
         )
         # The other four platforms have no local .sig here and will warn;
-        # capsys swallows that noise — this test only asserts the flat layout
-        # reads.
+        # pytest swallows that noise by default — this test only asserts the
+        # flat layout reads.
         platforms = gen.build_platforms(
             _assets_by_name(),
             tmpdir,
