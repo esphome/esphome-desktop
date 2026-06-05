@@ -118,7 +118,9 @@ impl DaemonManager {
         // Open log file for stdout and stderr combined
         let log_path = self.logs_dir.join("dashboard.log");
         let log_file = File::create(&log_path).context("Failed to create log file")?;
-        let log_file_clone = log_file.try_clone().context("Failed to clone log file handle")?;
+        let log_file_clone = log_file
+            .try_clone()
+            .context("Failed to clone log file handle")?;
 
         info!("{} logs: {:?}", backend_name, log_path);
 
@@ -362,7 +364,10 @@ impl DaemonManager {
                 // Windows is out of scope for this fix.
                 #[cfg(not(unix))]
                 Err(_) => {
-                    warn!("Timeout waiting for {} to exit; force-killing.", backend_name);
+                    warn!(
+                        "Timeout waiting for {} to exit; force-killing.",
+                        backend_name
+                    );
                     let _ = child.kill().await;
                 }
             }
