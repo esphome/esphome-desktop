@@ -21,8 +21,10 @@ cargo clippy --all-targets --all-features -- -D warnings   # lints
 cargo test --all-features        # unit tests
 ```
 
-`cargo test` is the required gate; `fmt` and `clippy` are advisory until the
-tree has a confirmed-clean baseline.
+All three are required gates — `fmt`, `clippy`, and `cargo test` each block the
+merge on failure. CI pins Rust to a fixed version so a new toolchain release
+can't break the lint gates on an unrelated PR; if a clippy/fmt result differs
+locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 
 ---
 

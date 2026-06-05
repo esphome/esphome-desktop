@@ -41,9 +41,17 @@ jobs:
             librsvg2-dev \
             libayatana-appindicator3-dev
 
+      # Pin the toolchain version (unlike the Build workflow, which floats
+      # `stable`). clippy and rustfmt are *required* gates below, so a floating
+      # toolchain would let a new Rust release introduce a fresh clippy lint or
+      # a rustfmt formatting tweak that breaks unrelated PRs through no fault of
+      # their own. Pinning makes the gate deterministic; bump it deliberately to
+      # adopt newer lints. 1.96.0 is the version that established the green
+      # clippy/fmt baseline this workflow enforces.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
         with:
+          toolchain: 1.96.0
           components: clippy, rustfmt
 
       - name: Setup Rust cache
@@ -60,21 +68,20 @@ jobs:
       - name: Stub bundle resource dir
         run: mkdir -p src-tauri/python
 
-      # Advisory for now: clippy and rustfmt have never run in CI, so the tree
-      # has no enforced-clean baseline. These steps surface violations without
-      # blocking merges. Once a green baseline is confirmed, drop the
-      # `continue-on-error` lines to make them required.
-      - name: Formatting (advisory)
+      # Required gates. clippy and rustfmt were introduced as advisory in the
+      # first iteration of this workflow because they had never run in CI and the
+      # tree had no enforced-clean baseline. Both have since passed clean on the
+      # pinned toolchain, so they now block merges — formatting drift and clippy
+      # warnings fail the build like any test would.
+      - name: Formatting
         working-directory: src-tauri
         run: cargo fmt --all --check
-        continue-on-error: true
 
-      - name: Clippy (advisory)
+      - name: Clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets --all-features -- -D warnings
-        continue-on-error: true
 
-      # The real gate: run the unit tests. Failures block the merge.
+      # Run the unit tests. Failures block the merge.
       - name: Tests
         working-directory: src-tauri
         run: cargo test --all-features --verbose
