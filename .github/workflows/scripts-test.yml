@@ -1,0 +1,40 @@
+name: Scripts Test
+
+# Unit tests for the Python release tooling under .github/scripts/. The
+# release manifest generator (generate_latest_json.py) drives in-app
+# self-updates and the download page; a bug there ships a broken latest.json
+# to every user. The main Build workflow only *runs* the generator during a
+# release — it never exercises it on the fixtures — so this job gates the
+# pure transform logic on every relevant PR.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/scripts-test.yml"
+      - "tests/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  scripts-test:
+    name: Python scripts test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Pure stdlib unittest — no pip install, and ubuntu-22.04 already ships
+      # python3 (same as the Build workflow, which invokes the generator with
+      # a bare `python3`). Targets 3.11+ syntax-wise; the runner's default is
+      # newer.
+      - name: Run script tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v

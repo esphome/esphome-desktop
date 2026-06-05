@@ -26,6 +26,16 @@ merge on failure. CI pins Rust to a fixed version so a new toolchain release
 can't break the lint gates on an unrelated PR; if a clippy/fmt result differs
 locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 
+## Running the Python script tests locally
+
+The release tooling under `.github/scripts/` (notably the `latest.json`
+generator that drives in-app self-updates) is gated by the `Scripts Test`
+workflow. The tests are pure stdlib `unittest` — no dependencies:
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
 ---
 
 [![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
