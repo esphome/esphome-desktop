@@ -173,20 +173,21 @@ impl DaemonManager {
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_clone));
 
-        // On Windows, give the daemon a NUL stdin instead of inheriting ours.
+        // Give the daemon a null stdin instead of inheriting ours. The
+        // dashboard/device-builder never reads stdin, so there is no reason to
+        // hold a handle to it on any platform.
         //
-        // The shutdown path calls `platform::send_ctrl_break`, whose
-        // `AttachConsole`/`FreeConsole` dance mutates this (GUI, console-less)
-        // process's standard handles: `STD_INPUT_HANDLE` starts out NULL but is
-        // left dangling once we attach to and then free the child's console. A
-        // subsequent restart respawn would inherit that invalid handle, and
-        // because stdout/stderr are redirected (so `STARTF_USESTDHANDLES` is
-        // set and *all three* handles must be valid) `CreateProcess` fails with
-        // ERROR_INVALID_HANDLE (os error 6) — leaving the daemon dead after
-        // every restart. stdin is the only standard handle we'd otherwise
-        // inherit, so pinning it to NUL makes the spawn independent of our
-        // console-handle state. The dashboard/device-builder never reads stdin.
-        #[cfg(windows)]
+        // On Windows this is also load-bearing for restart: the shutdown path
+        // calls `platform::send_ctrl_break`, whose `AttachConsole`/`FreeConsole`
+        // dance mutates this (GUI, console-less) process's standard handles.
+        // `STD_INPUT_HANDLE` starts out NULL but is left dangling once we attach
+        // to and then free the child's console. A subsequent restart respawn
+        // would inherit that invalid handle, and because stdout/stderr are
+        // redirected (so `STARTF_USESTDHANDLES` is set and *all three* handles
+        // must be valid) `CreateProcess` fails with ERROR_INVALID_HANDLE (os
+        // error 6) — leaving the daemon dead after every restart. Pinning stdin
+        // to a known-good handle makes the spawn independent of our
+        // console-handle state.
         cmd.stdin(Stdio::null());
 
         // On Unix, intentionally NOT setting `kill_on_drop(true)`. That
