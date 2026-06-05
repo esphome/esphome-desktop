@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
@@ -16,6 +16,21 @@ use tracing::{debug, error, info, warn};
 
 use crate::platform;
 use crate::settings::Settings;
+
+/// Width-correct atomic and integer types for the dashboard child PID.
+/// Windows PIDs are a `DWORD` (`u32`); Unix PIDs are a `pid_t` (`i32`).
+/// Matching the native width lets `child.id()` round-trip losslessly on both:
+/// a Windows `u32` PID above `i32::MAX` would otherwise wrap negative when
+/// forced through an `i32` and the shutdown path would target the wrong
+/// process.
+#[cfg(windows)]
+type AtomicPid = std::sync::atomic::AtomicU32;
+#[cfg(unix)]
+type AtomicPid = std::sync::atomic::AtomicI32;
+#[cfg(windows)]
+type PidInt = u32;
+#[cfg(unix)]
+type PidInt = i32;
 
 /// Manages the ESPHome dashboard process
 pub struct DaemonManager {
@@ -38,7 +53,7 @@ pub struct DaemonManager {
     /// without going through `ExitRequested`) can SIGTERM the process
     /// group without locking the tokio mutex. Zero when no child is
     /// running.
-    dashboard_pid: Arc<AtomicI32>,
+    dashboard_pid: Arc<AtomicPid>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
     /// AppHandle for emitting notifications / updating the tray when the
@@ -75,7 +90,7 @@ impl DaemonManager {
             logs_dir,
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
-            dashboard_pid: Arc::new(AtomicI32::new(0)),
+            dashboard_pid: Arc::new(AtomicPid::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
             app_handle: app_handle.clone(),
         })
@@ -157,6 +172,24 @@ impl DaemonManager {
             // Redirect stdout/stderr to single log file
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_clone));
+
+        // Give the daemon a null stdin instead of inheriting ours. The
+        // dashboard/device-builder never reads stdin, so there is no reason to
+        // hold a handle to it on any platform.
+        //
+        // On Windows this is also load-bearing for restart: the shutdown path
+        // calls `platform::send_ctrl_break`, whose `AttachConsole`/`FreeConsole`
+        // dance mutates this (GUI, console-less) process's standard handles.
+        // `STD_INPUT_HANDLE` starts out NULL but is left dangling once we attach
+        // to and then free the child's console. A subsequent restart respawn
+        // would inherit that invalid handle, and because stdout/stderr are
+        // redirected (so `STARTF_USESTDHANDLES` is set and *all three* handles
+        // must be valid) `CreateProcess` fails with ERROR_INVALID_HANDLE (os
+        // error 6) — leaving the daemon dead after every restart. Pinning stdin
+        // to a known-good handle makes the spawn independent of our
+        // console-handle state.
+        cmd.stdin(Stdio::null());
+
         // On Unix, intentionally NOT setting `kill_on_drop(true)`. That
         // would have tokio send SIGKILL to the Child when it gets
         // dropped (either when stop()'s wait times out, or when
@@ -164,11 +197,12 @@ impl DaemonManager {
         // dashboard and corrupts its state. Our Unix shutdown is
         // SIGTERM only — see `stop()` and `terminate_blocking()`.
         //
-        // On Windows there is no SIGTERM equivalent; the only way to
-        // stop the child reliably is TerminateProcess (what
-        // `Child::kill()` and `kill_on_drop(true)` invoke). Keep the
-        // drop-time safety net there so the dashboard doesn't orphan
-        // on Windows app exit.
+        // On Windows the graceful signal is CTRL_BREAK_EVENT (see `stop()`
+        // and `terminate_blocking()`), with TerminateProcess as the hard
+        // fallback. Keep `kill_on_drop(true)` as a last-ditch drop-time net
+        // for any path that drops the Child without going through those
+        // (note it does NOT fire on the normal quit path, which calls
+        // `std::process::exit()` and skips Drop).
         #[cfg(windows)]
         cmd.kill_on_drop(true);
 
@@ -176,8 +210,10 @@ impl DaemonManager {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        // Prevent a console window from staying open on Windows
-        platform::configure_no_window_tokio_command(&mut cmd);
+        // Prevent a console window from staying open on Windows, and put the
+        // child in its own process group so we can later deliver a graceful
+        // CTRL_BREAK_EVENT to it on shutdown (see daemon stop/terminate).
+        platform::configure_daemon_tokio_command(&mut cmd);
 
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
@@ -201,7 +237,7 @@ impl DaemonManager {
 
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
         if let Some(pid) = child.id() {
-            self.dashboard_pid.store(pid as i32, Ordering::SeqCst);
+            self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
         }
 
         let mut process = self.process.lock().await;
@@ -335,40 +371,50 @@ impl DaemonManager {
                 }
             }
 
-            // Wait up to 30 s for the dashboard to honor SIGTERM and exit
-            // cleanly. The dashboard's shutdown can drain in-flight work
-            // (firmware queue, partial writes, lock release) and we have
-            // measured this taking up to 30 s in the wild. We do NOT
-            // escalate to SIGKILL on timeout — force-killing here
-            // corrupts dashboard state. If the dashboard doesn't honor
-            // SIGTERM within the window, that's a dashboard-side bug;
-            // we log a warning and let the child finish on its own
-            // (it may briefly outlive us as an orphan of launchd).
+            // On Windows the graceful signal is CTRL_BREAK_EVENT to the
+            // child's process group (Python surfaces it as SIGBREAK). Send
+            // it up front, then wait the same patient window as Unix. Until
+            // the backend installs a SIGBREAK handler the default action
+            // terminates the child, so the wait returns promptly; once it
+            // drains gracefully, the window gives it time. TerminateProcess
+            // is the hard fallback on timeout (the only guarantee Windows
+            // offers for a child that ignored the break).
+            #[cfg(windows)]
+            {
+                if let Some(pid) = child.id() {
+                    let _ = crate::platform::send_ctrl_break(pid);
+                }
+            }
+
+            // Wait up to 30 s for the child to honor the signal and drain
+            // in-flight work (firmware queue, partial writes, lock release);
+            // we have measured up to 30 s in the wild.
             let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(30), child.wait());
 
             match timeout.await {
                 Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
-                #[cfg(unix)]
-                Err(_) => warn!(
-                    "Timeout waiting for {} to honor SIGTERM after 30 s; \
-                     proceeding with exit without force-killing.",
-                    backend_name
-                ),
-                // On Windows the loop above sent no graceful signal
-                // (there is no SIGTERM analog reachable from here),
-                // so the timeout is really "we waited 30 s for nothing
-                // to happen." TerminateProcess via Child::kill() is
-                // the only termination path; without it the dashboard
-                // would orphan on app exit. State preservation on
-                // Windows is out of scope for this fix.
-                #[cfg(not(unix))]
                 Err(_) => {
+                    // On Unix we do NOT escalate to SIGKILL — force-killing
+                    // corrupts dashboard state; we log and let the child
+                    // finish on its own (it may briefly outlive us as an
+                    // orphan). On Windows there is no gentler hard kill than
+                    // TerminateProcess, so we use it as the last resort.
+                    #[cfg(unix)]
                     warn!(
-                        "Timeout waiting for {} to exit; force-killing.",
+                        "Timeout waiting for {} to honor SIGTERM after 30 s; \
+                         proceeding with exit without force-killing.",
                         backend_name
                     );
-                    let _ = child.kill().await;
+                    #[cfg(windows)]
+                    {
+                        warn!(
+                            "Timeout waiting for {} to honor CTRL_BREAK after 30 s; \
+                             force-killing.",
+                            backend_name
+                        );
+                        let _ = child.kill().await;
+                    }
                 }
             }
         }
@@ -378,11 +424,15 @@ impl DaemonManager {
         Ok(())
     }
 
-    /// Synchronously send SIGTERM to the dashboard's process group.
+    /// Synchronously terminate the dashboard child process. On Unix this
+    /// sends SIGTERM to its process group; on Windows it delivers a
+    /// graceful `CTRL_BREAK_EVENT` to its process group, with
+    /// `TerminateProcess` as the fallback if the break can't be delivered.
+    ///
     /// Safe to call from any context (including a tauri `RunEvent::Exit`
     /// callback where the tokio runtime is already winding down) — no
     /// async involvement. No-op if the daemon is not running or if a
-    /// previous call already fired the signal.
+    /// previous call already fired the kill.
     ///
     /// Idempotent via an atomic swap on `dashboard_pid` — repeated
     /// calls after the first are cheap no-ops, so it's safe to call
@@ -390,22 +440,36 @@ impl DaemonManager {
     /// run loop.
     ///
     /// Does NOT touch the `running` flag, so a concurrent / subsequent
-    /// `stop()` still runs its graceful 30 s wait. The PID atomic is
-    /// only used for the synchronous kill path; `stop()` reads
-    /// `child.id()` directly off the stored `Child` handle.
+    /// `stop()` still runs its wait. The PID atomic is only used for the
+    /// synchronous kill path; `stop()` reads `child.id()` directly off
+    /// the stored `Child` handle.
     ///
-    /// SIGTERM only — the dashboard is expected to honor it and clean
-    /// up its own state. If it doesn't, that's a dashboard-side bug.
+    /// On Unix this is SIGTERM only — the dashboard is expected to honor
+    /// it and clean up its own state. On Windows the graceful signal is
+    /// `CTRL_BREAK_EVENT`; we never hard-kill when the break was
+    /// delivered (so a backend that handles SIGBREAK can drain), only
+    /// when delivery fails. `TerminateProcess` is then the fallback
+    /// because it is the only hard guarantee Windows offers.
     ///
-    /// Guards against PID-reuse via `getpgid()`: if the dashboard child
-    /// exited independently (crash / external kill) and tokio reaped
-    /// it before we got here, the kernel may have handed our recorded
-    /// PID to an unrelated process. We spawned the dashboard with
-    /// `process_group(0)`, so the child is its own pgleader (pgid ==
-    /// pid). An unrelated process inheriting the recycled PID is
-    /// almost certainly not its own pgleader, so a `getpgid(pid) !=
-    /// pid` result short-circuits the signal and we don't disturb the
+    /// PID-reuse safety, Unix: guarded via `getpgid()`. If the dashboard
+    /// child exited independently (crash / external kill) and tokio
+    /// reaped it before we got here, the kernel may have handed our
+    /// recorded PID to an unrelated process. We spawned the dashboard
+    /// with `process_group(0)`, so the child is its own pgleader (pgid
+    /// == pid). An unrelated process inheriting the recycled PID is
+    /// almost certainly not its own pgleader, so a `getpgid(pid) != pid`
+    /// result short-circuits the signal and we don't disturb the
     /// stranger.
+    ///
+    /// PID-reuse safety, Windows: structural. While tokio's `Child`
+    /// handle for the process is open, Windows will not recycle that PID
+    /// (a PID is freed only once all handles to the process object
+    /// close). The handle lives in `process` and is dropped only by
+    /// `stop()` or the exit-watcher, both of which also zero this
+    /// atomic. So whenever `dashboard_pid != 0` the handle still pins
+    /// the PID; no `getpgid` equivalent is needed. A stale/exited PID
+    /// just makes `send_ctrl_break` (or the `OpenProcess` fallback) fail
+    /// harmlessly.
     pub fn terminate_blocking(&self) {
         let pid = self.dashboard_pid.swap(0, Ordering::SeqCst);
         if pid == 0 {
@@ -427,6 +491,40 @@ impl DaemonManager {
                          signaling a recycled-PID stranger.",
                         pid
                     );
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            // Graceful first: deliver CTRL_BREAK to the child's process
+            // group. The process-group id equals the child PID because we
+            // spawned it with CREATE_NEW_PROCESS_GROUP.
+            if !crate::platform::send_ctrl_break(pid) {
+                // The break could not be delivered (child gone, or no
+                // reachable console). Fall back to TerminateProcess so the
+                // child can never orphan.
+                use ::windows::Win32::Foundation::CloseHandle;
+                use ::windows::Win32::System::Threading::{
+                    OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+                };
+                // SAFETY: FFI into Win32. We pass a valid PID and immediately
+                // close any handle we open; the handle never escapes this
+                // block.
+                unsafe {
+                    match OpenProcess(PROCESS_TERMINATE, false, pid) {
+                        Ok(handle) => {
+                            if let Err(e) = TerminateProcess(handle, 1) {
+                                warn!("TerminateProcess on dashboard pid {} failed: {}", pid, e);
+                            }
+                            if let Err(e) = CloseHandle(handle) {
+                                warn!("CloseHandle on dashboard pid {} failed: {}", pid, e);
+                            }
+                        }
+                        Err(e) => warn!(
+                            "OpenProcess on dashboard pid {} failed (already exited?): {}",
+                            pid, e
+                        ),
+                    }
                 }
             }
         }

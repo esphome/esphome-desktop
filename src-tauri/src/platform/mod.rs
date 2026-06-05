@@ -13,7 +13,7 @@ use tracing::debug;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
-use ::windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
 /// Get the application data directory
 ///
@@ -498,6 +498,131 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = cmd;
+    }
+}
+
+/// Configure the daemon child's creation flags on Windows: no console window
+/// AND a new process group. The new process group makes the child its own
+/// group leader (pgid == pid) so we can later deliver a graceful
+/// `CTRL_BREAK_EVENT` to it (and its descendants) for shutdown via
+/// `send_ctrl_break`. Sets both flags in one call so neither overwrites the
+/// other. No-op on non-Windows (Unix uses `process_group(0)` instead).
+pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags((CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP).0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// Deliver a graceful `CTRL_BREAK_EVENT` to a child process group on Windows.
+///
+/// Returns `true` if the event was delivered, `false` if it could not be (the
+/// child already exited, or its console is unreachable) — the caller should
+/// then fall back to `TerminateProcess`.
+///
+/// `pid` must be the PID of a child spawned with `CREATE_NEW_PROCESS_GROUP`
+/// (see `configure_daemon_tokio_command`); for such a child the process-group
+/// id equals its PID. `CTRL_BREAK_EVENT` is the only usable signal here:
+/// `CREATE_NEW_PROCESS_GROUP` disables CTRL+C for the group, and unlike
+/// `CTRL_C_EVENT` a break can target a specific group id.
+///
+/// The desktop app is a GUI process with no console, so a bare
+/// `GenerateConsoleCtrlEvent` would have nothing to signal through. We
+/// transiently attach to the child's (hidden) console, suppress the event in
+/// ourselves so we don't self-terminate, broadcast it, then detach. This
+/// mutates whole-process console state, so it is serialized under a lock; it
+/// is also known to be finicky, hence the caller's `TerminateProcess`
+/// fallback.
+///
+/// A release build is a GUI (windows-subsystem) process and owns no console,
+/// so the detach is a no-op. A dev/console build run from a terminal (so the
+/// daemon's tracing is visible) does own one; detaching it would tear that
+/// terminal down, so we record it up front and reattach to it before
+/// returning on every exit path.
+#[cfg(target_os = "windows")]
+pub fn send_ctrl_break(pid: u32) -> bool {
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::System::Console::{
+        AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, GetStdHandle,
+        SetConsoleCtrlHandler, SetStdHandle, ATTACH_PARENT_PROCESS, CTRL_BREAK_EVENT,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    // Serialize: AttachConsole/FreeConsole/SetConsoleCtrlHandler mutate
+    // per-process (not per-thread) console state, so two concurrent sends
+    // would corrupt each other.
+    static CONSOLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CONSOLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // SAFETY: serialized Win32 console FFI. We restore the ctrl handler, the
+    // standard handles, and our original console attachment before returning
+    // regardless of outcome; no handle or console state escapes this function.
+    unsafe {
+        // Record whether we own a real console (one with a window) before we
+        // touch any console state. A GUI release build owns none, so this is
+        // false and the detach below is a no-op. A dev/console build run from
+        // a terminal owns one; we reattach to it on the way out so a shutdown
+        // attempt doesn't tear the terminal down.
+        let had_console = !GetConsoleWindow().0.is_null();
+
+        // Save our standard handles up front and restore them on every exit
+        // path. AttachConsole/FreeConsole mutate whole-process console state
+        // and leave this (GUI, console-less) process's STD_INPUT_HANDLE
+        // dangling — NULL at launch, but an invalid non-NULL value once we
+        // attach to and then free the child's console. Anything we spawn after
+        // a shutdown attempt (notably the daemon respawn on restart) would then
+        // inherit that invalid handle, and because the daemon command
+        // redirects stdout/stderr (setting STARTF_USESTDHANDLES, which requires
+        // all three standard handles to be valid) CreateProcess fails with
+        // ERROR_INVALID_HANDLE. Restoring the saved values keeps our handle
+        // state exactly as it was before the call. (The daemon command also
+        // pins stdin to NUL as a belt-and-suspenders measure; this restore
+        // protects any other post-shutdown spawn too.)
+        //
+        // GetStdHandle returns Err only for INVALID_HANDLE_VALUE; a console-
+        // less process legitimately has NULL standard handles, which come back
+        // as Ok(NULL). We coerce either case to a concrete HANDLE and restore
+        // it unconditionally, so a process that started with NULL handles ends
+        // with NULL handles rather than whatever the console churn left behind.
+        let null_handle = HANDLE(std::ptr::null_mut());
+        let saved_in = GetStdHandle(STD_INPUT_HANDLE).unwrap_or(null_handle);
+        let saved_out = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or(null_handle);
+        let saved_err = GetStdHandle(STD_ERROR_HANDLE).unwrap_or(null_handle);
+        let restore = || {
+            // Reattach to our original (parent's) console first for dev/console
+            // builds; AttachConsole resets the standard handles, so the handle
+            // restore must come after it.
+            if had_console {
+                let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+            let _ = SetStdHandle(STD_INPUT_HANDLE, saved_in);
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, saved_out);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, saved_err);
+        };
+
+        // Detach from any console we currently hold; otherwise AttachConsole
+        // fails with ERROR_ACCESS_DENIED (a process can attach to at most one
+        // console). Harmless if we have none.
+        let _ = FreeConsole();
+        if AttachConsole(pid).is_err() {
+            // Child gone, or its console is not reachable.
+            restore();
+            return false;
+        }
+        // Make ourselves ignore the event we are about to broadcast so we
+        // don't terminate the desktop along with the child. AttachConsole
+        // resets the handler table, so this must come after it.
+        let _ = SetConsoleCtrlHandler(None, true);
+        let delivered = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid).is_ok();
+        let _ = SetConsoleCtrlHandler(None, false);
+        let _ = FreeConsole();
+        restore();
+        delivered
     }
 }
 
