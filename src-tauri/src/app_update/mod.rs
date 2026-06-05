@@ -168,10 +168,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                 // Throttle progress logs to once per second.
                 if last_logged.elapsed() >= Duration::from_secs(1) {
                     if let Some(total) = total {
-                        info!(
-                            "Downloading desktop update: {}/{} bytes",
-                            downloaded, total
-                        );
+                        info!("Downloading desktop update: {}/{} bytes", downloaded, total);
                     } else {
                         info!("Downloading desktop update: {} bytes", downloaded);
                     }

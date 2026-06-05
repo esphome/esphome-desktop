@@ -251,7 +251,10 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
 
             info!("User Python ready at {:?}", user_python);
         } else {
-            debug!("User Python already up-to-date (version {})", current_version);
+            debug!(
+                "User Python already up-to-date (version {})",
+                current_version
+            );
         }
 
         Ok(())
@@ -278,7 +281,10 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 
     for (package, saved) in [
         ("esphome", preserved.esphome.as_deref()),
-        ("esphome-device-builder", preserved.esphome_device_builder.as_deref()),
+        (
+            "esphome-device-builder",
+            preserved.esphome_device_builder.as_deref(),
+        ),
     ] {
         let Some(saved) = saved else { continue };
         let Some(bundled) = read_package_version(python_bin, package) else {
