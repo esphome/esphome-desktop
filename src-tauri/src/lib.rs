@@ -90,13 +90,13 @@ fn open_dashboard(port: u16) {
 /// Build the URL the startup readiness probe should poll.
 ///
 /// The daemon is spawned with `--host 127.0.0.1` / `--address 127.0.0.1`
-/// (see `daemon::start()`), so it only listens on the IPv4 loopback. We
-/// probe the literal `127.0.0.1` rather than the `localhost` hostname to
+/// (see `DaemonManager::start()`), so it only listens on the IPv4 loopback.
+/// We probe the literal `127.0.0.1` rather than the `localhost` hostname to
 /// avoid a resolver detour: on IPv6-first hosts `localhost` resolves to
 /// `::1` first, where nothing is listening, so each poll can stall on the
 /// `::1` connect attempt before falling back to IPv4 — delaying the
-/// browser-open on startup. This mirrors the periodic health check, which
-/// probes `127.0.0.1` for the same reason.
+/// browser-open on startup. The periodic health check should probe
+/// `127.0.0.1` for the same reason.
 fn dashboard_ready_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/", port)
 }
@@ -481,7 +481,8 @@ mod tests {
         // target the IPv4 literal rather than the `localhost` hostname —
         // otherwise IPv6-first hosts steer the connect to `::1`, where
         // nothing is listening, stalling each poll before the IPv4 fallback.
-        assert_eq!(dashboard_ready_url(6052), "http://127.0.0.1:6052/");
-        assert!(!dashboard_ready_url(6052).contains("localhost"));
+        let url = dashboard_ready_url(6052);
+        assert_eq!(url, "http://127.0.0.1:6052/");
+        assert!(!url.contains("localhost"));
     }
 }
