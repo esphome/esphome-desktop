@@ -103,39 +103,61 @@ sign_one() {
   codesign "${CODESIGN_FLAGS[@]}" "$1"
 }
 
+# Fan signing out across cores. The embedded Python bundle has hundreds of
+# Mach-O files, so signing them one process at a time is the slow part.
+JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
 # Inside-out signing: dylibs/.so first, then other Mach-O executables, then any
 # nested framework/app bundles, then the top-level .app last. Mirrors the order
 # in sign_python_bundle.sh so the embedded Python bundle validates.
 sign_app() {
   local app="$1"
-  echo "Signing app bundle: $app"
-  # Drop any quarantine flag so Gatekeeper won't block the freshly signed app.
-  # Stock macOS xattr has no recursive flag, so walk the tree ourselves.
-  while IFS= read -r -d '' p; do
-    xattr -d com.apple.quarantine "$p" 2>/dev/null || true
-  done < <(find "$app" -print0)
+  echo "Signing app bundle: $app  (up to $JOBS parallel workers)"
 
-  local count=0
+  # Clear extended attributes (including com.apple.quarantine) so Gatekeeper
+  # won't block the freshly signed app. xattr -c never errors on a file that has
+  # none, and the code signature lives in the binary / _CodeSignature, not in an
+  # xattr, so this is safe to do before signing.
+  find "$app" -print0 | xargs -0 -r -P "$JOBS" -n 200 xattr -c 2>/dev/null || true
+
+  # Loose Mach-O code (dylibs, .so, helper executables) is independent, so it can
+  # be signed in parallel and batched several files per codesign call. Only
+  # bundles need inside-out ordering, so they (and the .app root) come afterward.
   echo "  - shared libraries (.dylib/.so)"
-  while IFS= read -r -d '' f; do
-    sign_one "$f"; count=$((count + 1))
-  done < <(find -L "$app" \( -name '*.dylib' -o -name '*.so' \) -type f -print0)
+  local libs=()
+  while IFS= read -r -d '' f; do libs+=("$f"); done \
+    < <(find -L "$app" \( -name '*.dylib' -o -name '*.so' \) -type f -print0)
+  if [[ "${#libs[@]}" -gt 0 ]]; then
+    printf '%s\0' "${libs[@]}" | xargs -0 -r -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
+  fi
 
+  # Detect Mach-O among the remaining files in parallel (a `file` call per file
+  # was a big chunk of the old runtime), then sign the matches batched.
   echo "  - other Mach-O executables"
-  while IFS= read -r -d '' f; do
-    if file "$f" | grep -q "Mach-O"; then
-      sign_one "$f"; count=$((count + 1))
-    fi
-  done < <(find -L "$app" -type f ! -name '*.dylib' ! -name '*.so' -print0)
+  # The $f / $(file ...) below are written for the inner `sh -c`, not expanded
+  # by this shell, so the SC2016 single-quote warning is expected.
+  local machos=()
+  # shellcheck disable=SC2016
+  while IFS= read -r -d '' f; do machos+=("$f"); done < <(
+    find -L "$app" -type f ! -name '*.dylib' ! -name '*.so' -print0 \
+      | xargs -0 -r -P "$JOBS" -n 64 sh -c '
+          for f; do
+            case "$(file -b "$f")" in *Mach-O*) printf "%s\0" "$f" ;; esac
+          done' sh
+  )
+  if [[ "${#machos[@]}" -gt 0 ]]; then
+    printf '%s\0' "${machos[@]}" | xargs -0 -r -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
+  fi
 
+  # Nested bundles must be sealed after their contents, so sign them serially.
   echo "  - nested framework/app bundles"
   while IFS= read -r -d '' d; do
-    sign_one "$d"; count=$((count + 1))
+    sign_one "$d"
   done < <(find "$app" -mindepth 1 \( -name '*.framework' -o -name '*.app' \) -type d -print0)
 
   echo "  - bundle root"
-  sign_one "$app"; count=$((count + 1))
-  echo "  signed $count items; verifying..."
+  sign_one "$app"
+  echo "  signed ${#libs[@]} libraries + ${#machos[@]} executables; verifying..."
   codesign --verify --deep --strict "$app"
   echo "  OK"
 }
