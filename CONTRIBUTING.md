@@ -30,10 +30,11 @@ locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 
 The release tooling under `.github/scripts/` (notably the `latest.json`
 generator that drives in-app self-updates) is gated by the `Scripts Test`
-workflow. The tests are pure stdlib `unittest` — no dependencies:
+workflow. The tests use `pytest`:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m pip install pytest   # one-time
+python3 -m pytest tests/ -v
 ```
 
 ---

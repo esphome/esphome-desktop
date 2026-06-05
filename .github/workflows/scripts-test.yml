@@ -32,9 +32,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Pure stdlib unittest — no pip install, and ubuntu-22.04 already ships
+      # The suite is pytest (maintainer-requested test framework), so this
+      # job installs pytest — it is no longer pure stdlib. ubuntu-22.04 ships
       # python3 (same as the Build workflow, which invokes the generator with
-      # a bare `python3`). Targets 3.11+ syntax-wise; the runner's default is
-      # newer.
+      # a bare `python3`); the tests target 3.11+ syntax.
+      - name: Install pytest
+        run: python3 -m pip install --user pytest
+
       - name: Run script tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+        run: python3 -m pytest tests/ -v
