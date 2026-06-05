@@ -251,7 +251,10 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
 
             info!("User Python ready at {:?}", user_python);
         } else {
-            debug!("User Python already up-to-date (version {})", current_version);
+            debug!(
+                "User Python already up-to-date (version {})",
+                current_version
+            );
         }
 
         Ok(())
@@ -278,7 +281,10 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 
     for (package, saved) in [
         ("esphome", preserved.esphome.as_deref()),
-        ("esphome-device-builder", preserved.esphome_device_builder.as_deref()),
+        (
+            "esphome-device-builder",
+            preserved.esphome_device_builder.as_deref(),
+        ),
     ] {
         let Some(saved) = saved else { continue };
         let Some(bundled) = read_package_version(python_bin, package) else {
@@ -532,11 +538,19 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
 /// mutates whole-process console state, so it is serialized under a lock; it
 /// is also known to be finicky, hence the caller's `TerminateProcess`
 /// fallback.
+///
+/// A release build is a GUI (windows-subsystem) process and owns no console,
+/// so the detach is a no-op. A dev/console build run from a terminal (so the
+/// daemon's tracing is visible) does own one; detaching it would tear that
+/// terminal down, so we record it up front and reattach to it before
+/// returning on every exit path.
 #[cfg(target_os = "windows")]
 pub fn send_ctrl_break(pid: u32) -> bool {
+    use ::windows::Win32::Foundation::HANDLE;
     use ::windows::Win32::System::Console::{
-        AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetStdHandle, SetConsoleCtrlHandler,
-        SetStdHandle, CTRL_BREAK_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, GetConsoleWindow, GetStdHandle,
+        SetConsoleCtrlHandler, SetStdHandle, ATTACH_PARENT_PROCESS, CTRL_BREAK_EVENT,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
     // Serialize: AttachConsole/FreeConsole/SetConsoleCtrlHandler mutate
@@ -546,9 +560,16 @@ pub fn send_ctrl_break(pid: u32) -> bool {
     let _guard = CONSOLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // SAFETY: serialized Win32 console FFI. We restore the ctrl handler, the
-    // standard handles, and detach the console before returning regardless of
-    // outcome; no handle or console state escapes this function.
+    // standard handles, and our original console attachment before returning
+    // regardless of outcome; no handle or console state escapes this function.
     unsafe {
+        // Record whether we own a real console (one with a window) before we
+        // touch any console state. A GUI release build owns none, so this is
+        // false and the detach below is a no-op. A dev/console build run from
+        // a terminal owns one; we reattach to it on the way out so a shutdown
+        // attempt doesn't tear the terminal down.
+        let had_console = !GetConsoleWindow().0.is_null();
+
         // Save our standard handles up front and restore them on every exit
         // path. AttachConsole/FreeConsole mutate whole-process console state
         // and leave this (GUI, console-less) process's STD_INPUT_HANDLE
@@ -562,19 +583,26 @@ pub fn send_ctrl_break(pid: u32) -> bool {
         // state exactly as it was before the call. (The daemon command also
         // pins stdin to NUL as a belt-and-suspenders measure; this restore
         // protects any other post-shutdown spawn too.)
-        let saved_in = GetStdHandle(STD_INPUT_HANDLE);
-        let saved_out = GetStdHandle(STD_OUTPUT_HANDLE);
-        let saved_err = GetStdHandle(STD_ERROR_HANDLE);
-        let restore_std_handles = || {
-            if let Ok(h) = saved_in {
-                let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+        //
+        // GetStdHandle returns Err only for INVALID_HANDLE_VALUE; a console-
+        // less process legitimately has NULL standard handles, which come back
+        // as Ok(NULL). We coerce either case to a concrete HANDLE and restore
+        // it unconditionally, so a process that started with NULL handles ends
+        // with NULL handles rather than whatever the console churn left behind.
+        let null_handle = HANDLE(std::ptr::null_mut());
+        let saved_in = GetStdHandle(STD_INPUT_HANDLE).unwrap_or(null_handle);
+        let saved_out = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or(null_handle);
+        let saved_err = GetStdHandle(STD_ERROR_HANDLE).unwrap_or(null_handle);
+        let restore = || {
+            // Reattach to our original (parent's) console first for dev/console
+            // builds; AttachConsole resets the standard handles, so the handle
+            // restore must come after it.
+            if had_console {
+                let _ = AttachConsole(ATTACH_PARENT_PROCESS);
             }
-            if let Ok(h) = saved_out {
-                let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
-            }
-            if let Ok(h) = saved_err {
-                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
-            }
+            let _ = SetStdHandle(STD_INPUT_HANDLE, saved_in);
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, saved_out);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, saved_err);
         };
 
         // Detach from any console we currently hold; otherwise AttachConsole
@@ -583,7 +611,7 @@ pub fn send_ctrl_break(pid: u32) -> bool {
         let _ = FreeConsole();
         if AttachConsole(pid).is_err() {
             // Child gone, or its console is not reachable.
-            restore_std_handles();
+            restore();
             return false;
         }
         // Make ourselves ignore the event we are about to broadcast so we
@@ -593,7 +621,7 @@ pub fn send_ctrl_break(pid: u32) -> bool {
         let delivered = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid).is_ok();
         let _ = SetConsoleCtrlHandler(None, false);
         let _ = FreeConsole();
-        restore_std_handles();
+        restore();
         delivered
     }
 }

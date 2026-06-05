@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
@@ -16,6 +16,21 @@ use tracing::{debug, error, info, warn};
 
 use crate::platform;
 use crate::settings::Settings;
+
+/// Width-correct atomic and integer types for the dashboard child PID.
+/// Windows PIDs are a `DWORD` (`u32`); Unix PIDs are a `pid_t` (`i32`).
+/// Matching the native width lets `child.id()` round-trip losslessly on both:
+/// a Windows `u32` PID above `i32::MAX` would otherwise wrap negative when
+/// forced through an `i32` and the shutdown path would target the wrong
+/// process.
+#[cfg(windows)]
+type AtomicPid = std::sync::atomic::AtomicU32;
+#[cfg(unix)]
+type AtomicPid = std::sync::atomic::AtomicI32;
+#[cfg(windows)]
+type PidInt = u32;
+#[cfg(unix)]
+type PidInt = i32;
 
 /// Manages the ESPHome dashboard process
 pub struct DaemonManager {
@@ -38,7 +53,7 @@ pub struct DaemonManager {
     /// without going through `ExitRequested`) can SIGTERM the process
     /// group without locking the tokio mutex. Zero when no child is
     /// running.
-    dashboard_pid: Arc<AtomicI32>,
+    dashboard_pid: Arc<AtomicPid>,
     /// Use `esphome-device-builder` instead of `esphome dashboard`
     use_device_builder: Arc<AtomicBool>,
     /// AppHandle for emitting notifications / updating the tray when the
@@ -75,7 +90,7 @@ impl DaemonManager {
             logs_dir,
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
-            dashboard_pid: Arc::new(AtomicI32::new(0)),
+            dashboard_pid: Arc::new(AtomicPid::new(0)),
             use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
             app_handle: app_handle.clone(),
         })
@@ -118,7 +133,9 @@ impl DaemonManager {
         // Open log file for stdout and stderr combined
         let log_path = self.logs_dir.join("dashboard.log");
         let log_file = File::create(&log_path).context("Failed to create log file")?;
-        let log_file_clone = log_file.try_clone().context("Failed to clone log file handle")?;
+        let log_file_clone = log_file
+            .try_clone()
+            .context("Failed to clone log file handle")?;
 
         info!("{} logs: {:?}", backend_name, log_path);
 
@@ -219,7 +236,7 @@ impl DaemonManager {
 
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
         if let Some(pid) = child.id() {
-            self.dashboard_pid.store(pid as i32, Ordering::SeqCst);
+            self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
         }
 
         let mut process = self.process.lock().await;
@@ -479,10 +496,9 @@ impl DaemonManager {
         #[cfg(windows)]
         {
             // Graceful first: deliver CTRL_BREAK to the child's process
-            // group. PID is stored as i32 to share the atomic with the Unix
-            // path; the process-group id equals the child PID because we
+            // group. The process-group id equals the child PID because we
             // spawned it with CREATE_NEW_PROCESS_GROUP.
-            if !crate::platform::send_ctrl_break(pid as u32) {
+            if !crate::platform::send_ctrl_break(pid) {
                 // The break could not be delivered (child gone, or no
                 // reachable console). Fall back to TerminateProcess so the
                 // child can never orphan.
@@ -494,7 +510,7 @@ impl DaemonManager {
                 // close any handle we open; the handle never escapes this
                 // block.
                 unsafe {
-                    match OpenProcess(PROCESS_TERMINATE, false, pid as u32) {
+                    match OpenProcess(PROCESS_TERMINATE, false, pid) {
                         Ok(handle) => {
                             if let Err(e) = TerminateProcess(handle, 1) {
                                 warn!("TerminateProcess on dashboard pid {} failed: {}", pid, e);
