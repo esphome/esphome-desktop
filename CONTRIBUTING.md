@@ -9,6 +9,21 @@ project and be sure to join us on [Discord](https://discord.gg/KhAMKrd).
 
 [Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome-desktop/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
 
+## Running the Rust checks locally
+
+The `src-tauri` crate is gated in CI by a `Lint & Test` workflow. Run the same
+checks before opening a PR:
+
+```bash
+cd src-tauri
+cargo fmt --all --check          # formatting
+cargo clippy --all-targets --all-features -- -D warnings   # lints
+cargo test --all-features        # unit tests
+```
+
+`cargo test` is the required gate; `fmt` and `clippy` are advisory until the
+tree has a confirmed-clean baseline.
+
 ---
 
 [![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)

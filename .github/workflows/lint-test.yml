@@ -1,0 +1,80 @@
+name: Lint & Test
+
+# Fast Rust checks for the src-tauri crate. The main `Build` workflow only runs
+# `cargo tauri build`, which compiles the crate but never executes the unit
+# tests, clippy, or rustfmt. This job closes that gap so `#[test]` modules
+# actually gate merges instead of silently rotting.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Per-branch concurrency: a new push cancels an in-flight run for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: Rust lint & test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Tauri links against the system webkit/appindicator stack on Linux, so
+      # even a plain `cargo test` needs these to compile. Mirror the dependency
+      # set used by the Build workflow's Linux jobs.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri
+          key: lint-test
+
+      # `tauri.conf.json` lists `python` as a bundle resource. That directory is
+      # gitignored and absent on a fresh checkout (it's populated by
+      # prepare_bundle.sh only for real bundling). A plain `cargo test`/`clippy`
+      # never bundles, but create an empty stub so config parsing can't trip on
+      # the missing path.
+      - name: Stub bundle resource dir
+        run: mkdir -p src-tauri/python
+
+      # Advisory for now: clippy and rustfmt have never run in CI, so the tree
+      # has no enforced-clean baseline. These steps surface violations without
+      # blocking merges. Once a green baseline is confirmed, drop the
+      # `continue-on-error` lines to make them required.
+      - name: Formatting (advisory)
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: Clippy (advisory)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        continue-on-error: true
+
+      # The real gate: run the unit tests. Failures block the merge.
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --all-features --verbose
