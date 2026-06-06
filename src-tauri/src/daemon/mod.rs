@@ -586,15 +586,41 @@ impl DaemonManager {
     }
 }
 
+/// Build the health-check URL for the dashboard.
+///
+/// The backend is spawned with `--address 127.0.0.1` / `--host 127.0.0.1`
+/// (see `start()`), so it only listens on the IPv4 loopback. Probing the
+/// literal `127.0.0.1` rather than the `localhost` hostname avoids a
+/// resolver detour: on IPv6-first hosts `localhost` resolves to `::1`
+/// first, where nothing is listening, producing spurious health-check
+/// failures (and a 5s connect stall per cycle before the IPv4 fallback).
+fn health_check_url(port: u16) -> String {
+    format!("http://127.0.0.1:{}/", port)
+}
+
 /// Perform a health check on the dashboard
 async fn health_check(port: u16) -> Result<bool> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
 
-    let url = format!("http://localhost:{}/", port);
+    let url = health_check_url(port);
     match client.get(&url).send().await {
         Ok(response) => Ok(response.status().is_success()),
         Err(_) => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::health_check_url;
+
+    #[test]
+    fn health_check_url_targets_ipv4_loopback() {
+        // Must match the address the backend binds (`127.0.0.1`), not the
+        // `localhost` hostname, so the probe doesn't get steered to `::1`
+        // on IPv6-first hosts where the daemon isn't listening.
+        assert_eq!(health_check_url(6052), "http://127.0.0.1:6052/");
+        assert!(!health_check_url(6052).contains("localhost"));
     }
 }
