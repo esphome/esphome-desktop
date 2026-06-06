@@ -811,28 +811,171 @@ mod windows {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::path::{Path, PathBuf};
+    use tracing::{debug, info, warn};
+
     pub fn init() {
         // Linux-specific initialization
     }
 
+    /// Shared-library sonames that provide a usable appindicator backend,
+    /// most-preferred first. ayatana is the maintained fork; the legacy
+    /// `libappindicator3` names are kept for older distributions.
+    const APPINDICATOR_SONAMES: &[&str] = &[
+        "libayatana-appindicator3.so.1",
+        "libappindicator3.so.1",
+        "libayatana-appindicator3.so",
+        "libappindicator3.so",
+    ];
+
+    /// Directories, relative to `APPDIR`, where a sharun-based AppImage may
+    /// place bundled shared libraries. `shared/lib` is sharun's default; the
+    /// rest cover multiarch / `usr`-prefixed layouts seen in the wild.
+    const APPDIR_LIB_DIRS: &[&str] = &[
+        "shared/lib",
+        "shared/lib/x86_64-linux-gnu",
+        "shared/lib/aarch64-linux-gnu",
+        "usr/lib",
+        "usr/lib/x86_64-linux-gnu",
+        "usr/lib/aarch64-linux-gnu",
+        "usr/lib64",
+        "lib",
+    ];
+
+    /// Build the list of absolute paths where a bundled appindicator library
+    /// might live inside an AppImage rooted at `appdir`.
+    fn appindicator_candidate_paths(appdir: &Path) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(APPDIR_LIB_DIRS.len() * APPINDICATOR_SONAMES.len());
+        for dir in APPDIR_LIB_DIRS {
+            for name in APPINDICATOR_SONAMES {
+                paths.push(appdir.join(dir).join(name));
+            }
+        }
+        paths
+    }
+
+    /// Locate a bundled appindicator library inside an AppImage's `APPDIR`,
+    /// returning the first existing candidate path.
+    fn find_bundled_appindicator(appdir: &Path) -> Option<PathBuf> {
+        appindicator_candidate_paths(appdir)
+            .into_iter()
+            .find(|p| p.exists())
+    }
+
     /// Check if a usable appindicator library is available on this system.
     ///
-    /// The `tray-icon` crate (via `libappindicator-sys`) will `panic!()` if none of
-    /// these shared libraries can be loaded.  We probe for them first so we can
-    /// degrade gracefully instead of crashing.
+    /// The `tray-icon` crate (via `libappindicator-sys`) lazily `dlopen`s the
+    /// library by bare soname and will `panic!()` if it cannot be loaded. We
+    /// probe for it first so we can degrade gracefully instead of crashing.
+    ///
+    /// On a sharun-based AppImage the bundled library is not on the loader's
+    /// default search path, and sharun sets `DT_RUNPATH` (which `dlopen`
+    /// ignores when resolving a bare soname), so the plain soname probe gets a
+    /// false negative — suppressing the tray even on desktops that fully
+    /// support it (e.g. KDE Plasma, issue #87). To handle that we locate the
+    /// bundled copy by absolute path and load it, leaving it resident so the
+    /// crate's later bare-soname `dlopen` resolves to the already-loaded object.
     pub fn is_appindicator_available() -> bool {
         use std::ffi::OsStr;
-        for name in &[
-            "libayatana-appindicator3.so.1",
-            "libappindicator3.so.1",
-            "libayatana-appindicator3.so",
-            "libappindicator3.so",
-        ] {
+
+        // 1. Standard probe: resolve by bare soname through the loader's
+        //    default search path. Succeeds on deb/rpm/AUR installs (and any
+        //    system with the library installed normally).
+        for name in APPINDICATOR_SONAMES {
             if unsafe { libloading::Library::new(OsStr::new(name)) }.is_ok() {
                 return true;
             }
         }
+
+        // 2. AppImage fallback: find the bundled library by absolute path and
+        //    load it. The dynamic linker matches an already-loaded object by
+        //    its `DT_SONAME`, so priming it here makes `libappindicator-sys`'s
+        //    later bare-soname `dlopen` succeed instead of panicking. We
+        //    deliberately leak the handle (`mem::forget`) so the library stays
+        //    resident for the lifetime of the process.
+        if let Ok(appdir) = std::env::var("APPDIR") {
+            match find_bundled_appindicator(Path::new(&appdir)) {
+                Some(lib_path) => match unsafe { libloading::Library::new(&lib_path) } {
+                    Ok(lib) => {
+                        info!("Loaded bundled appindicator from {:?}", lib_path);
+                        std::mem::forget(lib);
+                        return true;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Found bundled appindicator at {:?} but it failed to load: {}",
+                            lib_path, e
+                        );
+                    }
+                },
+                None => debug!("APPDIR set but no bundled appindicator library found"),
+            }
+        }
+
         false
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        /// Unique temp dir per call so parallel tests never collide.
+        fn unique_temp_dir(tag: &str) -> PathBuf {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            std::env::temp_dir().join(format!(
+                "koan-appindicator-{}-{}-{}",
+                tag,
+                std::process::id(),
+                n
+            ))
+        }
+
+        #[test]
+        fn candidate_paths_are_all_rooted_in_appdir() {
+            let appdir = Path::new("/tmp/.mount_abc");
+            let paths = appindicator_candidate_paths(appdir);
+            assert!(!paths.is_empty());
+            assert!(paths.iter().all(|p| p.starts_with(appdir)));
+            // Every candidate must end with one of the known sonames.
+            assert!(paths.iter().all(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                APPINDICATOR_SONAMES.contains(&name)
+            }));
+        }
+
+        #[test]
+        fn candidate_paths_include_sharun_default_layout() {
+            let appdir = Path::new("/opt/app");
+            let paths = appindicator_candidate_paths(appdir);
+            // sharun's default `shared/lib` plus the preferred ayatana soname.
+            assert!(paths.contains(&appdir.join("shared/lib/libayatana-appindicator3.so.1")));
+        }
+
+        #[test]
+        fn find_bundled_appindicator_locates_existing_library() {
+            let appdir = unique_temp_dir("found");
+            let lib_dir = appdir.join("shared/lib");
+            fs::create_dir_all(&lib_dir).unwrap();
+            let lib = lib_dir.join("libayatana-appindicator3.so.1");
+            fs::write(&lib, b"\x7fELF").unwrap();
+
+            assert_eq!(find_bundled_appindicator(&appdir), Some(lib));
+
+            let _ = fs::remove_dir_all(&appdir);
+        }
+
+        #[test]
+        fn find_bundled_appindicator_returns_none_when_absent() {
+            let appdir = unique_temp_dir("absent");
+            fs::create_dir_all(&appdir).unwrap();
+
+            assert_eq!(find_bundled_appindicator(&appdir), None);
+
+            let _ = fs::remove_dir_all(&appdir);
+        }
     }
 }
 
