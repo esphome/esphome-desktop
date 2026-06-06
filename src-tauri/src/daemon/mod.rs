@@ -373,9 +373,15 @@ impl DaemonManager {
 
         let backend_name = self.backend_name();
         info!("Stopping {}", backend_name);
-        self.running.store(false, Ordering::SeqCst);
 
+        // Acquire the process lock *before* mutating `running` so the
+        // check-and-act is atomic against start(), which also reads `running`
+        // under this lock. Otherwise a stop->start overlap could let start()
+        // win the lock, see running=false, and `*process = Some(child)` drop
+        // the old Child without signaling it (no kill_on_drop on Unix),
+        // orphaning the old dashboard.
         let mut process = self.process.lock().await;
+        self.running.store(false, Ordering::SeqCst);
         if let Some(mut child) = process.take() {
             // Try graceful shutdown first - kill the process group on Unix
             #[cfg(unix)]
