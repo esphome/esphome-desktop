@@ -250,7 +250,12 @@ impl UpdateChecker {
 
     /// Check for updates and notify the user if one is available (background check).
     /// Does nothing for the dev channel.
-    pub async fn check_and_notify(&self, app_handle: &AppHandle, channel: ReleaseChannel) {
+    pub async fn check_and_notify(
+        &self,
+        app_handle: &AppHandle,
+        channel: ReleaseChannel,
+        tray_available: bool,
+    ) {
         if channel == ReleaseChannel::Dev {
             debug!("Dev channel: skipping background update check");
             return;
@@ -294,8 +299,11 @@ impl UpdateChecker {
                 .builder()
                 .title("ESPHome Update Available")
                 .body(format!(
-                    "ESPHome {} ({}) is available (you have {}). Click 'Check for Updates' in the menu to update.",
-                    latest, channel_label, installed
+                    "ESPHome {} ({}) is available (you have {}). {}",
+                    latest,
+                    channel_label,
+                    installed,
+                    crate::updates_menu_hint(tray_available)
                 ))
                 .show()
             {
@@ -427,7 +435,12 @@ impl UpdateChecker {
     /// Background check for esphome-device-builder updates. Emits a
     /// notification if a newer version is available. No-op for non-builder
     /// backends.
-    pub async fn check_and_notify_device_builder(&self, app_handle: &AppHandle, backend: Backend) {
+    pub async fn check_and_notify_device_builder(
+        &self,
+        app_handle: &AppHandle,
+        backend: Backend,
+        tray_available: bool,
+    ) {
         if !backend.is_builder() {
             return;
         }
@@ -464,9 +477,10 @@ impl UpdateChecker {
                 .builder()
                 .title("ESPHome Device Builder Update Available")
                 .body(format!(
-                    "ESPHome Device Builder {} is available (you have {}). \
-                     Click 'Check for Updates' in the menu to update.",
-                    latest, installed
+                    "ESPHome Device Builder {} is available (you have {}). {}",
+                    latest,
+                    installed,
+                    crate::updates_menu_hint(tray_available)
                 ))
                 .show()
             {

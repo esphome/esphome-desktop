@@ -115,7 +115,7 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
 /// available; stays silent for "no update" and for errors. Returns
 /// [`NextStep::Skip`] when an update is available so the background loop
 /// can skip the Python-package checks until the user installs.
-pub async fn check_and_notify(app_handle: &AppHandle) -> NextStep {
+pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> NextStep {
     let updater = match app_handle.updater() {
         Ok(u) => u,
         Err(e) => {
@@ -135,8 +135,10 @@ pub async fn check_and_notify(app_handle: &AppHandle) -> NextStep {
                 .builder()
                 .title("ESPHome Device Builder Update Available")
                 .body(format!(
-                    "Version {} is available (you have {}). Open the tray menu and choose \"Check for Updates...\" to install.",
-                    update.version, update.current_version
+                    "Version {} is available (you have {}). {}",
+                    update.version,
+                    update.current_version,
+                    crate::updates_menu_hint(tray_available)
                 ))
                 .show()
             {

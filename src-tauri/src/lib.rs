@@ -80,6 +80,34 @@ impl AppState {
     }
 }
 
+/// Build the "how to update" hint appended to background update notifications.
+///
+/// The in-app updater (for the desktop app, ESPHome, and the device builder)
+/// is only reachable through the system tray menu. On Linux AppImage builds
+/// running under desktops without a StatusNotifier host (e.g. some KDE Plasma
+/// and GNOME setups) the tray icon never appears, so telling the user to
+/// "open the tray menu" is misleading — there is no menu. In that case point
+/// them at a path that actually works. See GitHub issue #87.
+///
+/// Today the no-tray branch is only reachable on Linux AppImage builds without
+/// a StatusNotifier host, so the alternative wording is gated behind
+/// `target_os = "linux"`. If a future code path ever sets `tray_available =
+/// false` on macOS or Windows (e.g. a tray-init failure), those platforms get a
+/// generic "reinstall the latest release" message instead of misleading
+/// deb/rpm/AUR instructions.
+pub(crate) fn updates_menu_hint(tray_available: bool) -> &'static str {
+    if tray_available {
+        "Open the tray menu and choose \"Check for Updates...\" to update."
+    } else if cfg!(target_os = "linux") {
+        "No system tray was detected, so the in-app updater is unavailable. \
+         Install the deb/rpm/AUR package (which has a working tray) or reinstall \
+         the latest release to update."
+    } else {
+        "No system tray was detected, so the in-app updater is unavailable. \
+         Reinstall the latest release to update."
+    }
+}
+
 /// Open the ESPHome dashboard in the default browser
 fn open_dashboard(port: u16) {
     let url = format!("http://localhost:{}", port);
@@ -341,12 +369,17 @@ pub fn run(cli: Cli) {
             // `esphome-device-builder` package is checked on the same schedule.
             let update_state = state.clone();
             let update_app = app.handle().clone();
+            // Captured so background update notifications can adapt their
+            // "how to update" hint when there is no tray menu to point at
+            // (issue #87).
+            let update_tray_available = tray_available;
             async_runtime::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
                 loop {
                     interval.tick().await;
-                    if app_update::check_and_notify(&update_app).await == app_update::NextStep::Skip
+                    if app_update::check_and_notify(&update_app, update_tray_available).await
+                        == app_update::NextStep::Skip
                     {
                         // App update pending — leave the Python packages alone.
                         continue;
@@ -357,12 +390,16 @@ pub fn run(cli: Cli) {
                     };
                     update_state
                         .update_checker
-                        .check_and_notify(&update_app, channel)
+                        .check_and_notify(&update_app, channel, update_tray_available)
                         .await;
                     if backend.is_builder() {
                         update_state
                             .update_checker
-                            .check_and_notify_device_builder(&update_app, backend)
+                            .check_and_notify_device_builder(
+                                &update_app,
+                                backend,
+                                update_tray_available,
+                            )
                             .await;
                     }
                 }
@@ -475,6 +512,7 @@ pub fn run(cli: Cli) {
 #[cfg(test)]
 mod tests {
     use super::dashboard_ready_url;
+    use super::updates_menu_hint;
 
     #[test]
     fn dashboard_ready_url_targets_ipv4_loopback() {
@@ -485,5 +523,21 @@ mod tests {
         let url = dashboard_ready_url(6052);
         assert_eq!(url, "http://127.0.0.1:6052/");
         assert!(!url.contains("localhost"));
+    }
+
+    #[test]
+    fn hint_points_to_tray_when_available() {
+        let hint = updates_menu_hint(true);
+        assert!(hint.contains("tray menu"));
+        assert!(hint.contains("Check for Updates"));
+    }
+
+    #[test]
+    fn hint_avoids_tray_instructions_when_unavailable() {
+        let hint = updates_menu_hint(false);
+        // Must not tell the user to use a tray menu that isn't there (issue #87).
+        assert!(!hint.contains("tray menu"));
+        // Must offer a concrete alternative.
+        assert!(hint.contains("deb/rpm/AUR") || hint.contains("reinstall"));
     }
 }
