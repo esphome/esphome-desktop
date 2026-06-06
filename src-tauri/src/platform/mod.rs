@@ -480,8 +480,15 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     let target = std::fs::read_link(src).context("Failed to read symlink target")?;
 
     // Make re-copies idempotent: drop any pre-existing entry at the destination.
-    if dst.symlink_metadata().is_ok() {
-        let _ = std::fs::remove_file(dst);
+    // A real directory needs `remove_dir_all`; `remove_file` cannot delete it
+    // and would leave it in place, causing the later symlink call to fail with
+    // `AlreadyExists`.
+    if let Ok(meta) = dst.symlink_metadata() {
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            let _ = std::fs::remove_dir_all(dst);
+        } else {
+            let _ = std::fs::remove_file(dst);
+        }
     }
 
     #[cfg(unix)]
@@ -491,12 +498,14 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        // Windows requires the link type to match the target. Resolve a relative
-        // target against the destination's parent to decide dir vs file.
+        // Windows requires the link type to match the target. Probe the *source*
+        // side, where the full tree exists and the target is guaranteed
+        // resolvable — probing the partially-populated destination could pick the
+        // wrong link type if the target dir hasn't been copied yet.
         let probe = if target.is_absolute() {
             target.clone()
         } else {
-            dst.parent()
+            src.parent()
                 .map(|p| p.join(&target))
                 .unwrap_or_else(|| target.clone())
         };
