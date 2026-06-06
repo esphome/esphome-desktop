@@ -5,6 +5,7 @@
 
 mod app_update;
 mod daemon;
+mod git_check;
 mod platform;
 mod settings;
 mod tray;
@@ -297,6 +298,15 @@ pub fn run(cli: Cli) {
                     Ok(()) => {
                         // Update tray status to show running
                         tray::update_status(&daemon_app, true);
+
+                        // Warn (non-blocking) if git is missing. ESPHome needs
+                        // it for external components, remote packages, and other
+                        // deps, so many configs won't compile without it; absent
+                        // git they fail with a cryptic Python traceback instead
+                        // of a clear message. Only after a successful start, so
+                        // we don't stack a git warning onto an unrelated startup
+                        // failure.
+                        git_check::notify_if_git_missing(&daemon_app);
                     }
                     Err(e) => {
                         error!("Failed to start ESPHome daemon: {}", e);
