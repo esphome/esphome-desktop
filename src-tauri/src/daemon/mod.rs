@@ -112,6 +112,22 @@ impl DaemonManager {
 
     /// Start the ESPHome dashboard
     pub async fn start(&self) -> Result<()> {
+        // Hold the process lock for the entire start sequence (check ->
+        // spawn -> store) so two concurrent start() calls can't both pass
+        // the running check and each spawn a child. Without this, the
+        // second `*process = Some(child)` would drop the first Child; on
+        // Unix we deliberately don't set `kill_on_drop`, so that dropped
+        // child is never signaled and orphans a stray dashboard process.
+        // stop() also takes this lock, so start()/stop() are serialized too.
+        //
+        // Consequence: stop() holds this lock across its up-to-30s child drain,
+        // so a stop-then-start sequence (Restart, or rapid Stop->Start) makes
+        // start() await the lock until stop() finishes — up to 30s. This is the
+        // intended serialization (prevents the new dashboard racing the old one
+        // for the port). start() is async, so it yields rather than blocking a
+        // thread, keeping the tray/UI responsive.
+        let mut process = self.process.lock().await;
+
         if self.running.load(Ordering::SeqCst) {
             info!("Daemon already running");
             return Ok(());
@@ -240,9 +256,11 @@ impl DaemonManager {
             self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
         }
 
-        let mut process = self.process.lock().await;
         *process = Some(child);
         self.running.store(true, Ordering::SeqCst);
+        // Release the lock before spawning the watcher tasks below; they
+        // re-acquire it on their own polling cadence.
+        drop(process);
 
         // Start health check task
         let running = self.running.clone();
@@ -348,6 +366,17 @@ impl DaemonManager {
 
     /// Stop the ESPHome dashboard
     pub async fn stop(&self) -> Result<()> {
+        // Acquire the process lock *before* reading/mutating `running` so the
+        // check-and-act is fully atomic against start(), which also reads
+        // `running` under this lock. The check is done post-lock (no lockless
+        // fast-path) so a Stop click in the narrow window where start() holds
+        // the lock but hasn't yet stored running=true can't no-op and leave
+        // the just-started dashboard running. Without holding the lock across
+        // the running check, a stop->start overlap could also let start() win
+        // the lock, see running=false, and `*process = Some(child)` drop the
+        // old Child without signaling it (no kill_on_drop on Unix), orphaning
+        // the old dashboard.
+        let mut process = self.process.lock().await;
         if !self.running.load(Ordering::SeqCst) {
             info!("Daemon not running");
             return Ok(());
@@ -355,9 +384,8 @@ impl DaemonManager {
 
         let backend_name = self.backend_name();
         info!("Stopping {}", backend_name);
-        self.running.store(false, Ordering::SeqCst);
 
-        let mut process = self.process.lock().await;
+        self.running.store(false, Ordering::SeqCst);
         if let Some(mut child) = process.take() {
             // Try graceful shutdown first - kill the process group on Unix
             #[cfg(unix)]
