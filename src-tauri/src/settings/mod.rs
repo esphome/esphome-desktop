@@ -156,7 +156,10 @@ impl Settings {
         }
 
         let content = serde_json::to_string_pretty(self).context("Failed to serialize settings")?;
-        std::fs::write(&settings_path, content).context("Failed to write settings file")?;
+        // Atomic write: a torn `fs::write` would leave settings.json truncated,
+        // failing the next parse and silently resetting every user preference.
+        crate::util::atomic_write(&settings_path, content)
+            .context("Failed to write settings file")?;
 
         info!("Settings saved to {:?}", settings_path);
         Ok(())

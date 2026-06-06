@@ -244,7 +244,9 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             // Copy the bundled Python to user data
             copy_dir_recursive(&bundled_python, &user_python)?;
 
-            std::fs::write(&marker_path, current_version)
+            // Atomic write: a torn marker could read back as a partial version
+            // string, mismatching on next launch and re-copying the whole tree.
+            crate::util::atomic_write(&marker_path, current_version)
                 .context("Failed to write Python version marker")?;
 
             restore_preserved_versions(&python_check, &preserved);

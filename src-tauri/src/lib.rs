@@ -10,6 +10,7 @@ mod platform;
 mod settings;
 mod tray;
 mod update;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;
