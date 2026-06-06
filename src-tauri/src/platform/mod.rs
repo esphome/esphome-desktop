@@ -474,17 +474,28 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Recreate the symlink at `src` under `dst`, pointing at the same (possibly
-/// relative, possibly dangling) target. The target is copied verbatim — it is
-/// never resolved or followed — so link semantics survive the copy.
+/// relative, possibly dangling) target. The stored target string is copied
+/// verbatim — never resolved or followed — so link semantics survive the copy.
+/// On Windows the source-side target is inspected only to pick the link *type*
+/// (`symlink_dir` vs `symlink_file`); the stored target itself is left unchanged.
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     let target = std::fs::read_link(src).context("Failed to read symlink target")?;
 
     // Make re-copies idempotent: drop any pre-existing entry at the destination.
-    // A real directory needs `remove_dir_all`; `remove_file` cannot delete it
-    // and would leave it in place, causing the later symlink call to fail with
-    // `AlreadyExists`.
+    // A real directory needs `remove_dir_all`; a *directory symlink* needs
+    // `remove_dir` (on Windows `remove_file` cannot delete it); everything else
+    // (file, file symlink) uses `remove_file`. Leaving a stale entry in place
+    // would make the later symlink call fail with `AlreadyExists`.
     if let Ok(meta) = dst.symlink_metadata() {
-        if meta.is_dir() && !meta.file_type().is_symlink() {
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            // A directory symlink must be removed with `remove_dir` on Windows;
+            // `remove_file` works for file symlinks on all platforms. Try
+            // `remove_file` first, then fall back to `remove_dir`.
+            if std::fs::remove_file(dst).is_err() {
+                let _ = std::fs::remove_dir(dst);
+            }
+        } else if file_type.is_dir() {
             let _ = std::fs::remove_dir_all(dst);
         } else {
             let _ = std::fs::remove_file(dst);
