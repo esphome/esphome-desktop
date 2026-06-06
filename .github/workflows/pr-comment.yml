@@ -93,6 +93,18 @@ jobs:
 
           write_links "dmg"
 
+          cat >> comment.md <<'EOF'
+
+          > [!NOTE]
+          > These macOS builds are not signed or notarized, so Gatekeeper will refuse to open them. To run one, download the dmg, then re-sign it locally with the helper in this repo. It needs no Apple certificate; by default it applies an ad-hoc signature that lets the app open on your own machine.
+          >
+          > ```bash
+          > ./build-scripts/sign_macos_local.sh ~/Downloads/the-downloaded.dmg
+          > ```
+          >
+          > Mount the resulting `*-signed.dmg`, drag the app to Applications, and it will open. Pass `--help` for Developer ID signing and other options.
+          EOF
+
           cat >> comment.md <<EOF
 
           ---

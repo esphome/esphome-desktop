@@ -121,10 +121,7 @@ impl UpdateChecker {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
             let installed = get_installed_version(app_handle).ok();
-            let installed_str = installed
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string();
+            let installed_str = installed.as_deref().unwrap_or("unknown").to_string();
 
             let dialog_app = app_handle.clone();
             let should_update = tokio::task::spawn_blocking(move || {
@@ -441,11 +438,7 @@ impl UpdateChecker {
     /// Background check for esphome-device-builder updates. Emits a
     /// notification if a newer version is available. No-op for non-builder
     /// backends.
-    pub async fn check_and_notify_device_builder(
-        &self,
-        app_handle: &AppHandle,
-        backend: Backend,
-    ) {
+    pub async fn check_and_notify_device_builder(&self, app_handle: &AppHandle, backend: Backend) {
         if !backend.is_builder() {
             return;
         }
@@ -620,7 +613,7 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
         if !version_str
             .chars()
             .next()
-            .map_or(false, |c| c.is_ascii_digit())
+            .is_some_and(|c| c.is_ascii_digit())
         {
             continue;
         }
@@ -645,10 +638,7 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
 fn has_beta_suffix(version: &str) -> bool {
     let bytes = version.as_bytes();
     for i in 1..bytes.len().saturating_sub(1) {
-        if bytes[i] == b'b'
-            && bytes[i - 1].is_ascii_digit()
-            && bytes[i + 1].is_ascii_digit()
-        {
+        if bytes[i] == b'b' && bytes[i - 1].is_ascii_digit() && bytes[i + 1].is_ascii_digit() {
             return true;
         }
     }
@@ -661,7 +651,7 @@ fn has_beta_suffix(version: &str) -> bool {
 fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
     let mut best: Option<String> = None;
     for v in releases.keys() {
-        if !v.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             continue;
         }
         match &best {

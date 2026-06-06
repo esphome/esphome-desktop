@@ -50,8 +50,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Open Dashboard** - Open the dashboard in your browser
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
-- **Check for Updates** - Check for new ESPHome (Python) versions
-- **Check for App Updates** - Check for a new ESPHome Device Builder desktop release and install it in-place
+- **Check for Updates** - Check for a new ESPHome Device Builder desktop release, then new ESPHome (Python) and device-builder versions
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
@@ -75,6 +74,8 @@ This directory contains:
 Your ESPHome configuration files are stored at `~/esphome/` on all platforms by default (configurable via `config_dir` in `settings.json`).
 
 On Windows, the application itself is installed to `%LOCALAPPDATA%\ESPHome Device Builder\`.
+
+**Windows build data (`C:\esphb\<id>\`).** On Windows the ESPHome Device Builder backend puts its build tree and PlatformIO toolchain under a short folder nested in one `C:\esphb` parent, `C:\esphb\<id>\` (one per config dir), instead of under your profile or config dir. This keeps deep ESP-IDF build paths under Windows' 260-character path limit and clear of spaces in your profile name (e.g. `C:\Users\First Last\…`), both of which otherwise break the build. This folder is **not** removed when you uninstall ESPHome Device Builder, so a reinstall keeps the (multi-GB) toolchain warm and avoids a long re-download. If you want to reclaim the disk space, delete the `C:\esphb` folder by hand after uninstalling. (Only native Windows is affected; running the backend in a Linux container uses the normal data dir.)
 
 ## Building from Source
 
@@ -175,6 +176,16 @@ Then try opening the app again.
   sudo usermod -a -G dialout $USER
   ```
   Then log out and back in.
+
+### External components, packages, or builds fail
+
+ESPHome uses **Git** to download external components, remote (`github://`)
+packages, dashboard imports, voice models, and other dependencies, so many
+configurations won't compile without it. The app bundles Python but not Git,
+so these builds fail on machines without Git installed. Install
+[Git](https://git-scm.com/downloads), then restart the app so it can detect it
+(Git is only checked at startup). The app shows a notification at startup when
+Git can't be found on your `PATH`.
 
 ### Updates not working
 

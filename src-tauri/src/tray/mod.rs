@@ -25,7 +25,6 @@ mod ids {
     pub const BUILDER_VERSION: &str = "builder_version";
     pub const PORT: &str = "port";
     pub const CHECK_UPDATES: &str = "check_updates";
-    pub const CHECK_APP_UPDATES: &str = "check_app_updates";
     pub const VIEW_LOGS: &str = "view_logs";
     pub const OPEN_CONFIG: &str = "open_config";
     pub const RESTART: &str = "restart";
@@ -97,12 +96,21 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Create release channel items
     let current_channel = settings.release_channel;
-    let channel_stable = MenuItemBuilder::with_id(ids::CHANNEL_STABLE, radio_label("Stable", current_channel == ReleaseChannel::Stable))
-        .build(app_handle)?;
-    let channel_beta = MenuItemBuilder::with_id(ids::CHANNEL_BETA, radio_label("Beta", current_channel == ReleaseChannel::Beta))
-        .build(app_handle)?;
-    let channel_dev = MenuItemBuilder::with_id(ids::CHANNEL_DEV, radio_label("Dev", current_channel == ReleaseChannel::Dev))
-        .build(app_handle)?;
+    let channel_stable = MenuItemBuilder::with_id(
+        ids::CHANNEL_STABLE,
+        radio_label("Stable", current_channel == ReleaseChannel::Stable),
+    )
+    .build(app_handle)?;
+    let channel_beta = MenuItemBuilder::with_id(
+        ids::CHANNEL_BETA,
+        radio_label("Beta", current_channel == ReleaseChannel::Beta),
+    )
+    .build(app_handle)?;
+    let channel_dev = MenuItemBuilder::with_id(
+        ids::CHANNEL_DEV,
+        radio_label("Dev", current_channel == ReleaseChannel::Dev),
+    )
+    .build(app_handle)?;
 
     // Store channel items for later updates
     let _ = CHANNEL_STABLE_ITEM.set(channel_stable.clone());
@@ -119,7 +127,10 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let current_backend = settings.backend;
     let backend_classic = MenuItemBuilder::with_id(
         ids::BACKEND_CLASSIC,
-        radio_label("Classic ESPHome Dashboard", current_backend == Backend::Classic),
+        radio_label(
+            "Classic ESPHome Dashboard",
+            current_backend == Backend::Classic,
+        ),
     )
     .build(app_handle)?;
     let backend_builder_stable = MenuItemBuilder::with_id(
@@ -173,18 +184,13 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
             &MenuItemBuilder::with_id(ids::CHECK_UPDATES, "Check for Updates...")
                 .build(app_handle)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::CHECK_APP_UPDATES, "Check for App Updates...")
-                .build(app_handle)?,
-        )
         .separator()
         .item(&MenuItemBuilder::with_id(ids::VIEW_LOGS, "View Logs...").build(app_handle)?)
         .item(
-            &MenuItemBuilder::with_id(ids::OPEN_CONFIG, "Open Config Folder...").build(app_handle)?,
+            &MenuItemBuilder::with_id(ids::OPEN_CONFIG, "Open Config Folder...")
+                .build(app_handle)?,
         )
-        .item(
-            &MenuItemBuilder::with_id(ids::RESTART, "Restart Dashboard").build(app_handle)?,
-        )
+        .item(&MenuItemBuilder::with_id(ids::RESTART, "Restart Dashboard").build(app_handle)?)
         .separator()
         .item(&MenuItemBuilder::with_id(ids::QUIT, "Quit ESPHome").build(app_handle)?)
         .build()?;
@@ -206,20 +212,15 @@ static STATUS_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceL
 static VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// `esphome-device-builder` version menu item stored globally for updates
-static BUILDER_VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
+static BUILDER_VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// Release channel items stored globally for radio-button behavior
-static CHANNEL_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
-static CHANNEL_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
-static CHANNEL_DEV_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
+static CHANNEL_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static CHANNEL_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static CHANNEL_DEV_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// Backend menu items stored globally for radio-button behavior
-static BACKEND_CLASSIC_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
+static BACKEND_CLASSIC_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 static BACKEND_BUILDER_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 static BACKEND_BUILDER_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
@@ -298,8 +299,8 @@ fn update_backend_checks(backend: Backend) {
 
 /// Re-detect the installed version and update the tray version display.
 fn refresh_version_display(app_handle: &AppHandle) {
-    let version = crate::update::get_installed_version(app_handle)
-        .unwrap_or_else(|_| "unknown".to_string());
+    let version =
+        crate::update::get_installed_version(app_handle).unwrap_or_else(|_| "unknown".to_string());
     update_version(&version);
 }
 
@@ -380,7 +381,11 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     }
 
                     // Perform the update
-                    match state.update_checker.update_to(&app, &version, channel).await {
+                    match state
+                        .update_checker
+                        .update_to(&app, &version, channel)
+                        .await
+                    {
                         Ok(()) => {
                             info!("Update completed successfully");
 
@@ -408,7 +413,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                                 update_status(&app, true);
                                 let dialog_app = app.clone();
                                 let msg = if channel == ReleaseChannel::Dev {
-                                    "ESPHome has been updated to the latest dev version.".to_string()
+                                    "ESPHome has been updated to the latest dev version."
+                                        .to_string()
                                 } else {
                                     format!("ESPHome has been updated to version {}.", version)
                                 };
@@ -439,7 +445,10 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
 
                             // Try to restart dashboard anyway
                             if let Err(restart_err) = state.daemon.start().await {
-                                error!("Failed to restart backend after failed update: {}", restart_err);
+                                error!(
+                                    "Failed to restart backend after failed update: {}",
+                                    restart_err
+                                );
                             } else {
                                 update_status(&app, true);
                             }
@@ -483,10 +492,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                             .await
                         {
                             Ok(()) => {
-                                info!(
-                                    "Device builder updated successfully to {}",
-                                    builder_version
-                                );
+                                info!("Device builder updated successfully to {}", builder_version);
 
                                 // Refresh the device-builder version display in the tray menu
                                 refresh_builder_version_display(&app).await;
@@ -555,14 +561,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                         }
                     }
                 }
-            });
-        }
-        ids::CHECK_APP_UPDATES => {
-            let app = app_handle.clone();
-            async_runtime::spawn(async move {
-                // Verbose mode: this menu item is app-only, so surface "no
-                // updates available" feedback too.
-                crate::app_update::check_for_user(&app, true).await;
             });
         }
         ids::CHANNEL_STABLE | ids::CHANNEL_BETA | ids::CHANNEL_DEV => {
@@ -836,7 +834,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 }
 
                 // Apply the new backend to the daemon and persist it.
-                state.daemon.set_use_device_builder(new_backend.is_builder());
+                state
+                    .daemon
+                    .set_use_device_builder(new_backend.is_builder());
                 {
                     let mut settings = state.settings.write().await;
                     settings.backend = new_backend;

@@ -29,6 +29,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         include:
           - platform: windows
@@ -40,7 +41,8 @@ jobs:
             os: ubuntu-22.04
             target: linux-x64
             bundles: appimage
-            tauri_branch: feat/truly-portable-appimage
+            # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
+            tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
             updater_target: linux-x86_64
           - platform: linux
             os: ubuntu-22.04
@@ -50,7 +52,8 @@ jobs:
             os: ubuntu-22.04-arm
             target: linux-arm64
             bundles: appimage
-            tauri_branch: feat/truly-portable-appimage
+            # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
+            tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
             updater_target: linux-aarch64
           - platform: linux
             os: ubuntu-22.04-arm
@@ -59,6 +62,7 @@ jobs:
           - platform: macos
             os: macos-15
             target: macos-arm64
+            rust_target: aarch64-apple-darwin
             bundles: dmg
             updater_target: darwin-aarch64
           - platform: macos
@@ -73,7 +77,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # For workflow_run events, check out the commit that triggered the
           # Release Drafter workflow (the latest push to main).
@@ -104,15 +108,74 @@ jobs:
           # produces broken cargo/rustc symlinks on the new macOS runner image.
           cache-bin: false
 
-      - name: Install Tauri CLI
-        run: |
-          if [[ -n "${{ matrix.tauri_branch }}" ]]; then
-            # Custom tauri-cli branch (e.g. for portable AppImage format)
-            cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch ${{ matrix.tauri_branch }} --locked --force
-          else
-            cargo install tauri-cli --locked
-          fi
+      # Resolve a tauri-cli version from the locked `tauri` crate version so it
+      # tracks Dependabot's cargo bumps automatically (no hardcoded version to go
+      # stale). Used for the prebuilt install on the stock jobs below. The
+      # AppImage jobs build a pinned fork instead, so they skip this.
+      - name: Resolve Tauri CLI version
+        if: ${{ !matrix.tauri_rev }}
         shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "tauri"$/{getline; print}' src-tauri/Cargo.lock \
+            | sed -E 's/version = "(.+)"/\1/' | head -1)
+          # Validate against a strict version charset before trusting it: the
+          # value comes from a PR-editable Cargo.lock, so reject anything with
+          # shell metacharacters / quotes / newlines (defends the $GITHUB_ENV
+          # write and every later use).
+          if [[ ! "$ver" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::unexpected tauri version from src-tauri/Cargo.lock: '$ver'"
+            exit 1
+          fi
+          echo "TAURI_CLI_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "Resolved tauri-cli version: $ver"
+
+      # Stock jobs install a prebuilt cargo-tauri via cargo-binstall (seconds)
+      # rather than compiling tauri-cli from source, which dominated the per-job
+      # time at 5-10 min. No cache is involved, so this is immune to the cache
+      # eviction that makes a small per-binary cache unreliable at the repo's
+      # 10 GB cache cap. binstall only falls back to compiling if a platform has
+      # no prebuilt (e.g. aarch64 Linux).
+      - name: Install cargo-binstall
+        if: ${{ !matrix.tauri_rev }}
+        uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
+
+      # Version reaches the script only through env, never via ${{ }}
+      # interpolation into the run block, so a crafted Cargo.lock cannot inject
+      # shell commands. GITHUB_TOKEN lets binstall query GitHub releases without
+      # hitting the anonymous rate limit.
+      - name: Install Tauri CLI (prebuilt)
+        if: ${{ !matrix.tauri_rev }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall --no-confirm \
+            --strategies crate-meta-data,quick-install,compile \
+            tauri-cli --version "$TAURI_CLI_VERSION"
+
+      # The AppImage jobs build tauri-cli from a pinned upstream fork (the
+      # "truly portable AppImage" format, tauri-apps/tauri#12491, not yet
+      # released), so there is no prebuilt to binstall. Cache the single compiled
+      # binary, keyed on the fork commit, so only the first run per commit pays
+      # the ~5 min compile. Caching just the binary (not all of ~/.cargo/bin)
+      # sidesteps the broken symlink restore behind Swatinem/rust-cache#341. Only
+      # two such caches exist (one per arch), so eviction pressure is minimal.
+      - name: Cache Tauri CLI (AppImage fork)
+        id: tauri-cli-cache
+        if: ${{ matrix.tauri_rev }}
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cargo/bin/cargo-tauri*
+          key: tauri-cli-${{ runner.os }}-${{ runner.arch }}-${{ matrix.tauri_rev }}
+
+      # TAURI_REV is a workflow-defined SHA, passed through env for consistency.
+      - name: Build Tauri CLI from fork (AppImage)
+        if: ${{ matrix.tauri_rev && steps.tauri-cli-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        env:
+          TAURI_REV: ${{ matrix.tauri_rev }}
+        run: cargo install tauri-cli --git https://github.com/tauri-apps/tauri --rev "$TAURI_REV" --locked
 
       - name: Prepare Python bundle
         shell: bash
@@ -369,7 +432,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # Need the latest.json generator script + the JSON Schema it produces;
           # nothing else from the source tree is required by the release job.

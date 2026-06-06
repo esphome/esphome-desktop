@@ -1,0 +1,87 @@
+name: Lint & Test
+
+# Fast Rust checks for the src-tauri crate. The main `Build` workflow only runs
+# `cargo tauri build`, which compiles the crate but never executes the unit
+# tests, clippy, or rustfmt. This job closes that gap so `#[test]` modules
+# actually gate merges instead of silently rotting.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Per-branch concurrency: a new push cancels an in-flight run for the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: Rust lint & test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Tauri links against the system webkit/appindicator stack on Linux, so
+      # even a plain `cargo test` needs these to compile. Mirror the dependency
+      # set used by the Build workflow's Linux jobs.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev
+
+      # Pin the toolchain version (unlike the Build workflow, which floats
+      # `stable`). clippy and rustfmt are *required* gates below, so a floating
+      # toolchain would let a new Rust release introduce a fresh clippy lint or
+      # a rustfmt formatting tweak that breaks unrelated PRs through no fault of
+      # their own. Pinning makes the gate deterministic; bump it deliberately to
+      # adopt newer lints. 1.96.0 is the version that established the green
+      # clippy/fmt baseline this workflow enforces.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, pinned via toolchain: below
+        with:
+          toolchain: 1.96.0
+          components: clippy, rustfmt
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri
+          key: lint-test
+
+      # `tauri.conf.json` lists `python` as a bundle resource. That directory is
+      # gitignored and absent on a fresh checkout (it's populated by
+      # prepare_bundle.sh only for real bundling). A plain `cargo test`/`clippy`
+      # never bundles, but create an empty stub so config parsing can't trip on
+      # the missing path.
+      - name: Stub bundle resource dir
+        run: mkdir -p src-tauri/python
+
+      # Required gates. clippy and rustfmt were introduced as advisory in the
+      # first iteration of this workflow because they had never run in CI and the
+      # tree had no enforced-clean baseline. Both have since passed clean on the
+      # pinned toolchain, so they now block merges — formatting drift and clippy
+      # warnings fail the build like any test would.
+      - name: Formatting
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Run the unit tests. Failures block the merge.
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --all-features --verbose

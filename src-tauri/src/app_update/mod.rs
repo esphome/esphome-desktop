@@ -135,7 +135,7 @@ pub async fn check_and_notify(app_handle: &AppHandle) -> NextStep {
                 .builder()
                 .title("ESPHome Device Builder Update Available")
                 .body(format!(
-                    "Version {} is available (you have {}). Open the tray menu and choose \"Check for App Updates...\" to install.",
+                    "Version {} is available (you have {}). Open the tray menu and choose \"Check for Updates...\" to install.",
                     update.version, update.current_version
                 ))
                 .show()
@@ -168,10 +168,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                 // Throttle progress logs to once per second.
                 if last_logged.elapsed() >= Duration::from_secs(1) {
                     if let Some(total) = total {
-                        info!(
-                            "Downloading desktop update: {}/{} bytes",
-                            downloaded, total
-                        );
+                        info!("Downloading desktop update: {}/{} bytes", downloaded, total);
                     } else {
                         info!("Downloading desktop update: {} bytes", downloaded);
                     }
