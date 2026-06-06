@@ -88,13 +88,23 @@ impl AppState {
 /// and GNOME setups) the tray icon never appears, so telling the user to
 /// "open the tray menu" is misleading — there is no menu. In that case point
 /// them at a path that actually works. See GitHub issue #87.
+///
+/// Today the no-tray branch is only reachable on Linux AppImage builds without
+/// a StatusNotifier host, so the alternative wording is gated behind
+/// `target_os = "linux"`. If a future code path ever sets `tray_available =
+/// false` on macOS or Windows (e.g. a tray-init failure), those platforms get a
+/// generic "reinstall the latest release" message instead of misleading
+/// deb/rpm/AUR instructions.
 pub(crate) fn updates_menu_hint(tray_available: bool) -> &'static str {
     if tray_available {
         "Open the tray menu and choose \"Check for Updates...\" to update."
-    } else {
+    } else if cfg!(target_os = "linux") {
         "No system tray was detected, so the in-app updater is unavailable. \
          Install the deb/rpm/AUR package (which has a working tray) or reinstall \
          the latest release to update."
+    } else {
+        "No system tray was detected, so the in-app updater is unavailable. \
+         Reinstall the latest release to update."
     }
 }
 
