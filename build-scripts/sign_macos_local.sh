@@ -50,7 +50,9 @@ while [[ $# -gt 0 ]]; do
     --adhoc)       FORCE_ADHOC=1; shift ;;
     --no-timestamp) NO_TIMESTAMP=1; shift ;;
     -h|--help)
-      sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      # Print the header comment block (line 2 through the first non-# line) so
+      # editing the header can't truncate help via a hardcoded line range.
+      awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "${BASH_SOURCE[0]}"
       exit 0 ;;
     -*) echo "Unknown option: $1" >&2; exit 2 ;;
     *)  if [[ -n "$INPUT" ]]; then echo "Unexpected argument: $1" >&2; exit 2; fi
@@ -149,11 +151,13 @@ sign_app() {
     printf '%s\0' "${machos[@]}" | xargs -0 -r -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
   fi
 
-  # Nested bundles must be sealed after their contents, so sign them serially.
+  # Nested bundles must be sealed after their contents, so sign them serially
+  # and depth-first (-depth) so an inner bundle is signed before the bundle that
+  # contains it.
   echo "  - nested framework/app bundles"
   while IFS= read -r -d '' d; do
     sign_one "$d"
-  done < <(find "$app" -mindepth 1 \( -name '*.framework' -o -name '*.app' \) -type d -print0)
+  done < <(find "$app" -depth -mindepth 1 \( -name '*.framework' -o -name '*.app' \) -type d -print0)
 
   echo "  - bundle root"
   sign_one "$app"
@@ -164,6 +168,10 @@ sign_app() {
 
 case "$INPUT" in
   *.app)
+    if [[ -n "$OUTPUT" ]]; then
+      echo "Error: --output applies to .dmg input only; a .app is signed in place." >&2
+      exit 2
+    fi
     sign_app "$INPUT"
     echo "Done. Signed app in place: $INPUT"
     ;;
@@ -183,6 +191,15 @@ case "$INPUT" in
 
     echo "Converting to a writable image..."
     hdiutil convert "$INPUT" -format UDRW -o "$WORK/rw.dmg" -quiet
+    # The source dmg is sized to its content with almost no slack. Signing adds
+    # data that wasn't there (embedded Mach-O signatures plus a _CodeSignature
+    # dir for every nested bundle); for the full Python bundle that's enough to
+    # fill the volume and make codesign fail mid-run with a confusing write
+    # error. Grow the writable image first (50% + 128 MB headroom); the UDZO
+    # reseal drops the slack again, so the final dmg isn't bloated.
+    cur_mb=$(( $(stat -f%z "$WORK/rw.dmg") / 1048576 ))
+    hdiutil resize -size "$(( cur_mb + cur_mb / 2 + 128 ))m" "$WORK/rw.dmg" -quiet \
+      || echo "Warning: could not grow the writable image; proceeding without extra headroom." >&2
     MNT="$WORK/mnt"
     mkdir -p "$MNT"
     echo "Mounting..."
