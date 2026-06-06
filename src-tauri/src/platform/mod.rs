@@ -861,13 +861,29 @@ pub fn is_tray_supported() -> bool {
 mod tests {
     use super::*;
 
+    /// Unique temp dir per call. Combines the process id with a monotonic
+    /// counter so tests running in parallel within the same process can never
+    /// collide on (or delete) each other's directories.
+    #[cfg(unix)]
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "koan-copytest-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ))
+    }
+
     #[cfg(unix)]
     #[test]
     fn copy_dir_recursive_preserves_symlinks() {
         use std::fs;
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!("koan-copytest-{}", std::process::id()));
+        let base = unique_temp_dir("basic");
         let src = base.join("src");
         let dst = base.join("dst");
         let _ = fs::remove_dir_all(&base);
@@ -896,8 +912,7 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::symlink;
 
-        let base =
-            std::env::temp_dir().join(format!("koan-copytest-dangling-{}", std::process::id()));
+        let base = unique_temp_dir("dangling");
         let src = base.join("src");
         let dst = base.join("dst");
         let _ = fs::remove_dir_all(&base);
@@ -929,8 +944,7 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::symlink;
 
-        let base =
-            std::env::temp_dir().join(format!("koan-copytest-nested-{}", std::process::id()));
+        let base = unique_temp_dir("nested");
         let src = base.join("src");
         let dst = base.join("dst");
         let _ = fs::remove_dir_all(&base);
