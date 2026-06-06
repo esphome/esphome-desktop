@@ -206,14 +206,17 @@ The app uses pip to update ESPHome. If updates fail:
 
 ### No system tray icon (Linux)
 
-Some Linux desktops (notably certain KDE Plasma and GNOME setups) don't expose a
-StatusNotifier host to the **AppImage** build, so the tray icon — and the
-"Check for Updates" menu it hosts — never appears. The app detects this and
-falls back to opening the dashboard in your browser, and update notifications
-say so instead of pointing at a tray menu that isn't there.
+The tray needs a working `libayatana-appindicator` and a desktop that hosts the
+StatusNotifier protocol. The **AppImage** bundles the library and detects it even
+when it lives only inside the bundle, so trays now appear on hosts that support
+SNI (including KDE Plasma). If your desktop has no StatusNotifier host at all
+(some minimal/GNOME setups), the app detects this and falls back to opening the
+dashboard in your browser, and update notifications say so instead of pointing at
+a tray menu that isn't there.
 
-To get a working tray (and the in-app updater), install the **deb/rpm/AUR**
-package for your distribution instead of the AppImage.
+If the tray still doesn't appear, install the **deb/rpm/AUR** package for your
+distribution — it depends on the system `libayatana-appindicator3` package and
+always has a working tray and in-app updater.
 
 ## License
 
