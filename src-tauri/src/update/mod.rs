@@ -741,15 +741,30 @@ pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
     }
 }
 
-/// A parsed version segment, e.g. "0b1" -> (0, 0, 1)
-/// Any pre-release suffix sorts below a stable release (no suffix).
-/// ESPHome uses "b" for betas (e.g. "2025.4.0b1") and "-dev" for dev
-/// builds (e.g. "2026.5.0-dev").
+/// Pre-release precedence for a version's tag, following PEP 440 ordering:
+/// `dev < alpha < beta < rc < release`.
+///
+/// ESPHome itself only ships `bN` betas (e.g. "2025.4.0b1") and `-dev`
+/// builds (e.g. "2026.5.0-dev"), but `esphome-device-builder` is compared
+/// with [`find_latest_any`], which can surface any pre-release kind. Ranking
+/// them all explicitly avoids mis-selecting an alpha over a beta (both used to
+/// share rank 1) or treating a dev build as equal to a beta (both used to be
+/// rank 0).
+///
+/// A bare stable segment never reaches this function — [`parse_version`]
+/// assigns it the `255` sentinel directly, so every pre-release tier here
+/// sorts below any stable release.
 fn prerelease_ord(tag: &str) -> u8 {
     match tag {
-        "b" => 0,
         "dev" => 0,
-        _ => 1,
+        "a" | "alpha" => 1,
+        "b" | "beta" => 2,
+        "rc" | "c" | "pre" | "preview" => 3,
+        // An unrecognized suffix is treated as the most-final pre-release
+        // tier: above every known pre-release but still below a bare stable
+        // release. This is conservative — an unexpected tag won't be ranked
+        // newer than the stable it precedes.
+        _ => 4,
     }
 }
 
@@ -823,6 +838,32 @@ mod tests {
         assert!(!is_newer_version("2026.5.0-dev", "2026.5.0"));
         // A newer base version dev is still newer than an older stable
         assert!(is_newer_version("2026.5.0-dev", "2026.4.0"));
+    }
+
+    #[test]
+    fn test_prerelease_precedence_ordering() {
+        // PEP 440 ordering within the same base version:
+        //   dev < alpha < beta < rc < release
+        assert!(is_newer_version("2025.4.0a1", "2025.4.0-dev"));
+        assert!(is_newer_version("2025.4.0b1", "2025.4.0a1"));
+        assert!(is_newer_version("2025.4.0rc1", "2025.4.0b1"));
+        assert!(is_newer_version("2025.4.0", "2025.4.0rc1"));
+
+        // Transitivity check across the full chain.
+        assert!(is_newer_version("2025.4.0rc1", "2025.4.0-dev"));
+        assert!(is_newer_version("2025.4.0b1", "2025.4.0-dev"));
+
+        // Long-form tags rank identically to their short forms.
+        assert!(is_newer_version("2025.4.0beta1", "2025.4.0alpha1"));
+        assert!(!is_newer_version("2025.4.0alpha2", "2025.4.0beta1"));
+
+        // A dev build is no longer considered equal to a beta of the same
+        // base (they previously both mapped to rank 0).
+        assert!(is_newer_version("2025.4.0b1", "2025.4.0-dev"));
+        assert!(!is_newer_version("2025.4.0-dev", "2025.4.0b1"));
+
+        // "c" is an accepted alias for "rc".
+        assert!(is_newer_version("2025.4.0c1", "2025.4.0b9"));
     }
 
     #[test]
