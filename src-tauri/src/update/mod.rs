@@ -81,27 +81,16 @@ impl UpdateChecker {
                     .await
                     .context("Failed to parse PyPI response")?;
 
-                // Find the latest beta/pre-release version from all releases.
-                // Beta versions contain 'b' (e.g., "2025.4.0b1").
-                // We want the newest version that is a pre-release, or fall
-                // back to the latest stable if no beta is newer.
-                let latest_beta = find_latest_beta(&response.releases);
-
-                match latest_beta {
-                    Some(v) => {
-                        info!("Latest beta ESPHome version on PyPI: {}", v);
-                        Ok(Some(v))
-                    }
-                    None => {
-                        // No beta found that's newer; fall back to stable
-                        let stable = &response.info.version;
-                        info!(
-                            "No beta version found newer than stable ({}), using stable",
-                            stable
-                        );
-                        Ok(Some(stable.clone()))
-                    }
-                }
+                // Pick the version to offer on the beta channel. We want the
+                // newest beta (e.g. "2025.4.0b1"), but only when it is actually
+                // newer than the latest stable. Once a release cycle finishes
+                // and the stable ships, the newest *beta* on PyPI is an older
+                // pre-release — offering it would downgrade a beta-channel user
+                // (switch_channel installs unconditionally, with no is_newer
+                // guard). In that case fall back to stable.
+                let target = select_beta_target(&response.releases, &response.info.version);
+                info!("Beta channel target ESPHome version: {}", target);
+                Ok(Some(target))
             }
             ReleaseChannel::Dev => {
                 // Dev channel doesn't use version-based update checks
@@ -595,6 +584,21 @@ impl UpdateChecker {
     }
 }
 
+/// Choose the version to offer on the beta channel.
+///
+/// Returns the latest beta only when it is strictly newer than the latest
+/// stable; otherwise returns `stable`. This prevents a downgrade: after a
+/// release cycle closes, the newest beta on PyPI (e.g. "2025.4.0b3") is older
+/// than the stable it led to ("2025.4.0"), and `switch_channel(Beta)` installs
+/// the returned version unconditionally — without it, a stable user switching
+/// to beta would be moved *backwards* onto a stale pre-release.
+fn select_beta_target(releases: &HashMap<String, Vec<PyPIRelease>>, stable: &str) -> String {
+    match find_latest_beta(releases) {
+        Some(beta) if is_newer_version(&beta, stable) => beta,
+        _ => stable.to_string(),
+    }
+}
+
 /// Find the latest beta/pre-release version from PyPI releases.
 ///
 /// Beta versions on PyPI look like "2025.4.0b1", "2025.4.0b2", etc.
@@ -837,5 +841,46 @@ mod tests {
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, None);
+    }
+
+    #[test]
+    fn test_select_beta_target_prefers_newer_beta() {
+        // A beta for the next release exists and is newer than stable.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.5.0b1".to_string(), vec![]);
+
+        assert_eq!(
+            select_beta_target(&releases, "2025.4.0"),
+            "2025.5.0b1".to_string()
+        );
+    }
+
+    #[test]
+    fn test_select_beta_target_avoids_downgrade_to_old_beta() {
+        // The release cycle finished: the newest beta on PyPI is the
+        // pre-release that led to the current stable. Offering it would
+        // downgrade a beta-channel user — fall back to stable instead.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0b1".to_string(), vec![]);
+        releases.insert("2025.4.0b2".to_string(), vec![]);
+        releases.insert("2025.4.0".to_string(), vec![]);
+
+        assert_eq!(
+            select_beta_target(&releases, "2025.4.0"),
+            "2025.4.0".to_string()
+        );
+    }
+
+    #[test]
+    fn test_select_beta_target_no_beta_uses_stable() {
+        let mut releases = HashMap::new();
+        releases.insert("2025.3.0".to_string(), vec![]);
+        releases.insert("2025.4.0".to_string(), vec![]);
+
+        assert_eq!(
+            select_beta_target(&releases, "2025.4.0"),
+            "2025.4.0".to_string()
+        );
     }
 }
