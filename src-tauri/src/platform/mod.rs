@@ -899,12 +899,10 @@ mod tests {
 
         copy_dir_recursive(&src, &dst).unwrap();
 
-        assert!(
-            fs::symlink_metadata(dst.join("dangling"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
+        assert!(fs::symlink_metadata(dst.join("dangling"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         // A sibling visited after the dangling link must still be copied.
         assert_eq!(
             fs::read_to_string(dst.join("after.txt")).unwrap(),
@@ -934,7 +932,10 @@ mod tests {
 
         let current = dst.join("versions/Current");
         assert!(
-            fs::symlink_metadata(&current).unwrap().file_type().is_symlink(),
+            fs::symlink_metadata(&current)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "directory symlink must stay a symlink, not be recursed into and duplicated"
         );
         assert_eq!(fs::read_link(&current).unwrap(), Path::new("3.13"));
