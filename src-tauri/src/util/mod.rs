@@ -60,6 +60,14 @@ pub fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Resul
         return Err(e).with_context(|| format!("failed renaming temp file into place for {path:?}"));
     }
 
+    // Fsync the parent directory so the rename (the directory entry update) is
+    // durable. Without this, a power loss right after a successful save can roll
+    // back to the previous file — no corruption, but the most recent change is
+    // lost. Best-effort: a no-op or EINVAL on some platforms (e.g. Windows).
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
     Ok(())
 }
 
