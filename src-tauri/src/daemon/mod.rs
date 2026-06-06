@@ -366,6 +366,17 @@ impl DaemonManager {
 
     /// Stop the ESPHome dashboard
     pub async fn stop(&self) -> Result<()> {
+        // Acquire the process lock *before* reading/mutating `running` so the
+        // check-and-act is fully atomic against start(), which also reads
+        // `running` under this lock. The check is done post-lock (no lockless
+        // fast-path) so a Stop click in the narrow window where start() holds
+        // the lock but hasn't yet stored running=true can't no-op and leave
+        // the just-started dashboard running. Without holding the lock across
+        // the running check, a stop->start overlap could also let start() win
+        // the lock, see running=false, and `*process = Some(child)` drop the
+        // old Child without signaling it (no kill_on_drop on Unix), orphaning
+        // the old dashboard.
+        let mut process = self.process.lock().await;
         if !self.running.load(Ordering::SeqCst) {
             info!("Daemon not running");
             return Ok(());
@@ -374,13 +385,6 @@ impl DaemonManager {
         let backend_name = self.backend_name();
         info!("Stopping {}", backend_name);
 
-        // Acquire the process lock *before* mutating `running` so the
-        // check-and-act is atomic against start(), which also reads `running`
-        // under this lock. Otherwise a stop->start overlap could let start()
-        // win the lock, see running=false, and `*process = Some(child)` drop
-        // the old Child without signaling it (no kill_on_drop on Unix),
-        // orphaning the old dashboard.
-        let mut process = self.process.lock().await;
         self.running.store(false, Ordering::SeqCst);
         if let Some(mut child) = process.take() {
             // Try graceful shutdown first - kill the process group on Unix
