@@ -26,9 +26,12 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// non-atomic copy).
 pub fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
     let path = path.as_ref();
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
-        anyhow!("cannot atomically write to a path without a parent directory: {path:?}")
-    })?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            anyhow!("cannot atomically write to a path without a parent directory: {path:?}")
+        })?;
 
     let file_name = path
         .file_name()
@@ -57,7 +60,8 @@ pub fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Resul
 
     if let Err(e) = std::fs::rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(e).with_context(|| format!("failed renaming temp file into place for {path:?}"));
+        return Err(e)
+            .with_context(|| format!("failed renaming temp file into place for {path:?}"));
     }
 
     // Fsync the parent directory so the rename (the directory entry update) is
