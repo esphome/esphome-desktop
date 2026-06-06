@@ -45,8 +45,10 @@ NO_TIMESTAMP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -i|--identity) IDENTITY="$2"; shift 2 ;;
-    -o|--output)   OUTPUT="$2"; shift 2 ;;
+    -i|--identity) [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                   IDENTITY="$2"; shift 2 ;;
+    -o|--output)   [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 2; }
+                   OUTPUT="$2"; shift 2 ;;
     --adhoc)       FORCE_ADHOC=1; shift ;;
     --no-timestamp) NO_TIMESTAMP=1; shift ;;
     -h|--help)
@@ -120,7 +122,7 @@ sign_app() {
   # won't block the freshly signed app. xattr -c never errors on a file that has
   # none, and the code signature lives in the binary / _CodeSignature, not in an
   # xattr, so this is safe to do before signing.
-  find "$app" -print0 | xargs -0 -r -P "$JOBS" -n 200 xattr -c 2>/dev/null || true
+  find "$app" -print0 | xargs -0 -P "$JOBS" -n 200 xattr -c 2>/dev/null || true
 
   # Loose Mach-O code (dylibs, .so, helper executables) is independent, so it can
   # be signed in parallel and batched several files per codesign call. Only
@@ -130,7 +132,7 @@ sign_app() {
   while IFS= read -r -d '' f; do libs+=("$f"); done \
     < <(find -L "$app" \( -name '*.dylib' -o -name '*.so' \) -type f -print0)
   if [[ "${#libs[@]}" -gt 0 ]]; then
-    printf '%s\0' "${libs[@]}" | xargs -0 -r -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
+    printf '%s\0' "${libs[@]}" | xargs -0 -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
   fi
 
   # Detect Mach-O among the remaining files in parallel (a `file` call per file
@@ -142,13 +144,13 @@ sign_app() {
   # shellcheck disable=SC2016
   while IFS= read -r -d '' f; do machos+=("$f"); done < <(
     find -L "$app" -type f ! -name '*.dylib' ! -name '*.so' -print0 \
-      | xargs -0 -r -P "$JOBS" -n 64 sh -c '
+      | xargs -0 -P "$JOBS" -n 64 sh -c '
           for f; do
             case "$(file -b "$f")" in *Mach-O*) printf "%s\0" "$f" ;; esac
           done' sh
   )
   if [[ "${#machos[@]}" -gt 0 ]]; then
-    printf '%s\0' "${machos[@]}" | xargs -0 -r -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
+    printf '%s\0' "${machos[@]}" | xargs -0 -P "$JOBS" -n 16 codesign "${CODESIGN_FLAGS[@]}"
   fi
 
   # Nested bundles must be sealed after their contents, so sign them serially
