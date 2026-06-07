@@ -21,6 +21,12 @@ pnpm-debug.log*
 src-tauri/python/
 resources/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
 # Build artifacts
 build/
 
