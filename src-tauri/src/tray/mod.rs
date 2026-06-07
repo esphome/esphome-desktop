@@ -16,6 +16,44 @@ use tracing::{error, info, warn};
 use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// RAII guard ensuring only one tray-driven update/switch sequence runs at a
+/// time.
+///
+/// The "Check for Updates", "Switch Channel", and "Switch Backend" menu arms
+/// each spawn an independent async task that performs a multi-step
+/// stop→install/update→start sequence. `DaemonManager::start()`/`stop()` are
+/// individually mutex-serialized, but those *sequences* are not mutually
+/// exclusive, so a fast double-click (or clicking a second item while a dialog
+/// is open) could interleave the steps at `await` points and stack dialogs.
+///
+/// Acquiring this guard at the top of each task makes the three arms mutually
+/// exclusive: a second click while a sequence is in flight is ignored. The flag
+/// is released on drop, so every early `return`/`?` path frees it automatically.
+struct UpdateGuard(Arc<AtomicBool>);
+
+impl UpdateGuard {
+    /// Try to begin an update/switch sequence. Returns `None` if one is already
+    /// in flight (i.e. the flag was already `true`).
+    fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            Some(Self(flag))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Menu item IDs
 mod ids {
     pub const OPEN_DASHBOARD: &str = "open_dashboard";
@@ -342,6 +380,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
+                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
+                    Some(g) => g,
+                    None => {
+                        info!("Update/switch already in progress; ignoring Check for Updates");
+                        return;
+                    }
+                };
                 // Always check the desktop app first. Installing a self-update
                 // replaces the bundled `python/` directory, which would wipe
                 // any pip bump we do here. If the user accepts the app update
@@ -574,6 +619,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
+                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
+                    Some(g) => g,
+                    None => {
+                        info!("Update/switch already in progress; ignoring channel switch");
+                        return;
+                    }
+                };
                 // Read the current channel
                 let old_channel = {
                     let settings = state.settings.read().await;
@@ -734,6 +786,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
+                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
+                    Some(g) => g,
+                    None => {
+                        info!("Update/switch already in progress; ignoring backend switch");
+                        return;
+                    }
+                };
                 let old_backend = {
                     let settings = state.settings.read().await;
                     settings.backend
@@ -914,5 +973,37 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             app_handle.exit(0);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_acquires_when_flag_clear() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let g = UpdateGuard::try_acquire(flag.clone());
+        assert!(g.is_some(), "should acquire when flag is clear");
+        assert!(flag.load(Ordering::Acquire), "flag set while guard held");
+    }
+
+    #[test]
+    fn guard_blocks_second_acquire_while_held() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let _first = UpdateGuard::try_acquire(flag.clone()).expect("first acquires");
+        let second = UpdateGuard::try_acquire(flag.clone());
+        assert!(second.is_none(), "second acquire blocked while first is held");
+    }
+
+    #[test]
+    fn guard_releases_flag_on_drop() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _g = UpdateGuard::try_acquire(flag.clone()).expect("acquires");
+            assert!(flag.load(Ordering::Acquire), "held");
+        }
+        assert!(!flag.load(Ordering::Acquire), "flag cleared after guard dropped");
+        assert!(UpdateGuard::try_acquire(flag.clone()).is_some(), "reacquirable after release");
     }
 }

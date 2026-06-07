@@ -64,6 +64,14 @@ pub struct AppState {
     pub daemon: DaemonManager,
     pub settings: RwLock<Settings>,
     pub update_checker: UpdateChecker,
+    /// Guards the tray's multi-step stop→install→start sequences
+    /// (Check for Updates / Switch Channel / Switch Backend) so only one
+    /// runs at a time. Each of those menu arms spawns an independent async
+    /// task; while `daemon.start()`/`stop()` are individually mutex-serialized,
+    /// the *sequences* are not, so concurrent menu clicks could interleave at
+    /// `await` points (e.g. one switch's `start()` racing another's mid-install)
+    /// and stack confirmation dialogs. See `tray::UpdateGuard`.
+    pub update_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -76,6 +84,7 @@ impl AppState {
             daemon,
             settings: RwLock::new(settings),
             update_checker,
+            update_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
