@@ -282,10 +282,21 @@ jobs:
 
           # Download mkdwarfs (same version used by quick-sharun.sh). The
           # release asset name uses uname -m verbatim (x86_64 / aarch64).
+          # mkdwarfs repacks the AppImage shipped to every Linux user, so a
+          # tampered or truncated download would corrupt the published artifact.
+          # The dwarfs project publishes no SHA256SUMS asset, so pin the known
+          # hash per arch and verify before trusting the binary. --fail stops a
+          # saved HTTP error page; --retry rides out transient network blips.
           DWARFS_VERSION="0.14.1"
           DWARFS_ARCH=$(uname -m)
+          case "$DWARFS_ARCH" in
+            x86_64)  DWARFS_SHA256="f3a117fd6d5b7304944b199af7fdb8086a48c509ea2e9832255d8f9a54c98587" ;;
+            aarch64) DWARFS_SHA256="3a47eda6d496ba12fb6d9af1b1914d4ba7ab73df8df3172ee3cad66c29822cc1" ;;
+            *) echo "::error::no pinned mkdwarfs SHA256 for arch '$DWARFS_ARCH'"; exit 1 ;;
+          esac
           DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
-          curl -L -o mkdwarfs "$DWARFS_URL"
+          curl -fL --retry 3 --retry-delay 2 -o mkdwarfs "$DWARFS_URL"
+          echo "${DWARFS_SHA256}  mkdwarfs" | sha256sum -c -
           chmod +x mkdwarfs
 
           # Repack: create DwarFS image from the AppDir and combine with runtime
