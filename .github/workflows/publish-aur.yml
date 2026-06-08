@@ -37,7 +37,17 @@ jobs:
         id: checksum
         run: |
           DEB_URL="https://github.com/esphome/esphome-desktop/releases/download/v${{ steps.release.outputs.version }}/ESPHome.Device.Builder_${{ steps.release.outputs.version }}_amd64.deb"
-          curl -L -o /tmp/package.deb "$DEB_URL"
+          # --fail: exit non-zero on HTTP >=400 instead of saving the error page.
+          # Without it, a release-timing 404 (asset not yet uploaded) would be
+          # hashed and the bogus checksum pushed to AUR, breaking every install.
+          curl --fail --show-error --location --retry 3 --retry-delay 5 \
+            -o /tmp/package.deb "$DEB_URL"
+          # Sanity-check the payload really is a Debian package (ar archive magic)
+          # before trusting its checksum.
+          if [ "$(head -c 7 /tmp/package.deb)" != "!<arch>" ]; then
+            echo "::error::Downloaded file is not a valid .deb (missing ar archive magic)"
+            exit 1
+          fi
           SHA256SUM=$(sha256sum /tmp/package.deb | awk '{print $1}')
           echo "sha256=$SHA256SUM" >> $GITHUB_OUTPUT
 
