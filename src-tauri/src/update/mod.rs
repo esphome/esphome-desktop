@@ -380,11 +380,7 @@ impl UpdateChecker {
 
         info!("Installing/upgrading esphome-device-builder ({})", backend);
 
-        let mut args: Vec<&str> = vec!["-m", "pip", "install", "--upgrade"];
-        if backend == Backend::BuilderBeta {
-            args.push("--pre");
-        }
-        args.push("esphome-device-builder");
+        let args = device_builder_install_args(backend);
 
         let mut cmd = tokio::process::Command::new(&python_path);
         cmd.args(&args);
@@ -718,6 +714,27 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
     }
 }
 
+/// Build the `pip` argument list for installing/upgrading
+/// `esphome-device-builder`.
+///
+/// `--ignore-installed` is critical for the bundled app: the device-builder
+/// package ships inside the standalone Python tree, and on some installs its
+/// `dist-info/RECORD` is missing. A plain `pip install --upgrade` then tries
+/// to uninstall the existing copy first and aborts with
+/// `error: uninstall-no-record-file` ("no RECORD file was found"), so the
+/// update fails (issue #155). `--ignore-installed` skips the uninstall step
+/// and installs the new version over the top, which is pip's own documented
+/// recovery for this state.
+fn device_builder_install_args(backend: Backend) -> Vec<&'static str> {
+    let mut args: Vec<&'static str> =
+        vec!["-m", "pip", "install", "--upgrade", "--ignore-installed"];
+    if backend == Backend::BuilderBeta {
+        args.push("--pre");
+    }
+    args.push("esphome-device-builder");
+    args
+}
+
 /// Get the installed ESPHome version
 pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
     let python_path = platform::get_python_path(app_handle)?;
@@ -864,6 +881,24 @@ mod tests {
 
         // "c" is an accepted alias for "rc".
         assert!(is_newer_version("2025.4.0c1", "2025.4.0b9"));
+    }
+
+    #[test]
+    fn test_device_builder_install_args_ignore_installed() {
+        // --ignore-installed must always be present so a missing RECORD file
+        // in the bundled install can't abort the upgrade (issue #155).
+        for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
+            let args = device_builder_install_args(backend);
+            assert!(args.contains(&"--ignore-installed"), "backend {backend:?}");
+            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
+            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+        }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_pre_only_for_beta() {
+        assert!(device_builder_install_args(Backend::BuilderBeta).contains(&"--pre"));
+        assert!(!device_builder_install_args(Backend::BuilderStable).contains(&"--pre"));
     }
 
     #[test]
