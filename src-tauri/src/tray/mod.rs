@@ -993,7 +993,10 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let _first = UpdateGuard::try_acquire(flag.clone()).expect("first acquires");
         let second = UpdateGuard::try_acquire(flag.clone());
-        assert!(second.is_none(), "second acquire blocked while first is held");
+        assert!(
+            second.is_none(),
+            "second acquire blocked while first is held"
+        );
     }
 
     #[test]
@@ -1003,7 +1006,13 @@ mod tests {
             let _g = UpdateGuard::try_acquire(flag.clone()).expect("acquires");
             assert!(flag.load(Ordering::Acquire), "held");
         }
-        assert!(!flag.load(Ordering::Acquire), "flag cleared after guard dropped");
-        assert!(UpdateGuard::try_acquire(flag.clone()).is_some(), "reacquirable after release");
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "flag cleared after guard dropped"
+        );
+        assert!(
+            UpdateGuard::try_acquire(flag.clone()).is_some(),
+            "reacquirable after release"
+        );
     }
 }
