@@ -23,6 +23,10 @@ jobs:
   bump:
     name: Bump ${{ matrix.dependency }}
     runs-on: ubuntu-22.04
+    # Backstop the whole job well under the 6h default. The work is a couple of
+    # API calls plus a PR open; the per-request urlopen timeouts cover the
+    # network, this covers anything else that could wedge.
+    timeout-minutes: 20
     # The GitHub App credentials live in the depupdates environment. The app
     # token, rather than the default GITHUB_TOKEN, is what lets the opened PR
     # trigger the Build + lint/test workflows.
