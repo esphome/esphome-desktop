@@ -27,10 +27,10 @@ jobs:
     # API calls plus a PR open; the per-request urlopen timeouts cover the
     # network, this covers anything else that could wedge.
     timeout-minutes: 20
-    # The GitHub App credentials live in the depupdates environment. The app
+    # Authenticate as the ESPHome GitHub App using the org-level client id
+    # (variable) and private key (secret) shared across all workflows. The app
     # token, rather than the default GITHUB_TOKEN, is what lets the opened PR
     # trigger the Build + lint/test workflows.
-    environment: depupdates
     permissions:
       contents: read
     strategy:
@@ -43,7 +43,7 @@ jobs:
         id: generate-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          client-id: ${{ secrets.ESPHOME_GITHUB_APP_CLIENT_ID }}
+          client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
 
       - name: Checkout
