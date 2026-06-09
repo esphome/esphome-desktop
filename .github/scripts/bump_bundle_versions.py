@@ -196,9 +196,9 @@ def resolve_latest_python(minor: str) -> tuple[str, str] | None:
     """Latest `(PBS_VERSION, PYTHON_VERSION)` for the given minor (e.g. "3.13").
 
     Returns the newest python-build-standalone release tag together with the
-    highest `minor.patch` CPython build it ships. None if that release has no
-    build for `minor` (e.g. the line was dropped upstream), so the caller skips
-    the bump rather than jumping minors.
+    highest `minor.patch` CPython build it ships. Returns None if that release
+    has no build for `minor` (e.g. the line was dropped upstream); callers
+    should treat this as an error rather than jumping to a different minor.
     """
     release = _api_get(f"https://api.github.com/repos/{PBS_REPO}/releases/latest")
     pbs_version = release["tag_name"]
