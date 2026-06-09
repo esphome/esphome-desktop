@@ -220,11 +220,11 @@ pub fn run(cli: Cli) {
             }
 
             // Make a git available to the ESPHome backend. On Windows this
-            // prepends the bundled MinGit to PATH when no system git is found;
-            // no-op elsewhere. Runs before the daemon task spawns so the child
-            // (which inherits this process's PATH) and the missing-git check
-            // both observe it. Log-and-continue: a failure here only means
-            // git-dependent features fall back to the existing notification.
+            // always prepends the bundled MinGit to PATH; no-op elsewhere. Runs
+            // before the daemon task spawns so the child (which inherits this
+            // process's PATH) and the missing-git check both observe it.
+            // Log-and-continue: a failure here only means git-dependent
+            // features fall back to the existing notification.
             if let Err(e) = platform::ensure_git_on_path(app.handle()) {
                 error!("Failed to set up bundled git: {}", e);
             }
