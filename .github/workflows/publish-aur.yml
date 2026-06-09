@@ -40,11 +40,13 @@ jobs:
           # --fail: exit non-zero on HTTP >=400 instead of saving the error page.
           # Without it, a release-timing 404 (asset not yet uploaded) would be
           # hashed and the bogus checksum pushed to AUR, breaking every install.
-          curl --fail --show-error --location --retry 3 --retry-delay 5 \
+          # --retry-all-errors: plain --retry skips HTTP 404s, but the asset-not-
+          # yet-uploaded race returns exactly a 404, so retry those too.
+          curl --fail --show-error --location --retry 3 --retry-delay 5 --retry-all-errors \
             -o /tmp/package.deb "$DEB_URL"
           # Sanity-check the payload really is a Debian package (ar archive magic)
-          # before trusting its checksum.
-          if [ "$(head -c 7 /tmp/package.deb)" != "!<arch>" ]; then
+          # before trusting its checksum. The full magic is 8 bytes: "!<arch>\n".
+          if [ "$(head -c 8 /tmp/package.deb)" != "$(printf '!<arch>\n')" ]; then
             echo "::error::Downloaded file is not a valid .deb (missing ar archive magic)"
             exit 1
           fi
