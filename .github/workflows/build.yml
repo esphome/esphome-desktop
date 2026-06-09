@@ -240,11 +240,11 @@ jobs:
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
 
       - name: Build (macOS Release with signing)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
+        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
