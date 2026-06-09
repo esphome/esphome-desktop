@@ -305,13 +305,16 @@ jobs:
           # pin still guards against a compromised asset (the API would report
           # the bad asset's digest, so it can't replace the pin). Older releases
           # may predate GitHub's asset-digest feature, so a missing digest only
-          # warns rather than failing the build.
-          API_DIGEST=$(curl -fsSL \
+          # warns rather than failing the build. The pin already verified the
+          # binary above, so a transient API failure must not red an
+          # already-correct build: --retry rides out blips and the trailing
+          # `|| true` degrades a hard failure to the no-digest warning branch.
+          API_DIGEST=$(curl -fsSL --retry 3 --retry-delay 2 \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/mhx/dwarfs/releases/tags/v${DWARFS_VERSION}" \
             | jq -r --arg name "$DWARFS_ASSET" \
-                '.assets[] | select(.name == $name) | .digest // empty')
+                '.assets[] | select(.name == $name) | .digest // empty' || true)
           if [ -n "$API_DIGEST" ]; then
             echo "${API_DIGEST#sha256:}  mkdwarfs" | sha256sum -c -
             echo "Verified mkdwarfs against GitHub API digest: $API_DIGEST"
