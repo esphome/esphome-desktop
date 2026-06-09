@@ -29,9 +29,21 @@ const GIT_EXECUTABLES: &[&str] = &["git"];
 
 const GIT_MISSING_TITLE: &str = "Git is not installed";
 
+/// Body for platforms where the user installs git themselves. macOS has its own
+/// body (we trigger the Command Line Tools installer there instead).
+#[cfg(not(target_os = "macos"))]
 const GIT_MISSING_BODY: &str = "ESPHome uses Git to download external components, remote \
 (github://) packages, voice models, and other dependencies, so many configurations won't \
 compile without it. Install Git, then restart ESPHome Device Builder so it can detect it.";
+
+/// macOS-specific body. We trigger Apple's Command Line Tools installer (which
+/// includes git) via `xcode-select --install`, so point the user at that
+/// dialog rather than the daunting git-scm.com download.
+#[cfg(target_os = "macos")]
+const GIT_MISSING_BODY_MACOS: &str = "ESPHome uses Git to download external components, remote \
+(github://) packages, voice models, and other dependencies, so many configurations won't \
+compile without it. macOS is opening its Command Line Tools installer, which includes Git \u{2014} \
+finish that install, then restart ESPHome Device Builder so it can detect it.";
 
 /// Search a PATH-style value for a git executable.
 ///
@@ -99,13 +111,57 @@ fn is_git_available() -> bool {
     }
 }
 
-/// Log the git-availability state and, when git is missing, show a
-/// notification explaining why remote (`github://`) packages will fail.
+/// Show the git-missing notification with the given body.
+fn show_git_missing_notification(app_handle: &AppHandle, body: &str) {
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title(GIT_MISSING_TITLE)
+        .body(body)
+        .show()
+    {
+        warn!("Failed to show git-missing notification: {}", e);
+    }
+}
+
+/// Trigger Apple's Command Line Tools installer, which bundles git.
+///
+/// `xcode-select --install` opens the native macOS install dialog. It needs no
+/// admin rights and returns immediately (the install proceeds in that dialog),
+/// and it's a no-op that exits non-zero when the tools are already installed or
+/// an install is already running — so it's safe to call whenever git is
+/// missing. We re-trigger on each launch while git stays absent, matching the
+/// notification's cadence; once the tools land, git is found and neither fires.
+#[cfg(target_os = "macos")]
+fn trigger_command_line_tools_install() {
+    use std::process::Command;
+
+    match Command::new("xcode-select").arg("--install").output() {
+        Ok(out) if out.status.success() => {
+            info!("Opened the Command Line Tools installer (xcode-select --install)");
+        }
+        // Non-zero is expected when the tools are already installed or an
+        // install is already in progress; log it but don't treat it as fatal.
+        Ok(out) => info!(
+            "xcode-select --install exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => warn!("Failed to run xcode-select --install: {}", e),
+    }
+}
+
+/// Log the git-availability state and, when git is missing, surface it.
+///
+/// On macOS we additionally trigger the Command Line Tools installer (which
+/// includes git) so the user gets Apple's native install dialog instead of
+/// having to find and run the git-scm.com installer themselves; elsewhere we
+/// just show the notification.
 ///
 /// Called once per launch, after the daemon starts successfully. While git
-/// stays missing the notification reappears on each launch (by design — the
-/// whole point is surfacing the cause); installing git silences it. No-op when
-/// git is present.
+/// stays missing the notification (and, on macOS, the installer prompt)
+/// reappears on each launch (by design — the whole point is surfacing the
+/// cause); installing git silences it. No-op when git is present.
 pub fn notify_if_git_missing(app_handle: &AppHandle) {
     if is_git_available() {
         info!("git executable found on PATH");
@@ -117,14 +173,15 @@ pub fn notify_if_git_missing(app_handle: &AppHandle) {
          components will fail until git is installed (see issue #113)"
     );
 
-    if let Err(e) = app_handle
-        .notification()
-        .builder()
-        .title(GIT_MISSING_TITLE)
-        .body(GIT_MISSING_BODY)
-        .show()
+    #[cfg(target_os = "macos")]
     {
-        warn!("Failed to show git-missing notification: {}", e);
+        trigger_command_line_tools_install();
+        show_git_missing_notification(app_handle, GIT_MISSING_BODY_MACOS);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        show_git_missing_notification(app_handle, GIT_MISSING_BODY);
     }
 }
 
