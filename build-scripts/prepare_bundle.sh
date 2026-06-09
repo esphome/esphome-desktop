@@ -54,10 +54,13 @@ detect_platform() {
 # (Linux ships sha256sum, macOS ships shasum, and both are present under the
 # git-bash environment on Windows runners). Prints the bare hex digest.
 compute_sha256() {
+    local out
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        out=$(sha256sum "$1") || return 1
+        awk '{print $1}' <<<"$out"
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        out=$(shasum -a 256 "$1") || return 1
+        awk '{print $1}' <<<"$out"
     else
         echo "ERROR: no SHA-256 tool found (need sha256sum or shasum)" >&2
         return 1
@@ -88,7 +91,7 @@ download_and_extract_python() {
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
 
     local sums
-    sums=$(curl -fsSL "${BASE_URL}/SHA256SUMS") || {
+    sums=$(curl -fsSL --retry 3 "${BASE_URL}/SHA256SUMS") || {
         echo "ERROR: failed to fetch ${BASE_URL}/SHA256SUMS" >&2
         exit 1
     }
@@ -102,7 +105,7 @@ download_and_extract_python() {
     if [[ -f "$temp_file" ]] && [[ "$(compute_sha256 "$temp_file")" == "$expected_sha" ]]; then
         echo "Using cached download: $temp_file"
     else
-        [[ -f "$temp_file" ]] && echo "Cached file missing or checksum mismatch — re-downloading"
+        [[ -f "$temp_file" ]] && echo "Cached file checksum mismatch — re-downloading"
         local partial="${temp_file}.partial.$$"
         if ! curl -fL --retry 3 -o "$partial" "$url"; then
             rm -f "$partial"
