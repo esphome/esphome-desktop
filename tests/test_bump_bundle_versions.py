@@ -226,6 +226,29 @@ def test_main_writes_file_and_outputs_on_bump(
     assert "Bump bundled Python to 3.13.13" in output
 
 
+def test_main_build_only_bump_titles_the_build_not_the_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # New PBS release, same CPython patch: only PBS_VERSION moves, so the title
+    # must name the build rather than claim a (non-existent) version bump.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(
+        bump, "resolve_latest_python", lambda minor: ("20260602", "3.13.12")
+    )
+
+    rc = bump.main(["--dependency", "python", "--file", str(script)])
+    assert rc == 0
+    assert 'PBS_VERSION="20260602"' in script.read_text()
+    assert 'PYTHON_VERSION="3.13.12"' in script.read_text()
+
+    output = out.read_text()
+    assert "changed=true" in output
+    assert "Bump bundled Python build to 20260602 (3.13.12)" in output
+
+
 def test_main_no_op_when_already_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

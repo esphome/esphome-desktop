@@ -48,6 +48,11 @@ PREPARE_BUNDLE = REPO_ROOT / "build-scripts" / "prepare_bundle.sh"
 PBS_REPO = "astral-sh/python-build-standalone"
 GIT_FOR_WINDOWS_REPO = "git-for-windows/git"
 
+# Per-request network timeout. A stalled connection otherwise blocks the nightly
+# job until the workflow's multi-hour default timeout fires; failing fast lets
+# the run report a clean no-op instead.
+HTTP_TIMEOUT = 30
+
 # The Linux x86_64 asset is used to enumerate the CPython patch releases present
 # in a python-build-standalone release; it's the canonical name shape and every
 # release ships it. `{minor}` is filled in with the currently pinned minor.
@@ -148,7 +153,7 @@ def _gh_headers() -> dict[str, str]:
 
 def _api_get(url: str) -> Any:
     req = urllib.request.Request(url, headers=_gh_headers())
-    with urllib.request.urlopen(req) as resp:  # noqa: S310 (trusted GitHub URL)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
         return json.load(resp)
 
 
@@ -221,7 +226,7 @@ def _asset_sha256(asset: dict[str, Any]) -> str:
         headers={"User-Agent": "esphome-desktop-version-bump"},
     )
     h = hashlib.sha256()
-    with urllib.request.urlopen(req) as resp:  # noqa: S310 (trusted GitHub URL)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
         for chunk in iter(lambda: resp.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -301,7 +306,12 @@ def main(argv: list[str] | None = None) -> int:
         result = apply_bumps(
             text, {"PYTHON_VERSION": python_version, "PBS_VERSION": pbs_version}
         )
-        title = f"Bump bundled Python to {python_version}"
+        # When only the PBS build-date tag moves (same CPython patch), don't
+        # claim a version bump that didn't happen; name the build instead.
+        if "PYTHON_VERSION" in result.var_changes:
+            title = f"Bump bundled Python to {python_version}"
+        else:
+            title = f"Bump bundled Python build to {pbs_version} ({python_version})"
     else:
         latest = resolve_latest_mingit()
         if latest is None:
