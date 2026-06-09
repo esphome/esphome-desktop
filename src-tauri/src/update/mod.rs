@@ -725,6 +725,11 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// update fails (issue #155). `--ignore-installed` skips the uninstall step
 /// and installs the new version over the top, which is pip's own documented
 /// recovery for this state.
+///
+/// Accepted side effect: skipping the uninstall means files present in the old
+/// version but removed/renamed in the new one are left orphaned in
+/// site-packages. For a bundled single-package upgrade this is harmless, so do
+/// not "fix" it by removing the flag — that reintroduces the missing-RECORD abort.
 fn device_builder_install_args(backend: Backend) -> Vec<&'static str> {
     let mut args: Vec<&'static str> =
         vec!["-m", "pip", "install", "--upgrade", "--ignore-installed"];
