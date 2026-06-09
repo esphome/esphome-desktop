@@ -50,22 +50,55 @@ detect_platform() {
     esac
 }
 
+# Resolve the published SHA-256 for a python-build-standalone asset from the
+# release's SHA256SUMS manifest. Verifying against the same release we download
+# from matches the trust model of pinning the URL and catches a corrupted,
+# truncated, or cache-poisoned tarball. The manifest is cached under $BUILD_DIR.
+pbs_expected_sha256() {
+    local filename="$1"
+    local sums_file="$BUILD_DIR/SHA256SUMS-${PBS_VERSION}"
+
+    if [[ ! -f "$sums_file" ]]; then
+        curl -fL --retry 3 -o "${sums_file}.partial" "${BASE_URL}/SHA256SUMS"
+        mv -f "${sums_file}.partial" "$sums_file"
+    fi
+
+    local expected
+    expected=$(awk -v f="$filename" '$2 == f {print $1}' "$sums_file")
+    if [[ -z "$expected" ]]; then
+        echo "No SHA-256 entry for $filename in SHA256SUMS" >&2
+        exit 1
+    fi
+    echo "$expected"
+}
+
 # Download the python-build-standalone tarball for the given platform and
-# extract it to $BUILD_DIR/python-${platform}. Tarball downloads are cached
-# in /tmp so re-runs don't re-download.
+# extract it to $BUILD_DIR/python-${platform}. Downloads are cached under
+# $BUILD_DIR (which we own) so re-runs don't re-download, and verified against
+# the release's published SHA-256.
 download_and_extract_python() {
     local platform="$1"
     local filename="$2"
     local python_dir="$BUILD_DIR/python-${platform}"
     local url="${BASE_URL}/${filename}"
-    local temp_file="/tmp/${filename}"
+    # Cache under $BUILD_DIR rather than the shared, world-writable /tmp so a
+    # stale file owned by another user can't collide.
+    local temp_file="$BUILD_DIR/${filename}"
 
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
-    if [[ ! -f "$temp_file" ]]; then
-        curl -L -o "$temp_file" "$url"
-    else
+    local expected_sha
+    expected_sha=$(pbs_expected_sha256 "$filename")
+    if [[ -f "$temp_file" ]]; then
         echo "Using cached download: $temp_file"
+        verify_sha256 "$temp_file" "$expected_sha"
+    else
+        # Atomic: download to .partial and promote to the cache path only once
+        # the checksum passes, so an interrupted or corrupt download never
+        # becomes a sticky, always-failing cache entry.
+        curl -fL --retry 3 -o "${temp_file}.partial" "$url"
+        verify_sha256 "${temp_file}.partial" "$expected_sha"
+        mv -f "${temp_file}.partial" "$temp_file"
     fi
 
     echo ""
