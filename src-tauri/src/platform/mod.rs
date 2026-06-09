@@ -182,6 +182,12 @@ pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// through `split_paths`/`join_paths` keeps the platform separator correct and
 /// round-trips a non-Unicode `PATH` instead of lossily dropping it.
 fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
+    // An empty `existing` (PATH unset) would split into a single empty entry,
+    // leaving a trailing "" in the result — which Windows search semantics
+    // treat as the current directory. Return just `dir` in that case.
+    if existing.is_empty() {
+        return Ok(dir.as_os_str().to_os_string());
+    }
     let mut entries = vec![dir.to_path_buf()];
     entries.extend(std::env::split_paths(existing));
     std::env::join_paths(entries).context("Failed to build PATH with bundled git prepended")
@@ -957,11 +963,12 @@ mod tests {
 
     #[test]
     fn path_with_prepended_onto_empty_yields_just_dir() {
-        // var_os("PATH") missing degrades to an empty value; the result should
-        // still lead with the bundled git dir.
+        // var_os("PATH") missing degrades to an empty value; the result must be
+        // exactly the bundled git dir with no trailing empty entry (an empty
+        // PATH entry means the current directory under Windows search rules).
         let joined = path_with_prepended(OsStr::new(""), Path::new("/opt/git/cmd")).unwrap();
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
-        assert_eq!(entries.first(), Some(&PathBuf::from("/opt/git/cmd")));
+        assert_eq!(entries, vec![PathBuf::from("/opt/git/cmd")]);
     }
 
     /// A non-Unicode `PATH` is legal on Unix; the prepend must round-trip its
