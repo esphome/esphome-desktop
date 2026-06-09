@@ -49,7 +49,7 @@ PBS_REPO = "astral-sh/python-build-standalone"
 
 # Per-request network timeout. A stalled connection otherwise blocks the nightly
 # job until the workflow's multi-hour default timeout fires; failing fast lets
-# the run report a clean no-op instead.
+# the run fail promptly (after retries) and surface a clear error.
 HTTP_TIMEOUT = 30
 
 # The Linux x86_64 asset is used to enumerate the CPython patch releases present
