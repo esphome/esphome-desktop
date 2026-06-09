@@ -262,13 +262,28 @@ impl DaemonManager {
         // re-acquire it on their own polling cadence.
         drop(process);
 
-        // Start health check task
+        // Start health check task.
+        //
+        // Like the exit-watcher below, this captures the child's PID at spawn
+        // time and exits once `dashboard_pid` no longer matches. A
+        // stop()/start() pair faster than the 30s poll interval flips `running`
+        // false then back to true, so the `running` check alone wouldn't retire
+        // a superseded task: the old health-check loop would wake to
+        // running=true (set by the new start()) and keep probing forever,
+        // leaking one task per restart. The PID guard retires it as soon as a
+        // newer start() installs its own watcher.
         let running = self.running.clone();
         let port = self.port;
+        let health_dashboard_pid = self.dashboard_pid.clone();
+        let health_watcher_pid = self.dashboard_pid.load(Ordering::SeqCst);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                 if !running.load(Ordering::SeqCst) {
+                    break;
+                }
+                if health_dashboard_pid.load(Ordering::SeqCst) != health_watcher_pid {
+                    // Superseded by a newer start(); its task probes now.
                     break;
                 }
                 match health_check(port).await {
