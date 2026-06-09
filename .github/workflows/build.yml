@@ -300,7 +300,7 @@ jobs:
           echo "${DWARFS_SHA256}  mkdwarfs" | sha256sum -c -
 
           # Cross-check against the sha256 digest GitHub records for the release
-          # asset (per @jesserockz). This is defense in depth on top of the
+          # asset. This is defense in depth on top of the
           # inline pin: it catches a stale pin after a version bump, while the
           # pin still guards against a compromised asset (the API would report
           # the bad asset's digest, so it can't replace the pin). Older releases
