@@ -390,4 +390,40 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn second_corruption_uses_numbered_backup() {
+        // A prior recovery already left a `settings.json.corrupt`. A second
+        // corruption must not clobber it (Unix `rename`) or fail to back up
+        // (Windows `rename`): the new backup lands at `.corrupt.1` and the
+        // original `.corrupt` is preserved.
+        let dir = unique_temp_dir("second_corrupt");
+        let path = dir.join("settings.json");
+
+        let first_backup = path.with_extension("json.corrupt");
+        let old_garbage = "first corruption";
+        fs::write(&first_backup, old_garbage).expect("write prior backup");
+
+        let new_garbage = "{ \"port\": 1234, \"backend\": ";
+        fs::write(&path, new_garbage).expect("write garbage");
+
+        let settings = load_settings_file(&path);
+
+        assert_eq!(settings.port, DEFAULT_PORT);
+        assert!(!path.exists(), "corrupt file should have been moved");
+        // Prior backup untouched.
+        assert_eq!(
+            fs::read_to_string(&first_backup).expect("read prior backup"),
+            old_garbage
+        );
+        // New backup lands at the numbered fallback with content preserved.
+        let numbered = first_backup.with_extension("corrupt.1");
+        assert!(numbered.exists(), "second backup should be numbered");
+        assert_eq!(
+            fs::read_to_string(&numbered).expect("read numbered backup"),
+            new_garbage
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
