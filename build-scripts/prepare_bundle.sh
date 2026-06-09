@@ -13,8 +13,8 @@
 
 set -e
 
-PYTHON_VERSION="3.13.12"
-PBS_VERSION="20260203"
+PYTHON_VERSION="3.13.13"
+PBS_VERSION="20260602"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
 # MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
@@ -65,55 +65,98 @@ detect_platform() {
     esac
 }
 
-# Resolve the published SHA-256 for a python-build-standalone asset from the
-# release's SHA256SUMS manifest. Verifying against the same release we download
-# from matches the trust model of pinning the URL and catches a corrupted,
-# truncated, or cache-poisoned tarball. The manifest is cached under $BUILD_DIR.
-pbs_expected_sha256() {
-    local filename="$1"
-    local sums_file="$BUILD_DIR/SHA256SUMS-${PBS_VERSION}"
-
-    if [[ ! -f "$sums_file" ]]; then
-        curl -fL --retry 3 -o "${sums_file}.partial" "${BASE_URL}/SHA256SUMS"
-        mv -f "${sums_file}.partial" "$sums_file"
+# Compute the SHA-256 of a file using whichever tool the platform provides
+# (Linux ships sha256sum, macOS ships shasum, and both are present under the
+# git-bash environment on Windows runners). Prints the bare hex digest.
+compute_sha256() {
+    local out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$1") || return 1
+        awk '{print $1}' <<<"$out"
+    elif command -v shasum >/dev/null 2>&1; then
+        out=$(shasum -a 256 "$1") || return 1
+        awk '{print $1}' <<<"$out"
+    else
+        echo "ERROR: no SHA-256 tool found (need sha256sum or shasum)" >&2
+        return 1
     fi
+}
 
-    local expected
-    expected=$(awk -v f="$filename" '$2 == f {print $1}' "$sums_file")
-    if [[ -z "$expected" ]]; then
-        echo "No SHA-256 entry for $filename in SHA256SUMS" >&2
+# Verify a file against an expected SHA-256, exiting on mismatch. Thin wrapper
+# over compute_sha256 used by the MinGit download, whose expected digest is a
+# pinned constant rather than a SHA256SUMS lookup.
+verify_sha256() {
+    local file="$1"
+    local expected="$2"
+    local actual
+    actual=$(compute_sha256 "$file") || exit 1
+    if [[ "$actual" != "$expected" ]]; then
+        echo "ERROR: checksum mismatch for $file" >&2
+        echo "  expected: $expected" >&2
+        echo "  actual:   $actual" >&2
         exit 1
     fi
-    echo "$expected"
+    echo "Verified SHA-256: $actual"
 }
 
 # Download the python-build-standalone tarball for the given platform and
-# extract it to $BUILD_DIR/python-${platform}. Downloads are cached under
-# $BUILD_DIR (which we own) so re-runs don't re-download, and verified against
-# the release's published SHA-256.
+# extract it to $BUILD_DIR/python-${platform}. Tarball downloads are cached
+# under $BUILD_DIR/cache (a path we own) so re-runs don't re-download.
+#
+# The interpreter is shipped verbatim to every user, so its integrity matters:
+# we verify the download against the release's SHA256SUMS manifest. The
+# previous version did no verification and reused any pre-existing /tmp file
+# unconditionally — so an interrupted curl (partial tarball), an HTTP error
+# page saved in place of the archive (curl lacked --fail), or a tampered cache
+# would all be extracted and bundled silently. We now (1) fetch the expected
+# digest, (2) re-verify cached files and re-download on mismatch, and (3)
+# download to a temp path promoted to the cache only after the digest checks
+# out, so a failed download never poisons the cache.
 download_and_extract_python() {
     local platform="$1"
     local filename="$2"
     local python_dir="$BUILD_DIR/python-${platform}"
     local url="${BASE_URL}/${filename}"
-    # Cache under $BUILD_DIR rather than the shared, world-writable /tmp so a
-    # stale file owned by another user can't collide.
-    local temp_file="$BUILD_DIR/${filename}"
+    local cache_dir="$BUILD_DIR/cache"
+    mkdir -p "$cache_dir"
+    local temp_file="$cache_dir/${filename}"
 
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
+
+    local sums
+    sums=$(curl -fsSL --retry 3 "${BASE_URL}/SHA256SUMS") || {
+        echo "ERROR: failed to fetch ${BASE_URL}/SHA256SUMS" >&2
+        exit 1
+    }
     local expected_sha
-    expected_sha=$(pbs_expected_sha256 "$filename")
-    if [[ -f "$temp_file" ]]; then
+    expected_sha=$(awk -v f="$filename" '$2 == f {print $1}' <<<"$sums")
+    if [[ -z "$expected_sha" ]]; then
+        echo "ERROR: no SHA256SUMS entry found for $filename" >&2
+        exit 1
+    fi
+
+    if [[ -f "$temp_file" ]] && [[ "$(compute_sha256 "$temp_file")" == "$expected_sha" ]]; then
         echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$expected_sha"
     else
-        # Atomic: download to .partial and promote to the cache path only once
-        # the checksum passes, so an interrupted or corrupt download never
-        # becomes a sticky, always-failing cache entry.
-        curl -fL --retry 3 -o "${temp_file}.partial" "$url"
-        verify_sha256 "${temp_file}.partial" "$expected_sha"
-        mv -f "${temp_file}.partial" "$temp_file"
+        [[ -f "$temp_file" ]] && echo "Cached file checksum mismatch — re-downloading"
+        local partial="${temp_file}.partial.$$"
+        if ! curl -fL --retry 3 -o "$partial" "$url"; then
+            rm -f "$partial"
+            echo "ERROR: failed to download $url" >&2
+            exit 1
+        fi
+        local actual_sha
+        actual_sha=$(compute_sha256 "$partial")
+        if [[ "$actual_sha" != "$expected_sha" ]]; then
+            rm -f "$partial"
+            echo "ERROR: checksum mismatch for $filename" >&2
+            echo "  expected: $expected_sha" >&2
+            echo "  actual:   $actual_sha" >&2
+            exit 1
+        fi
+        mv "$partial" "$temp_file"
+        echo "Verified SHA-256: $actual_sha"
     fi
 
     echo ""
@@ -121,32 +164,6 @@ download_and_extract_python() {
     rm -rf "$python_dir"
     mkdir -p "$python_dir"
     tar -xzf "$temp_file" -C "$python_dir" --strip-components=1
-}
-
-# Verify a file against an expected SHA-256, using whichever hashing tool the
-# runner provides (sha256sum on Linux / git-bash, shasum on macOS). Exits on
-# mismatch so a corrupted or tampered download can never make it into a bundle.
-verify_sha256() {
-    local file="$1"
-    local expected="$2"
-    local actual
-
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual=$(sha256sum "$file" | cut -d' ' -f1)
-    elif command -v shasum >/dev/null 2>&1; then
-        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
-    else
-        echo "No SHA-256 tool (sha256sum/shasum) available; cannot verify $file"
-        exit 1
-    fi
-
-    if [[ "$actual" != "$expected" ]]; then
-        echo "SHA-256 mismatch for $file"
-        echo "  expected: $expected"
-        echo "  actual:   $actual"
-        exit 1
-    fi
-    echo "SHA-256 OK: $file"
 }
 
 # Stage git into $GIT_BUNDLE_DIR (src-tauri/git), bundled as a Tauri resource.

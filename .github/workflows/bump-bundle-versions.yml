@@ -1,0 +1,70 @@
+name: Bump bundle versions
+
+# Nightly check for a newer pinned bundled Python in
+# build-scripts/prepare_bundle.sh and open a PR when one is available. The
+# Python interpreter (python-build-standalone) stays on its current minor and
+# only takes newer patches. The PR (not a direct push) runs the full Build +
+# lint/test CI so a human merges only after the platforms are green.
+
+on:
+  schedule:
+    # 06:00 UTC daily, after upstream nightly releases have settled.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump Python
+    runs-on: ubuntu-22.04
+    # Backstop the whole job well under the 6h default. The work is a couple of
+    # API calls plus a PR open; the per-request urlopen timeouts cover the
+    # network, this covers anything else that could wedge.
+    timeout-minutes: 20
+    # Authenticate as the ESPHome GitHub App using the org-level client id
+    # (variable) and private key (secret) shared across all workflows. The app
+    # token, rather than the default GITHUB_TOKEN, is what lets the opened PR
+    # trigger the Build + lint/test workflows.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Generate a token
+        id: generate-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Resolve and apply bump
+        id: bump
+        env:
+          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: python3 .github/scripts/bump_bundle_versions.py
+
+      - name: Create or update pull request
+        if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          branch: auto/bump-python
+          base: main
+          delete-branch: true
+          title: ${{ steps.bump.outputs.title }}
+          body: ${{ steps.bump.outputs.body }}
+          commit-message: ${{ steps.bump.outputs.title }}
