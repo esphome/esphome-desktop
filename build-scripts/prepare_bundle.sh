@@ -87,8 +87,13 @@ download_and_extract_python() {
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
 
+    local sums
+    sums=$(curl -fsSL "${BASE_URL}/SHA256SUMS") || {
+        echo "ERROR: failed to fetch ${BASE_URL}/SHA256SUMS" >&2
+        exit 1
+    }
     local expected_sha
-    expected_sha=$(curl -fsSL "${BASE_URL}/SHA256SUMS" | awk -v f="$filename" '$2 == f {print $1}')
+    expected_sha=$(awk -v f="$filename" '$2 == f {print $1}' <<<"$sums")
     if [[ -z "$expected_sha" ]]; then
         echo "ERROR: no SHA256SUMS entry found for $filename" >&2
         exit 1
@@ -99,7 +104,11 @@ download_and_extract_python() {
     else
         [[ -f "$temp_file" ]] && echo "Cached file missing or checksum mismatch — re-downloading"
         local partial="${temp_file}.partial.$$"
-        curl -fL --retry 3 -o "$partial" "$url"
+        if ! curl -fL --retry 3 -o "$partial" "$url"; then
+            rm -f "$partial"
+            echo "ERROR: failed to download $url" >&2
+            exit 1
+        fi
         local actual_sha
         actual_sha=$(compute_sha256 "$partial")
         if [[ "$actual_sha" != "$expected_sha" ]]; then
