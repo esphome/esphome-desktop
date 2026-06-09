@@ -138,7 +138,7 @@ jobs:
       # no prebuilt (e.g. aarch64 Linux).
       - name: Install cargo-binstall
         if: ${{ !matrix.tauri_rev }}
-        uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
+        uses: cargo-bins/cargo-binstall@30b5ca8b54e1dcffd9548bc87ede1531310fdc67 # v1.20.0
 
       # Version reaches the script only through env, never via ${{ }}
       # interpolation into the run block, so a crafted Cargo.lock cannot inject
@@ -240,11 +240,11 @@ jobs:
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
 
       - name: Build (macOS Release with signing)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: cargo tauri build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
+        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -282,10 +282,45 @@ jobs:
 
           # Download mkdwarfs (same version used by quick-sharun.sh). The
           # release asset name uses uname -m verbatim (x86_64 / aarch64).
+          # mkdwarfs repacks the AppImage shipped to every Linux user, so a
+          # tampered or truncated download would corrupt the published artifact.
+          # The dwarfs project publishes no SHA256SUMS asset, so pin the known
+          # hash per arch and verify before trusting the binary. --fail stops a
+          # saved HTTP error page; --retry rides out transient network blips.
           DWARFS_VERSION="0.14.1"
           DWARFS_ARCH=$(uname -m)
-          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
-          curl -L -o mkdwarfs "$DWARFS_URL"
+          case "$DWARFS_ARCH" in
+            x86_64)  DWARFS_SHA256="f3a117fd6d5b7304944b199af7fdb8086a48c509ea2e9832255d8f9a54c98587" ;;
+            aarch64) DWARFS_SHA256="3a47eda6d496ba12fb6d9af1b1914d4ba7ab73df8df3172ee3cad66c29822cc1" ;;
+            *) echo "::error::no pinned mkdwarfs SHA256 for arch '$DWARFS_ARCH'"; exit 1 ;;
+          esac
+          DWARFS_ASSET="dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
+          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/${DWARFS_ASSET}"
+          curl -fL --retry 3 --retry-delay 2 -o mkdwarfs "$DWARFS_URL"
+          echo "${DWARFS_SHA256}  mkdwarfs" | sha256sum -c -
+
+          # Cross-check against the sha256 digest GitHub records for the release
+          # asset. This is defense in depth on top of the
+          # inline pin: it catches a stale pin after a version bump, while the
+          # pin still guards against a compromised asset (the API would report
+          # the bad asset's digest, so it can't replace the pin). Older releases
+          # may predate GitHub's asset-digest feature, so a missing digest only
+          # warns rather than failing the build. The pin already verified the
+          # binary above, so a transient API failure must not red an
+          # already-correct build: --retry rides out blips and the trailing
+          # `|| true` degrades a hard failure to the no-digest warning branch.
+          API_DIGEST=$(curl -fsSL --retry 3 --retry-delay 2 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/mhx/dwarfs/releases/tags/v${DWARFS_VERSION}" \
+            | jq -r --arg name "$DWARFS_ASSET" \
+                '.assets[] | select(.name == $name) | .digest // empty' || true)
+          if [ -n "$API_DIGEST" ]; then
+            echo "${API_DIGEST#sha256:}  mkdwarfs" | sha256sum -c -
+            echo "Verified mkdwarfs against GitHub API digest: $API_DIGEST"
+          else
+            echo "::warning::GitHub API reported no digest for ${DWARFS_ASSET}; relying on pinned SHA256"
+          fi
           chmod +x mkdwarfs
 
           # Repack: create DwarFS image from the AppDir and combine with runtime

@@ -26,9 +26,15 @@ struct PyPIInfo {
     version: String,
 }
 
-/// A single release file entry from PyPI (we only need it to check existence)
+/// A single release file entry from PyPI. We only need to know whether the
+/// file has been yanked — PyPI keeps a version's key in `releases` even after
+/// every file is yanked or removed, so a lingering entry does not mean the
+/// version is actually installable.
 #[derive(Debug, Deserialize)]
-struct PyPIRelease {}
+struct PyPIRelease {
+    #[serde(default)]
+    yanked: bool,
+}
 
 /// Update checker
 pub struct UpdateChecker {
@@ -380,24 +386,36 @@ impl UpdateChecker {
 
         info!("Installing/upgrading esphome-device-builder ({})", backend);
 
-        let mut args: Vec<&str> = vec!["-m", "pip", "install", "--upgrade"];
-        if backend == Backend::BuilderBeta {
-            args.push("--pre");
-        }
-        args.push("esphome-device-builder");
-
-        let mut cmd = tokio::process::Command::new(&python_path);
-        cmd.args(&args);
-        platform::configure_no_window_tokio_command(&mut cmd);
-
-        let output = cmd.output().await.context("Failed to run pip install")?;
+        // Try a clean upgrade first (attempts a normal uninstall of the old
+        // copy). Only if pip aborts on a missing RECORD file (#155) do we retry
+        // with --ignore-installed, which skips the uninstall but orphans stale
+        // files — so we limit that trade-off to the broken-RECORD case.
+        let output = run_device_builder_install(&python_path, backend, false).await?;
 
         if output.status.success() {
             info!("esphome-device-builder installed/upgraded successfully");
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !is_missing_record_error(&stderr) {
+            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr);
+        }
+
+        info!(
+            "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed"
+        );
+        let retry = run_device_builder_install(&python_path, backend, true).await?;
+
+        if retry.status.success() {
+            info!("esphome-device-builder installed/upgraded successfully (--ignore-installed fallback)");
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr)
+            let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+            anyhow::bail!(
+                "pip install esphome-device-builder failed: {}",
+                retry_stderr
+            )
         }
     }
 
@@ -620,7 +638,7 @@ fn select_beta_target(releases: &HashMap<String, Vec<PyPIRelease>>, stable: &str
 fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
     let mut best: Option<String> = None;
 
-    for version_str in releases.keys() {
+    for (version_str, files) in releases {
         // Only consider versions with a beta suffix (e.g. "2025.4.0b1").
         // ESPHome beta releases always use bN naming.
         if !has_beta_suffix(version_str) {
@@ -633,6 +651,14 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
             .next()
             .is_some_and(|c| c.is_ascii_digit())
         {
+            continue;
+        }
+
+        // Skip versions with no installable files (fully yanked or files
+        // removed). PyPI keeps the version key with an empty/all-yanked
+        // file list; offering it would download nothing or install a
+        // pulled release.
+        if !has_active_files(files) {
             continue;
         }
 
@@ -663,13 +689,27 @@ fn has_beta_suffix(version: &str) -> bool {
     false
 }
 
+/// Whether a release has at least one installable (non-yanked) file.
+///
+/// A version present in PyPI's `releases` map is not necessarily installable:
+/// once every file is yanked or removed, the key lingers with an empty or
+/// all-yanked file list. Such a version must not be offered as an update
+/// target.
+fn has_active_files(files: &[PyPIRelease]) -> bool {
+    files.iter().any(|f| !f.yanked)
+}
+
 /// Find the highest version across all releases on PyPI, including
 /// pre-releases. Used for the "beta" device-builder channel where any
 /// pre-release counts (a/b/rc/dev), not just `bN` like ESPHome itself.
 fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
     let mut best: Option<String> = None;
-    for v in releases.keys() {
+    for (v, files) in releases {
         if !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        // Skip versions with no installable files (fully yanked or removed).
+        if !has_active_files(files) {
             continue;
         }
         match &best {
@@ -716,6 +756,57 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
         // detection failure (which would have errored out above).
         Ok(None)
     }
+}
+
+/// Build the `pip` argument list for installing/upgrading
+/// `esphome-device-builder`.
+///
+/// When `ignore_installed` is false this is a plain `pip install --upgrade`,
+/// which attempts a clean uninstall of the existing copy first — the correct
+/// path for normal installs. Pass `true` only as a fallback for the
+/// missing-RECORD case (issue #155).
+///
+/// `--ignore-installed`: the device-builder package ships inside the bundled
+/// standalone Python tree, and on some installs its `dist-info/RECORD` is
+/// missing. A plain `pip install --upgrade` then tries to uninstall the
+/// existing copy first and aborts with `error: uninstall-no-record-file`
+/// ("no RECORD file was found"). Retrying with `--ignore-installed` skips the
+/// uninstall step and installs the new version over the top, which is pip's own
+/// documented recovery for this state.
+///
+/// Accepted side effect: skipping the uninstall leaves files present in the old
+/// version but removed/renamed in the new one orphaned in site-packages. That
+/// is why this is a fallback, not the default — it limits the orphaned-files
+/// trade-off to the genuinely-broken RECORD case instead of every upgrade.
+fn device_builder_install_args(backend: Backend, ignore_installed: bool) -> Vec<&'static str> {
+    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--upgrade"];
+    if ignore_installed {
+        args.push("--ignore-installed");
+    }
+    if backend == Backend::BuilderBeta {
+        args.push("--pre");
+    }
+    args.push("esphome-device-builder");
+    args
+}
+
+/// Run `pip install` for `esphome-device-builder` with the given flags.
+async fn run_device_builder_install(
+    python_path: &std::path::Path,
+    backend: Backend,
+    ignore_installed: bool,
+) -> Result<std::process::Output> {
+    let args = device_builder_install_args(backend, ignore_installed);
+    let mut cmd = tokio::process::Command::new(python_path);
+    cmd.args(&args);
+    platform::configure_no_window_tokio_command(&mut cmd);
+    cmd.output().await.context("Failed to run pip install")
+}
+
+/// Detect pip's missing-RECORD abort, which is the failure that warrants the
+/// `--ignore-installed` retry (issue #155).
+fn is_missing_record_error(stderr: &str) -> bool {
+    stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
 /// Get the installed ESPHome version
@@ -818,6 +909,16 @@ pub(crate) fn is_newer_version(latest: &str, installed: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// One non-yanked file — a normally installable release.
+    fn active() -> Vec<PyPIRelease> {
+        vec![PyPIRelease { yanked: false }]
+    }
+
+    /// All files yanked — present on PyPI but not installable.
+    fn yanked() -> Vec<PyPIRelease> {
+        vec![PyPIRelease { yanked: true }]
+    }
+
     #[test]
     fn test_version_comparison() {
         assert!(is_newer_version("2024.2.0", "2024.1.0"));
@@ -867,6 +968,53 @@ mod tests {
     }
 
     #[test]
+    fn test_device_builder_install_args_default_no_ignore_installed() {
+        // The default (first-attempt) upgrade must NOT pass --ignore-installed,
+        // so normal installs still get a clean uninstall of the old copy.
+        for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
+            let args = device_builder_install_args(backend, false);
+            assert!(!args.contains(&"--ignore-installed"), "backend {backend:?}");
+            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
+            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+        }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_ignore_installed_fallback() {
+        // The fallback path adds --ignore-installed so a missing RECORD file in
+        // the bundled install can't abort the retry (issue #155).
+        for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
+            let args = device_builder_install_args(backend, true);
+            assert!(args.contains(&"--ignore-installed"), "backend {backend:?}");
+            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
+            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+        }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_pre_only_for_beta() {
+        for ignore_installed in [false, true] {
+            assert!(
+                device_builder_install_args(Backend::BuilderBeta, ignore_installed)
+                    .contains(&"--pre")
+            );
+            assert!(
+                !device_builder_install_args(Backend::BuilderStable, ignore_installed)
+                    .contains(&"--pre")
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_missing_record_error() {
+        assert!(is_missing_record_error("error: uninstall-no-record-file"));
+        assert!(is_missing_record_error(
+            "Cannot uninstall esphome-device-builder ...: no RECORD file was found"
+        ));
+        assert!(!is_missing_record_error("some other pip failure"));
+    }
+
+    #[test]
     fn test_has_beta_suffix() {
         assert!(has_beta_suffix("2025.4.0b1"));
         assert!(has_beta_suffix("2025.4.0b12"));
@@ -879,10 +1027,10 @@ mod tests {
     #[test]
     fn test_find_latest_beta() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0b1".to_string(), vec![]);
-        releases.insert("2025.4.0b2".to_string(), vec![]);
-        releases.insert("2025.3.0b1".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), active());
+        releases.insert("2025.3.0b1".to_string(), active());
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, Some("2025.4.0b2".to_string()));
@@ -891,19 +1039,54 @@ mod tests {
     #[test]
     fn test_find_latest_beta_none() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, None);
     }
 
     #[test]
+    fn test_find_latest_beta_skips_yanked() {
+        // The newest beta on PyPI was yanked — fall back to the next
+        // installable beta rather than offering the pulled release.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), yanked());
+
+        let latest = find_latest_beta(&releases);
+        assert_eq!(latest, Some("2025.4.0b1".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_beta_skips_empty_file_list() {
+        // A version key with no files (all removed from PyPI) is not
+        // installable and must be ignored.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), vec![]);
+
+        let latest = find_latest_beta(&releases);
+        assert_eq!(latest, Some("2025.4.0b1".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_any_skips_yanked() {
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), yanked());
+
+        // The only newer candidate is yanked, so the highest installable
+        // version wins.
+        assert_eq!(find_latest_any(&releases), Some("2025.4.0".to_string()));
+    }
+
+    #[test]
     fn test_select_beta_target_prefers_newer_beta() {
         // A beta for the next release exists and is newer than stable.
         let mut releases = HashMap::new();
-        releases.insert("2025.4.0".to_string(), vec![]);
-        releases.insert("2025.5.0b1".to_string(), vec![]);
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), active());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
@@ -917,9 +1100,23 @@ mod tests {
         // pre-release that led to the current stable. Offering it would
         // downgrade a beta-channel user — fall back to stable instead.
         let mut releases = HashMap::new();
-        releases.insert("2025.4.0b1".to_string(), vec![]);
-        releases.insert("2025.4.0b2".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
+
+        assert_eq!(
+            select_beta_target(&releases, "2025.4.0"),
+            "2025.4.0".to_string()
+        );
+    }
+
+    #[test]
+    fn test_select_beta_target_falls_back_when_newest_beta_yanked() {
+        // The next-cycle beta exists but was yanked: don't offer it, fall
+        // back to the current stable instead of an uninstallable release.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), yanked());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
@@ -930,8 +1127,8 @@ mod tests {
     #[test]
     fn test_select_beta_target_no_beta_uses_stable() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
