@@ -12,15 +12,28 @@
 #
 # The failure is transient, so re-running almost always succeeds. The Rust
 # compile is cached (Swatinem/rust-cache), so a retry only re-runs the bundle
-# step. Between attempts we scrub any scratch volume/image a wedged attempt
-# left behind so it can't keep the device busy on the next try.
+# step. We retry only when the failure looks like the DMG/hdiutil flake and
+# fail fast on anything else (a compile, config, or signing error is
+# deterministic and should surface immediately), and between attempts we scrub
+# any scratch volume/image a wedged attempt left behind so it can't keep the
+# device busy on the next try.
 #
-# Usage: ./macos_build_retry.sh [args passed through to `cargo tauri build`]
+# Usage: ./build-scripts/macos_build_retry.sh [args for `cargo tauri build`]
+# Paths are derived from the script location, so the working directory does
+# not matter.
 
 set -euo pipefail
 
 ATTEMPTS=3
-TARGET_DIR="$PWD/src-tauri/target"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_DIR="$REPO_ROOT/src-tauri/target"
+
+# `cargo tauri build` resolves src-tauri relative to the working directory.
+cd "$REPO_ROOT"
+
+build_log="$(mktemp -t macos_build_retry)"
+trap 'rm -f "$build_log"' EXIT
 
 # Detach any scratch disk images that a failed attempt left mounted. create-dmg
 # names them rw.<pid>.<dmg> under the bundle/dmg directory, so we match on this
@@ -42,19 +55,26 @@ detach_orphaned_images() {
 
 for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   status=0
-  cargo tauri build "$@" || status=$?
+  cargo tauri build "$@" 2>&1 | tee "$build_log" || status="${PIPESTATUS[0]}"
   if (( status == 0 )); then
     exit 0
   fi
 
-  if (( attempt == ATTEMPTS )); then
-    echo "cargo tauri build failed after ${ATTEMPTS} attempts (exit ${status})" >&2
+  # Only the DMG bundling stage flakes. Anything else is deterministic, so fail
+  # fast instead of paying the build cost two more times.
+  if ! grep -qiE 'bundle_dmg|hdiutil|resource busy|failed to bundle' "$build_log"; then
+    echo "cargo tauri build failed with a non-DMG error; not retrying (exit ${status})" >&2
     exit "$status"
   fi
 
-  echo "::warning::cargo tauri build failed (attempt ${attempt}/${ATTEMPTS}); cleaning up stale disk images and retrying" >&2
+  if (( attempt == ATTEMPTS )); then
+    echo "DMG bundling failed after ${ATTEMPTS} attempts (exit ${status})" >&2
+    exit "$status"
+  fi
+
+  echo "::warning::DMG bundling failed (attempt ${attempt}/${ATTEMPTS}); cleaning up stale disk images and retrying" >&2
   detach_orphaned_images
-  find src-tauri/target -type f -name 'rw.*.dmg' -delete 2>/dev/null || true
+  find "$TARGET_DIR" -type f -name 'rw.*.dmg' -delete 2>/dev/null || true
   # Give the indexer a moment to release any remaining handles.
   sleep 5
 done
