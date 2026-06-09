@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tracing::{debug, info, warn};
@@ -179,18 +180,23 @@ impl Settings {
 /// Does not populate `installed_version`; that requires an `AppHandle` and is
 /// filled in by the caller.
 fn load_settings_file(path: &Path) -> Settings {
-    if !path.exists() {
-        info!("No settings file found, using defaults");
-        return Settings::default();
-    }
-
+    // Branch on the read result rather than pre-checking `exists()`:
+    // `Path::exists()` returns `false` for any stat failure (e.g. a permission
+    // error), which would misclassify an unreadable file as first-run and skip
+    // the backup path. `NotFound` is the only genuine first-run case; every
+    // other read error is treated as a corrupt/unreadable file.
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            info!("No settings file found, using defaults");
+            return Settings::default();
+        }
         Err(e) => {
             warn!(
-                "Failed to read settings file {:?} ({}); using defaults",
+                "Settings file {:?} is unreadable ({}); backing it up and using defaults",
                 path, e
             );
+            back_up_corrupt_settings(path);
             return Settings::default();
         }
     };
@@ -216,11 +222,33 @@ fn load_settings_file(path: &Path) -> Settings {
 ///
 /// Best-effort: if the rename fails we just log and proceed with defaults, and
 /// the bad file will be overwritten on the next successful save.
+///
+/// If `<name>.corrupt` already exists from a prior recovery, a numbered suffix
+/// (`<name>.corrupt.1`, `.2`, ...) is chosen so an earlier backup is not lost
+/// (Unix `rename` overwrites) or the rename made to fail (Windows `rename`
+/// errors on an existing destination).
 fn back_up_corrupt_settings(path: &Path) {
-    let backup = path.with_extension("json.corrupt");
+    let backup = unique_backup_path(path);
     match std::fs::rename(path, &backup) {
         Ok(()) => warn!("Moved corrupt settings file to {:?}", backup),
         Err(e) => warn!("Failed to back up corrupt settings file {:?}: {}", path, e),
+    }
+}
+
+/// Pick a backup path that does not already exist, starting at `<name>.corrupt`
+/// and falling back to `<name>.corrupt.N` for the first free `N`.
+fn unique_backup_path(path: &Path) -> PathBuf {
+    let base = path.with_extension("json.corrupt");
+    if !base.exists() {
+        return base;
+    }
+    let mut n = 1u32;
+    loop {
+        let candidate = base.with_extension(format!("corrupt.{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
