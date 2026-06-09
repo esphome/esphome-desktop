@@ -294,9 +294,30 @@ jobs:
             aarch64) DWARFS_SHA256="3a47eda6d496ba12fb6d9af1b1914d4ba7ab73df8df3172ee3cad66c29822cc1" ;;
             *) echo "::error::no pinned mkdwarfs SHA256 for arch '$DWARFS_ARCH'"; exit 1 ;;
           esac
-          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
+          DWARFS_ASSET="dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
+          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/${DWARFS_ASSET}"
           curl -fL --retry 3 --retry-delay 2 -o mkdwarfs "$DWARFS_URL"
           echo "${DWARFS_SHA256}  mkdwarfs" | sha256sum -c -
+
+          # Cross-check against the sha256 digest GitHub records for the release
+          # asset (per @jesserockz). This is defense in depth on top of the
+          # inline pin: it catches a stale pin after a version bump, while the
+          # pin still guards against a compromised asset (the API would report
+          # the bad asset's digest, so it can't replace the pin). Older releases
+          # may predate GitHub's asset-digest feature, so a missing digest only
+          # warns rather than failing the build.
+          API_DIGEST=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/mhx/dwarfs/releases/tags/v${DWARFS_VERSION}" \
+            | jq -r --arg name "$DWARFS_ASSET" \
+                '.assets[] | select(.name == $name) | .digest // empty')
+          if [ -n "$API_DIGEST" ]; then
+            echo "${API_DIGEST#sha256:}  mkdwarfs" | sha256sum -c -
+            echo "Verified mkdwarfs against GitHub API digest: $API_DIGEST"
+          else
+            echo "::warning::GitHub API reported no digest for ${DWARFS_ASSET}; relying on pinned SHA256"
+          fi
           chmod +x mkdwarfs
 
           # Repack: create DwarFS image from the AppDir and combine with runtime
