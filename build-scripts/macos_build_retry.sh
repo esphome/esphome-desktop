@@ -10,6 +10,9 @@
 # repo embeds a large Python bundle into the .app, so the image is big and the
 # busy window is long, which widens the flake.
 #
+# Upstream: tauri-apps/tauri#14686 (detach attempts not configurable) and
+# tauri-apps/tauri#3055 (bundle_dmg.sh "failed to bundle project").
+#
 # The failure is transient, so re-running almost always succeeds. The Rust
 # compile is cached (Swatinem/rust-cache), so a retry only re-runs the bundle
 # step. We retry only when the failure looks like the DMG/hdiutil flake and
