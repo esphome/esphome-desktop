@@ -60,13 +60,13 @@ jobs:
           workspaces: src-tauri
           key: lint-test
 
-      # `tauri.conf.json` lists `python` as a bundle resource. That directory is
-      # gitignored and absent on a fresh checkout (it's populated by
-      # prepare_bundle.sh only for real bundling). A plain `cargo test`/`clippy`
-      # never bundles, but create an empty stub so config parsing can't trip on
-      # the missing path.
-      - name: Stub bundle resource dir
-        run: mkdir -p src-tauri/python
+      # `tauri.conf.json` lists `python` and `git` as bundle resources. Those
+      # directories are gitignored and absent on a fresh checkout (they're
+      # populated by prepare_bundle.sh only for real bundling). A plain
+      # `cargo test`/`clippy` never bundles, but create empty stubs so config
+      # parsing can't trip on the missing paths.
+      - name: Stub bundle resource dirs
+        run: mkdir -p src-tauri/python src-tauri/git
 
       # Required gates. clippy and rustfmt were introduced as advisory in the
       # first iteration of this workflow because they had never run in CI and the
