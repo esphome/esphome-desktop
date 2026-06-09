@@ -137,21 +137,39 @@ prepare_git_for_platform() {
         return
     fi
 
-    local temp_file="/tmp/${MINGIT_FILENAME}"
+    # Cache under $BUILD_DIR (which we own and created) rather than the shared,
+    # world-writable /tmp so a stale file owned by another user can't collide.
+    local temp_file="$BUILD_DIR/${MINGIT_FILENAME}"
 
     echo ""
     echo "=== Downloading MinGit ${MINGIT_VERSION} ==="
-    if [[ ! -f "$temp_file" ]]; then
-        curl -L -o "$temp_file" "$MINGIT_URL"
-    else
+    if [[ -f "$temp_file" ]]; then
         echo "Using cached download: $temp_file"
+        verify_sha256 "$temp_file" "$MINGIT_SHA256"
+    else
+        # `--fail` so an HTTP error is a non-zero exit (not a 200-status error
+        # body written to disk) and `--retry` to ride out transient blips.
+        # Download to a .partial and only rename onto the cache path once the
+        # checksum passes, so an interrupted or corrupt download never becomes a
+        # sticky, always-failing cache entry (the fixed-path cache trap from
+        # #152/#153).
+        curl -fL --retry 3 -o "${temp_file}.partial" "$MINGIT_URL"
+        verify_sha256 "${temp_file}.partial" "$MINGIT_SHA256"
+        mv -f "${temp_file}.partial" "$temp_file"
     fi
-
-    verify_sha256 "$temp_file" "$MINGIT_SHA256"
 
     echo ""
     echo "=== Extracting MinGit into ${GIT_BUNDLE_DIR} ==="
-    unzip -q -o "$temp_file" -d "$GIT_BUNDLE_DIR"
+    # Extract with the standalone Python we just unpacked rather than `unzip`,
+    # which is not shipped with Git for Windows / git-bash and so is exactly the
+    # tool most likely to be missing on the only runner this path runs on.
+    # `python -m zipfile` is stdlib and guaranteed present here.
+    local python_exe="$BUILD_DIR/python-${platform}/python.exe"
+    if [[ ! -f "$python_exe" ]]; then
+        echo "Bundled Python not found at $python_exe; cannot extract MinGit"
+        exit 1
+    fi
+    "$python_exe" -m zipfile -e "$temp_file" "$GIT_BUNDLE_DIR"
 }
 
 # Rewrite pip-generated script shebangs so the bundle is relocatable.
