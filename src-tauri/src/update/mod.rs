@@ -26,9 +26,15 @@ struct PyPIInfo {
     version: String,
 }
 
-/// A single release file entry from PyPI (we only need it to check existence)
+/// A single release file entry from PyPI. We only need to know whether the
+/// file has been yanked — PyPI keeps a version's key in `releases` even after
+/// every file is yanked or removed, so a lingering entry does not mean the
+/// version is actually installable.
 #[derive(Debug, Deserialize)]
-struct PyPIRelease {}
+struct PyPIRelease {
+    #[serde(default)]
+    yanked: bool,
+}
 
 /// Update checker
 pub struct UpdateChecker {
@@ -620,7 +626,7 @@ fn select_beta_target(releases: &HashMap<String, Vec<PyPIRelease>>, stable: &str
 fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
     let mut best: Option<String> = None;
 
-    for version_str in releases.keys() {
+    for (version_str, files) in releases {
         // Only consider versions with a beta suffix (e.g. "2025.4.0b1").
         // ESPHome beta releases always use bN naming.
         if !has_beta_suffix(version_str) {
@@ -633,6 +639,14 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
             .next()
             .is_some_and(|c| c.is_ascii_digit())
         {
+            continue;
+        }
+
+        // Skip versions with no installable files (fully yanked or files
+        // removed). PyPI keeps the version key with an empty/all-yanked
+        // file list; offering it would download nothing or install a
+        // pulled release.
+        if !has_active_files(files) {
             continue;
         }
 
@@ -663,13 +677,27 @@ fn has_beta_suffix(version: &str) -> bool {
     false
 }
 
+/// Whether a release has at least one installable (non-yanked) file.
+///
+/// A version present in PyPI's `releases` map is not necessarily installable:
+/// once every file is yanked or removed, the key lingers with an empty or
+/// all-yanked file list. Such a version must not be offered as an update
+/// target.
+fn has_active_files(files: &[PyPIRelease]) -> bool {
+    files.iter().any(|f| !f.yanked)
+}
+
 /// Find the highest version across all releases on PyPI, including
 /// pre-releases. Used for the "beta" device-builder channel where any
 /// pre-release counts (a/b/rc/dev), not just `bN` like ESPHome itself.
 fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
     let mut best: Option<String> = None;
-    for v in releases.keys() {
+    for (v, files) in releases {
         if !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        // Skip versions with no installable files (fully yanked or removed).
+        if !has_active_files(files) {
             continue;
         }
         match &best {
@@ -818,6 +846,16 @@ pub(crate) fn is_newer_version(latest: &str, installed: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// One non-yanked file — a normally installable release.
+    fn active() -> Vec<PyPIRelease> {
+        vec![PyPIRelease { yanked: false }]
+    }
+
+    /// All files yanked — present on PyPI but not installable.
+    fn yanked() -> Vec<PyPIRelease> {
+        vec![PyPIRelease { yanked: true }]
+    }
+
     #[test]
     fn test_version_comparison() {
         assert!(is_newer_version("2024.2.0", "2024.1.0"));
@@ -879,10 +917,10 @@ mod tests {
     #[test]
     fn test_find_latest_beta() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0b1".to_string(), vec![]);
-        releases.insert("2025.4.0b2".to_string(), vec![]);
-        releases.insert("2025.3.0b1".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), active());
+        releases.insert("2025.3.0b1".to_string(), active());
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, Some("2025.4.0b2".to_string()));
@@ -891,19 +929,54 @@ mod tests {
     #[test]
     fn test_find_latest_beta_none() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, None);
     }
 
     #[test]
+    fn test_find_latest_beta_skips_yanked() {
+        // The newest beta on PyPI was yanked — fall back to the next
+        // installable beta rather than offering the pulled release.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), yanked());
+
+        let latest = find_latest_beta(&releases);
+        assert_eq!(latest, Some("2025.4.0b1".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_beta_skips_empty_file_list() {
+        // A version key with no files (all removed from PyPI) is not
+        // installable and must be ignored.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), vec![]);
+
+        let latest = find_latest_beta(&releases);
+        assert_eq!(latest, Some("2025.4.0b1".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_any_skips_yanked() {
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), yanked());
+
+        // The only newer candidate is yanked, so the highest installable
+        // version wins.
+        assert_eq!(find_latest_any(&releases), Some("2025.4.0".to_string()));
+    }
+
+    #[test]
     fn test_select_beta_target_prefers_newer_beta() {
         // A beta for the next release exists and is newer than stable.
         let mut releases = HashMap::new();
-        releases.insert("2025.4.0".to_string(), vec![]);
-        releases.insert("2025.5.0b1".to_string(), vec![]);
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), active());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
@@ -917,9 +990,23 @@ mod tests {
         // pre-release that led to the current stable. Offering it would
         // downgrade a beta-channel user — fall back to stable instead.
         let mut releases = HashMap::new();
-        releases.insert("2025.4.0b1".to_string(), vec![]);
-        releases.insert("2025.4.0b2".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.4.0b1".to_string(), active());
+        releases.insert("2025.4.0b2".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
+
+        assert_eq!(
+            select_beta_target(&releases, "2025.4.0"),
+            "2025.4.0".to_string()
+        );
+    }
+
+    #[test]
+    fn test_select_beta_target_falls_back_when_newest_beta_yanked() {
+        // The next-cycle beta exists but was yanked: don't offer it, fall
+        // back to the current stable instead of an uninstallable release.
+        let mut releases = HashMap::new();
+        releases.insert("2025.4.0".to_string(), active());
+        releases.insert("2025.5.0b1".to_string(), yanked());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
@@ -930,8 +1017,8 @@ mod tests {
     #[test]
     fn test_select_beta_target_no_beta_uses_stable() {
         let mut releases = HashMap::new();
-        releases.insert("2025.3.0".to_string(), vec![]);
-        releases.insert("2025.4.0".to_string(), vec![]);
+        releases.insert("2025.3.0".to_string(), active());
+        releases.insert("2025.4.0".to_string(), active());
 
         assert_eq!(
             select_beta_target(&releases, "2025.4.0"),
