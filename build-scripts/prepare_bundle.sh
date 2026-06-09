@@ -69,7 +69,7 @@ compute_sha256() {
 
 # Download the python-build-standalone tarball for the given platform and
 # extract it to $BUILD_DIR/python-${platform}. Tarball downloads are cached
-# in /tmp so re-runs don't re-download.
+# under $BUILD_DIR/cache (a path we own) so re-runs don't re-download.
 #
 # The interpreter is shipped verbatim to every user, so its integrity matters:
 # we verify the download against the release's SHA256SUMS manifest. The
@@ -85,7 +85,9 @@ download_and_extract_python() {
     local filename="$2"
     local python_dir="$BUILD_DIR/python-${platform}"
     local url="${BASE_URL}/${filename}"
-    local temp_file="/tmp/${filename}"
+    local cache_dir="$BUILD_DIR/cache"
+    mkdir -p "$cache_dir"
+    local temp_file="$cache_dir/${filename}"
 
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
