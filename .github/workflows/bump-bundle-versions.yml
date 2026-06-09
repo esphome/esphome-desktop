@@ -70,7 +70,6 @@ jobs:
           branch: auto/bump-${{ matrix.dependency }}
           base: main
           delete-branch: true
-          sign-commits: true
           title: ${{ steps.bump.outputs.title }}
           body: ${{ steps.bump.outputs.body }}
           commit-message: ${{ steps.bump.outputs.title }}
