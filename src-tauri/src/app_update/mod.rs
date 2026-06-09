@@ -249,3 +249,75 @@ fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn includes_both_versions() {
+        let prompt = format_update_prompt("1.2.3", "1.3.0", "");
+        assert!(prompt.contains("1.2.3"), "current version missing");
+        assert!(prompt.contains("1.3.0"), "new version missing");
+    }
+
+    #[test]
+    fn empty_notes_omits_release_notes_section() {
+        let prompt = format_update_prompt("1.0.0", "2.0.0", "");
+        assert!(!prompt.contains("Release notes:"), "empty notes: no header");
+    }
+
+    #[test]
+    fn whitespace_only_notes_treated_as_empty() {
+        // The notes are trimmed first, so a blank-but-non-empty body must take
+        // the same path as truly empty notes — otherwise the dialog would show
+        // an empty "Release notes:" section.
+        let prompt = format_update_prompt("1.0.0", "2.0.0", "   \n\t  ");
+        assert!(!prompt.contains("Release notes:"));
+    }
+
+    #[test]
+    fn includes_notes_when_present() {
+        let prompt = format_update_prompt("1.0.0", "2.0.0", "Fixed a crash on startup");
+        assert!(prompt.contains("Release notes:"));
+        assert!(prompt.contains("Fixed a crash on startup"));
+    }
+
+    #[test]
+    fn short_notes_are_not_elided() {
+        let prompt = format_update_prompt("1.0.0", "2.0.0", "short note");
+        assert!(!prompt.contains('…'), "short notes elided");
+    }
+
+    #[test]
+    fn notes_exactly_at_limit_are_not_elided() {
+        // 800 chars is the boundary: `chars().count() > 800` is false, so the
+        // full body is shown without an ellipsis.
+        let notes = "a".repeat(800);
+        let prompt = format_update_prompt("1.0.0", "2.0.0", &notes);
+        assert!(!prompt.contains('…'), "800 chars elided");
+        assert!(prompt.contains(&notes));
+    }
+
+    #[test]
+    fn over_limit_notes_are_truncated_with_ellipsis() {
+        // 801 chars trips the elision branch; only the first 800 are kept.
+        let notes = "b".repeat(801);
+        let prompt = format_update_prompt("1.0.0", "2.0.0", &notes);
+        assert!(prompt.contains('…'), "over-limit not elided");
+        assert!(!prompt.contains(&notes), "full body embedded");
+        assert!(prompt.contains(&"b".repeat(800)), "first 800 dropped");
+    }
+
+    #[test]
+    fn truncation_respects_char_boundaries_for_multibyte_notes() {
+        // `chars().take(800)` counts Unicode scalar values, not bytes — a
+        // body of 801 multi-byte chars must truncate to 800 chars without
+        // panicking on a mid-codepoint split.
+        let notes = "€".repeat(801);
+        let prompt = format_update_prompt("1.0.0", "2.0.0", &notes);
+        assert!(prompt.contains('…'));
+        assert!(prompt.contains(&"€".repeat(800)));
+        assert!(!prompt.contains(&"€".repeat(801)));
+    }
+}
