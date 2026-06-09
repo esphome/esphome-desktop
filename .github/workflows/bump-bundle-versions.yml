@@ -23,11 +23,10 @@ jobs:
   bump:
     name: Bump ${{ matrix.dependency }}
     runs-on: ubuntu-22.04
-    # The GitHub App credentials live in the release-drafter environment (its
-    # protection is a branch policy that this main-branch schedule satisfies).
-    # The app token, rather than the default GITHUB_TOKEN, is what lets the
-    # opened PR trigger the Build + lint/test workflows.
-    environment: release-drafter
+    # The GitHub App credentials live in the depupdates environment. The app
+    # token, rather than the default GITHUB_TOKEN, is what lets the opened PR
+    # trigger the Build + lint/test workflows.
+    environment: depupdates
     permissions:
       contents: read
     strategy:
