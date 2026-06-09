@@ -19,6 +19,8 @@ pnpm-debug.log*
 
 # Python bundles (downloaded by build scripts)
 src-tauri/python/
+# Bundled MinGit on Windows (downloaded by build scripts)
+src-tauri/git/
 resources/
 
 # Python
