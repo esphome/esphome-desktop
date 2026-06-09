@@ -215,8 +215,8 @@ dashboard in your browser, and update notifications say so instead of pointing a
 a tray menu that isn't there.
 
 If the tray still doesn't appear, install the **deb/rpm/AUR** package for your
-distribution — it depends on the system `libayatana-appindicator3` package and
-always has a working tray and in-app updater.
+distribution — it depends on the system `libayatana-appindicator3` package, so
+the tray and in-app updater work wherever a StatusNotifier host is present.
 
 ## License
 

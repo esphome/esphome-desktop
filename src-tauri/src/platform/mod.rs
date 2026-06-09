@@ -1049,12 +1049,15 @@ mod linux {
         paths
     }
 
-    /// Locate a bundled appindicator library inside an AppImage's `APPDIR`,
-    /// returning the first existing candidate path.
-    fn find_bundled_appindicator(appdir: &Path) -> Option<PathBuf> {
+    /// Locate every bundled appindicator library that exists inside an
+    /// AppImage's `APPDIR`, in candidate-priority order. The caller attempts
+    /// each in turn so a first match that fails to load (wrong arch, broken
+    /// symlink, missing transitive dep) does not mask a later one that loads.
+    fn find_bundled_appindicators(appdir: &Path) -> Vec<PathBuf> {
         appindicator_candidate_paths(appdir)
             .into_iter()
-            .find(|p| p.exists())
+            .filter(|p| p.exists())
+            .collect()
     }
 
     /// Check if a usable appindicator library is available on this system.
@@ -1087,10 +1090,16 @@ mod linux {
         //    its `DT_SONAME`, so priming it here makes `libappindicator-sys`'s
         //    later bare-soname `dlopen` succeed instead of panicking. We
         //    deliberately leak the handle (`mem::forget`) so the library stays
-        //    resident for the lifetime of the process.
+        //    resident for the lifetime of the process. We try every existing
+        //    candidate so a first match that fails to load does not mask a
+        //    later one that would have loaded successfully.
         if let Ok(appdir) = std::env::var("APPDIR") {
-            match find_bundled_appindicator(Path::new(&appdir)) {
-                Some(lib_path) => match unsafe { libloading::Library::new(&lib_path) } {
+            let candidates = find_bundled_appindicators(Path::new(&appdir));
+            if candidates.is_empty() {
+                debug!("APPDIR set but no bundled appindicator library found");
+            }
+            for lib_path in candidates {
+                match unsafe { libloading::Library::new(&lib_path) } {
                     Ok(lib) => {
                         info!("Loaded bundled appindicator from {:?}", lib_path);
                         std::mem::forget(lib);
@@ -1102,8 +1111,7 @@ mod linux {
                             lib_path, e
                         );
                     }
-                },
-                None => debug!("APPDIR set but no bundled appindicator library found"),
+                }
             }
         }
 
@@ -1150,24 +1158,50 @@ mod linux {
         }
 
         #[test]
-        fn find_bundled_appindicator_locates_existing_library() {
+        fn find_bundled_appindicators_locates_existing_library() {
             let appdir = unique_temp_dir("found");
             let lib_dir = appdir.join("shared/lib");
             fs::create_dir_all(&lib_dir).unwrap();
             let lib = lib_dir.join("libayatana-appindicator3.so.1");
             fs::write(&lib, b"\x7fELF").unwrap();
 
-            assert_eq!(find_bundled_appindicator(&appdir), Some(lib));
+            assert_eq!(find_bundled_appindicators(&appdir), vec![lib]);
 
             let _ = fs::remove_dir_all(&appdir);
         }
 
         #[test]
-        fn find_bundled_appindicator_returns_none_when_absent() {
+        fn find_bundled_appindicators_returns_all_existing_in_priority_order() {
+            let appdir = unique_temp_dir("multi");
+            let shared = appdir.join("shared/lib");
+            let usr = appdir.join("usr/lib");
+            fs::create_dir_all(&shared).unwrap();
+            fs::create_dir_all(&usr).unwrap();
+            // A lower-priority soname in shared/lib and the preferred soname in
+            // a lower-priority dir, to exercise candidate ordering.
+            let shared_legacy = shared.join("libappindicator3.so.1");
+            let usr_ayatana = usr.join("libayatana-appindicator3.so.1");
+            fs::write(&shared_legacy, b"\x7fELF").unwrap();
+            fs::write(&usr_ayatana, b"\x7fELF").unwrap();
+
+            let found = find_bundled_appindicators(&appdir);
+            assert!(found.contains(&shared_legacy));
+            assert!(found.contains(&usr_ayatana));
+            // shared/lib precedes usr/lib in APPDIR_LIB_DIRS.
+            assert!(
+                found.iter().position(|p| p == &shared_legacy)
+                    < found.iter().position(|p| p == &usr_ayatana)
+            );
+
+            let _ = fs::remove_dir_all(&appdir);
+        }
+
+        #[test]
+        fn find_bundled_appindicators_returns_empty_when_absent() {
             let appdir = unique_temp_dir("absent");
             fs::create_dir_all(&appdir).unwrap();
 
-            assert_eq!(find_bundled_appindicator(&appdir), None);
+            assert!(find_bundled_appindicators(&appdir).is_empty());
 
             let _ = fs::remove_dir_all(&appdir);
         }
