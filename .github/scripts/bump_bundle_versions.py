@@ -15,8 +15,11 @@ Policy:
   * mingit  tracks git-for-windows. Takes the latest release's MinGit 64-bit
             zip and repins MINGIT_VERSION + MINGIT_SHA256.
 
-If a dependency's variables aren't present in prepare_bundle.sh yet (e.g. the
-MinGit support hasn't merged), the run is a quiet no-op rather than an error.
+The script fails loudly (non-zero exit) if a dependency's expected variables
+aren't found in prepare_bundle.sh, or if the latest upstream release can't be
+resolved — both mean a broken assumption, and a silent no-op would let the
+bundled dependency drift and ship a stale, vulnerable version unnoticed. The
+only routine no-op is "already up to date".
 
 The version-rewriting transforms are pure and unit-tested
 (tests/test_bump_bundle_versions.py); the network resolution lives in the
@@ -72,6 +75,11 @@ GIT_FOR_WINDOWS_TAG_RE = re.compile(r"v(?P<version>\d+\.\d+\.\d+)\.windows\.\d+"
 def _warn(msg: str) -> None:
     """Emit a GitHub-Actions-style warning to stderr (also readable locally)."""
     print(f"::warning::{msg}", file=sys.stderr)
+
+
+def _error(msg: str) -> None:
+    """Emit a GitHub-Actions-style error to stderr (also readable locally)."""
+    print(f"::error::{msg}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -329,20 +337,27 @@ def main(argv: list[str] | None = None) -> int:
         required = ("MINGIT_VERSION", "MINGIT_SHA256")
         name = "MinGit"
 
+    # These variables are expected to exist (the MinGit + Python pins are both
+    # on main). A missing one means prepare_bundle.sh was renamed/restructured
+    # and this script needs updating, so fail loudly rather than silently
+    # reporting "nothing to bump" — a quiet no-op would let the bundled
+    # dependency drift and could ship a stale, vulnerable version unnoticed.
     missing = [var for var in required if not has_assignment(text, var)]
     if missing:
-        _warn(
-            f"{', '.join(missing)} not present in {path.name}; "
-            f"skipping {args.dependency} bump"
+        _error(
+            f"{', '.join(missing)} not found in {path.name}; "
+            f"the {args.dependency} bump script needs updating"
         )
-        _emit_outputs(changed="false")
-        return 0
+        return 1
 
     if args.dependency == "python":
         latest = resolve_latest_python(current_python_minor(text))
         if latest is None:
-            _emit_outputs(changed="false")
-            return 0
+            # The pinned minor has no build in the latest release (resolver
+            # already logged why). That's a broken assumption, not a routine
+            # skip, so fail rather than silently never bumping.
+            _error("could not resolve the latest Python for the pinned minor")
+            return 1
         pbs_version, python_version = latest
         result = apply_bumps(
             text, {"PYTHON_VERSION": python_version, "PBS_VERSION": pbs_version}
@@ -356,8 +371,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         latest = resolve_latest_mingit()
         if latest is None:
-            _emit_outputs(changed="false")
-            return 0
+            # The expected MinGit asset/tag is missing (resolver already logged
+            # why). Fail rather than silently never bumping.
+            _error("could not resolve the latest MinGit release")
+            return 1
         version, sha256 = latest
         result = apply_bumps(
             text, {"MINGIT_VERSION": version, "MINGIT_SHA256": sha256}

@@ -245,18 +245,37 @@ def test_asset_sha256_reads_digest_without_network() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_main_skips_when_variables_absent(
+def test_main_fails_when_variables_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A prepare_bundle.sh with no MinGit vars (the state on main before #161).
+    # MinGit support is merged, so MINGIT_* must exist; their absence is a real
+    # breakage and must fail the job (non-zero) rather than silently no-op,
+    # which would let the bundled dependency drift unnoticed.
     script = tmp_path / "prepare_bundle.sh"
     script.write_text('PYTHON_VERSION="3.13.12"\nPBS_VERSION="20260203"\n')
     out = tmp_path / "out"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
     rc = bump.main(["--dependency", "mingit", "--file", str(script)])
-    assert rc == 0
-    assert "changed=false" in out.read_text()
+    assert rc == 1
+    # A hard failure writes no outputs, so the create-PR step never fires.
+    assert not out.exists() or "changed=true" not in out.read_text()
+
+
+def test_main_fails_when_upstream_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Resolver returning None (expected asset/tag missing) is a broken
+    # assumption, not a routine skip, so main must fail loudly.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(bump, "resolve_latest_mingit", lambda: None)
+
+    rc = bump.main(["--dependency", "mingit", "--file", str(script)])
+    assert rc == 1
+    assert not out.exists() or "changed=true" not in out.read_text()
 
 
 def test_main_writes_file_and_outputs_on_bump(
