@@ -380,20 +380,36 @@ impl UpdateChecker {
 
         info!("Installing/upgrading esphome-device-builder ({})", backend);
 
-        let args = device_builder_install_args(backend);
-
-        let mut cmd = tokio::process::Command::new(&python_path);
-        cmd.args(&args);
-        platform::configure_no_window_tokio_command(&mut cmd);
-
-        let output = cmd.output().await.context("Failed to run pip install")?;
+        // Try a clean upgrade first (attempts a normal uninstall of the old
+        // copy). Only if pip aborts on a missing RECORD file (#155) do we retry
+        // with --ignore-installed, which skips the uninstall but orphans stale
+        // files — so we limit that trade-off to the broken-RECORD case.
+        let output = run_device_builder_install(&python_path, backend, false).await?;
 
         if output.status.success() {
             info!("esphome-device-builder installed/upgraded successfully");
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !is_missing_record_error(&stderr) {
+            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr);
+        }
+
+        info!(
+            "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed"
+        );
+        let retry = run_device_builder_install(&python_path, backend, true).await?;
+
+        if retry.status.success() {
+            info!("esphome-device-builder installed/upgraded successfully (--ignore-installed fallback)");
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr)
+            let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+            anyhow::bail!(
+                "pip install esphome-device-builder failed: {}",
+                retry_stderr
+            )
         }
     }
 
@@ -717,27 +733,52 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// Build the `pip` argument list for installing/upgrading
 /// `esphome-device-builder`.
 ///
-/// `--ignore-installed` is critical for the bundled app: the device-builder
-/// package ships inside the standalone Python tree, and on some installs its
-/// `dist-info/RECORD` is missing. A plain `pip install --upgrade` then tries
-/// to uninstall the existing copy first and aborts with
-/// `error: uninstall-no-record-file` ("no RECORD file was found"), so the
-/// update fails (issue #155). `--ignore-installed` skips the uninstall step
-/// and installs the new version over the top, which is pip's own documented
-/// recovery for this state.
+/// When `ignore_installed` is false this is a plain `pip install --upgrade`,
+/// which attempts a clean uninstall of the existing copy first — the correct
+/// path for normal installs. Pass `true` only as a fallback for the
+/// missing-RECORD case (issue #155).
 ///
-/// Accepted side effect: skipping the uninstall means files present in the old
-/// version but removed/renamed in the new one are left orphaned in
-/// site-packages. For a bundled single-package upgrade this is harmless, so do
-/// not "fix" it by removing the flag — that reintroduces the missing-RECORD abort.
-fn device_builder_install_args(backend: Backend) -> Vec<&'static str> {
-    let mut args: Vec<&'static str> =
-        vec!["-m", "pip", "install", "--upgrade", "--ignore-installed"];
+/// `--ignore-installed`: the device-builder package ships inside the bundled
+/// standalone Python tree, and on some installs its `dist-info/RECORD` is
+/// missing. A plain `pip install --upgrade` then tries to uninstall the
+/// existing copy first and aborts with `error: uninstall-no-record-file`
+/// ("no RECORD file was found"). Retrying with `--ignore-installed` skips the
+/// uninstall step and installs the new version over the top, which is pip's own
+/// documented recovery for this state.
+///
+/// Accepted side effect: skipping the uninstall leaves files present in the old
+/// version but removed/renamed in the new one orphaned in site-packages. That
+/// is why this is a fallback, not the default — it limits the orphaned-files
+/// trade-off to the genuinely-broken RECORD case instead of every upgrade.
+fn device_builder_install_args(backend: Backend, ignore_installed: bool) -> Vec<&'static str> {
+    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--upgrade"];
+    if ignore_installed {
+        args.push("--ignore-installed");
+    }
     if backend == Backend::BuilderBeta {
         args.push("--pre");
     }
     args.push("esphome-device-builder");
     args
+}
+
+/// Run `pip install` for `esphome-device-builder` with the given flags.
+async fn run_device_builder_install(
+    python_path: &std::path::Path,
+    backend: Backend,
+    ignore_installed: bool,
+) -> Result<std::process::Output> {
+    let args = device_builder_install_args(backend, ignore_installed);
+    let mut cmd = tokio::process::Command::new(python_path);
+    cmd.args(&args);
+    platform::configure_no_window_tokio_command(&mut cmd);
+    cmd.output().await.context("Failed to run pip install")
+}
+
+/// Detect pip's missing-RECORD abort, which is the failure that warrants the
+/// `--ignore-installed` retry (issue #155).
+fn is_missing_record_error(stderr: &str) -> bool {
+    stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
 /// Get the installed ESPHome version
@@ -889,11 +930,23 @@ mod tests {
     }
 
     #[test]
-    fn test_device_builder_install_args_ignore_installed() {
-        // --ignore-installed must always be present so a missing RECORD file
-        // in the bundled install can't abort the upgrade (issue #155).
+    fn test_device_builder_install_args_default_no_ignore_installed() {
+        // The default (first-attempt) upgrade must NOT pass --ignore-installed,
+        // so normal installs still get a clean uninstall of the old copy.
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
-            let args = device_builder_install_args(backend);
+            let args = device_builder_install_args(backend, false);
+            assert!(!args.contains(&"--ignore-installed"), "backend {backend:?}");
+            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
+            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+        }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_ignore_installed_fallback() {
+        // The fallback path adds --ignore-installed so a missing RECORD file in
+        // the bundled install can't abort the retry (issue #155).
+        for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
+            let args = device_builder_install_args(backend, true);
             assert!(args.contains(&"--ignore-installed"), "backend {backend:?}");
             assert!(args.contains(&"--upgrade"), "backend {backend:?}");
             assert_eq!(args.last(), Some(&"esphome-device-builder"));
@@ -902,8 +955,23 @@ mod tests {
 
     #[test]
     fn test_device_builder_install_args_pre_only_for_beta() {
-        assert!(device_builder_install_args(Backend::BuilderBeta).contains(&"--pre"));
-        assert!(!device_builder_install_args(Backend::BuilderStable).contains(&"--pre"));
+        for ignore_installed in [false, true] {
+            assert!(device_builder_install_args(Backend::BuilderBeta, ignore_installed)
+                .contains(&"--pre"));
+            assert!(!device_builder_install_args(Backend::BuilderStable, ignore_installed)
+                .contains(&"--pre"));
+        }
+    }
+
+    #[test]
+    fn test_is_missing_record_error() {
+        assert!(is_missing_record_error(
+            "error: uninstall-no-record-file"
+        ));
+        assert!(is_missing_record_error(
+            "Cannot uninstall esphome-device-builder ...: no RECORD file was found"
+        ));
+        assert!(!is_missing_record_error("some other pip failure"));
     }
 
     #[test]
