@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use tracing::debug;
@@ -160,6 +161,87 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     let bundled_bin = resource_dir.join("python").join("bin");
 
     Ok(bundled_bin)
+}
+
+/// Directory inside the bundled `git` resource that holds `git.exe`.
+///
+/// MinGit lays out a `cmd/git.exe` wrapper (alongside `mingw64/bin/git.exe`);
+/// `cmd` is the directory Git-for-Windows recommends putting on `PATH`.
+#[cfg(target_os = "windows")]
+pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
+    Ok(resource_dir.join("git").join("cmd"))
+}
+
+/// Build a `PATH` value with `dir` prepended to `existing`.
+///
+/// Pure (no environment mutation) so the prepend ordering, separator
+/// correctness, and non-Unicode `PATH` preservation can be unit-tested with a
+/// synthetic value rather than touching the real process environment — the same
+/// split-the-logic pattern `git_check::git_executable_in_path` uses. Going
+/// through `split_paths`/`join_paths` keeps the platform separator correct and
+/// round-trips a non-Unicode `PATH` instead of lossily dropping it.
+fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
+    // An empty `existing` (PATH unset) would split into a single empty entry,
+    // leaving a trailing "" in the result — which Windows search semantics
+    // treat as the current directory. Return just `dir` in that case.
+    if existing.is_empty() {
+        return Ok(dir.as_os_str().to_os_string());
+    }
+    let mut entries = vec![dir.to_path_buf()];
+    entries.extend(std::env::split_paths(existing));
+    std::env::join_paths(entries).context("Failed to build PATH with bundled git prepended")
+}
+
+/// Ensure a usable `git` is on `PATH` for the ESPHome backend we spawn.
+///
+/// ESPHome / PlatformIO / esphome-device-builder shell out to `git` for
+/// external components, `github://` packages, voice models, ESP-IDF managed
+/// components, and `git+https://` deps. Windows ships no git, so we bundle
+/// MinGit (which covers every git feature these use: HTTPS clone + submodules)
+/// and make it discoverable here (see issue #160).
+///
+/// Windows only: prepend the bundled MinGit `cmd` directory to this process's
+/// `PATH`. The spawned daemon inherits the process environment (it never sets
+/// `PATH` itself), and `git_check::notify_if_git_missing` reads the same
+/// `PATH`, so this single mutation both lets ESPHome find git and silences the
+/// missing-git notification. We always use the bundled git rather than probing
+/// for a system one — MinGit does everything we need, so there's no reason to
+/// add the complexity of preferring (and validating) whatever git a user
+/// happens to have.
+///
+/// No-op on macOS (the Command Line Tools prompt covers a missing git) and
+/// Linux (git ships on all but the most minimal installs).
+pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use tracing::{info, warn};
+
+        let git_dir = get_bundled_git_dir(app_handle)?;
+        let git_exe = git_dir.join("git.exe");
+        if !git_exe.exists() {
+            warn!(
+                "Bundled MinGit missing at {:?}; git-dependent features will \
+                 fail until git is on PATH",
+                git_exe
+            );
+            return Ok(());
+        }
+
+        // Prepend the bundled git dir to PATH (see path_with_prepended for why
+        // it goes through split/join).
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let new_path = path_with_prepended(&existing, &git_dir)?;
+        std::env::set_var("PATH", &new_path);
+        info!("Using bundled MinGit at {:?}", git_exe);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app_handle;
+    }
+
+    Ok(())
 }
 
 /// Filename of the marker recording which desktop-app version copied the
@@ -862,6 +944,49 @@ pub fn is_tray_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_with_prepended_puts_dir_first() {
+        let existing = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+        let joined = path_with_prepended(&existing, Path::new("/opt/git/cmd")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/opt/git/cmd"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ],
+            "bundled git dir must come first so it shadows anything already on PATH"
+        );
+    }
+
+    #[test]
+    fn path_with_prepended_onto_empty_yields_just_dir() {
+        // var_os("PATH") missing degrades to an empty value; the result must be
+        // exactly the bundled git dir with no trailing empty entry (an empty
+        // PATH entry means the current directory under Windows search rules).
+        let joined = path_with_prepended(OsStr::new(""), Path::new("/opt/git/cmd")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(entries, vec![PathBuf::from("/opt/git/cmd")]);
+    }
+
+    /// A non-Unicode `PATH` is legal on Unix; the prepend must round-trip its
+    /// bytes verbatim rather than lossily mangling them (the whole reason the
+    /// helper works in `OsStr`/`OsString` instead of `str`).
+    #[cfg(unix)]
+    #[test]
+    fn path_with_prepended_preserves_non_unicode_existing() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        // 0xFF is not valid UTF-8 and is not the path separator, so it survives
+        // both the join and a re-split.
+        let existing = OsString::from_vec(b"/weird\xffdir".to_vec());
+        let joined = path_with_prepended(&existing, Path::new("/opt/git/cmd")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(entries[0], PathBuf::from("/opt/git/cmd"));
+        assert_eq!(entries[1].as_os_str().as_bytes(), b"/weird\xffdir");
+    }
 
     /// Unique temp dir per call. Combines the process id with a monotonic
     /// counter so tests running in parallel within the same process can never
