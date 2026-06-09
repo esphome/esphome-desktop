@@ -219,16 +219,6 @@ pub fn run(cli: Cli) {
                 // Continue anyway - might work with bundled Python
             }
 
-            // Make a git available to the ESPHome backend. On Windows this
-            // always prepends the bundled MinGit to PATH; no-op elsewhere. Runs
-            // before the daemon task spawns so the child (which inherits this
-            // process's PATH) and the missing-git check both observe it.
-            // Log-and-continue: a failure here only means git-dependent
-            // features fall back to the existing notification.
-            if let Err(e) = platform::ensure_git_on_path(app.handle()) {
-                error!("Failed to set up bundled git: {}", e);
-            }
-
             // One-shot prompt to remove the pre-rename `/Applications/ESPHome Builder.app`.
             // No-op on non-macOS and after the user has answered once.
             platform::cleanup_legacy_macos_app(app.handle());

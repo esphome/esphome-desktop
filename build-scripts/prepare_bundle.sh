@@ -17,25 +17,10 @@ PYTHON_VERSION="3.13.12"
 PBS_VERSION="20260203"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
-# MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
-# PlatformIO and esphome-device-builder shell out to `git` for external
-# components, github:// packages, voice models, ESP-IDF managed components and
-# git+https:// deps; Windows ships no git, so without this the most common
-# configs fail with a cryptic Python traceback (see issue #160). macOS prompts
-# for the Command Line Tools and Linux ships git, so neither needs bundling.
-# The full MinGit tree is required, not just git.exe: its bundled CA bundle
-# (mingw64/etc/ssl/certs/ca-bundle.crt) and system gitconfig are what make
-# HTTPS clones work without a system cert store or $HOME.
-MINGIT_VERSION="2.54.0"
-MINGIT_FILENAME="MinGit-${MINGIT_VERSION}-64-bit.zip"
-MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v${MINGIT_VERSION}.windows.1/${MINGIT_FILENAME}"
-MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 BUNDLE_DIR="$PROJECT_DIR/src-tauri/python"
-GIT_BUNDLE_DIR="$PROJECT_DIR/src-tauri/git"
 
 detect_platform() {
     local os=$(uname -s)
@@ -65,55 +50,22 @@ detect_platform() {
     esac
 }
 
-# Resolve the published SHA-256 for a python-build-standalone asset from the
-# release's SHA256SUMS manifest. Verifying against the same release we download
-# from matches the trust model of pinning the URL and catches a corrupted,
-# truncated, or cache-poisoned tarball. The manifest is cached under $BUILD_DIR.
-pbs_expected_sha256() {
-    local filename="$1"
-    local sums_file="$BUILD_DIR/SHA256SUMS-${PBS_VERSION}"
-
-    if [[ ! -f "$sums_file" ]]; then
-        curl -fL --retry 3 -o "${sums_file}.partial" "${BASE_URL}/SHA256SUMS"
-        mv -f "${sums_file}.partial" "$sums_file"
-    fi
-
-    local expected
-    expected=$(awk -v f="$filename" '$2 == f {print $1}' "$sums_file")
-    if [[ -z "$expected" ]]; then
-        echo "No SHA-256 entry for $filename in SHA256SUMS" >&2
-        exit 1
-    fi
-    echo "$expected"
-}
-
 # Download the python-build-standalone tarball for the given platform and
-# extract it to $BUILD_DIR/python-${platform}. Downloads are cached under
-# $BUILD_DIR (which we own) so re-runs don't re-download, and verified against
-# the release's published SHA-256.
+# extract it to $BUILD_DIR/python-${platform}. Tarball downloads are cached
+# in /tmp so re-runs don't re-download.
 download_and_extract_python() {
     local platform="$1"
     local filename="$2"
     local python_dir="$BUILD_DIR/python-${platform}"
     local url="${BASE_URL}/${filename}"
-    # Cache under $BUILD_DIR rather than the shared, world-writable /tmp so a
-    # stale file owned by another user can't collide.
-    local temp_file="$BUILD_DIR/${filename}"
+    local temp_file="/tmp/${filename}"
 
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
-    local expected_sha
-    expected_sha=$(pbs_expected_sha256 "$filename")
-    if [[ -f "$temp_file" ]]; then
-        echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$expected_sha"
+    if [[ ! -f "$temp_file" ]]; then
+        curl -L -o "$temp_file" "$url"
     else
-        # Atomic: download to .partial and promote to the cache path only once
-        # the checksum passes, so an interrupted or corrupt download never
-        # becomes a sticky, always-failing cache entry.
-        curl -fL --retry 3 -o "${temp_file}.partial" "$url"
-        verify_sha256 "${temp_file}.partial" "$expected_sha"
-        mv -f "${temp_file}.partial" "$temp_file"
+        echo "Using cached download: $temp_file"
     fi
 
     echo ""
@@ -121,88 +73,6 @@ download_and_extract_python() {
     rm -rf "$python_dir"
     mkdir -p "$python_dir"
     tar -xzf "$temp_file" -C "$python_dir" --strip-components=1
-}
-
-# Verify a file against an expected SHA-256, using whichever hashing tool the
-# runner provides (sha256sum on Linux / git-bash, shasum on macOS). Exits on
-# mismatch so a corrupted or tampered download can never make it into a bundle.
-verify_sha256() {
-    local file="$1"
-    local expected="$2"
-    local actual
-
-    if command -v sha256sum >/dev/null 2>&1; then
-        actual=$(sha256sum "$file" | cut -d' ' -f1)
-    elif command -v shasum >/dev/null 2>&1; then
-        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
-    else
-        echo "No SHA-256 tool (sha256sum/shasum) available; cannot verify $file"
-        exit 1
-    fi
-
-    if [[ "$actual" != "$expected" ]]; then
-        echo "SHA-256 mismatch for $file"
-        echo "  expected: $expected"
-        echo "  actual:   $actual"
-        exit 1
-    fi
-    echo "SHA-256 OK: $file"
-}
-
-# Stage git into $GIT_BUNDLE_DIR (src-tauri/git), bundled as a Tauri resource.
-#
-# Windows: download the pinned MinGit zip, verify its SHA-256, and extract the
-# full tree (cmd/git.exe, mingw64/..., the CA bundle and system gitconfig). At
-# runtime the app prepends git/cmd to PATH so ESPHome can find it.
-#
-# Other platforms: leave an empty directory so the "git" resource path in
-# tauri.conf.json resolves; git is never bundled there (Linux ships it, macOS
-# prompts for the Command Line Tools).
-prepare_git_for_platform() {
-    local platform="$1"
-
-    rm -rf "$GIT_BUNDLE_DIR"
-    mkdir -p "$GIT_BUNDLE_DIR"
-
-    if [[ "$platform" != "windows-x64" ]]; then
-        echo ""
-        echo "=== Skipping git bundle (${platform}); empty git/ placeholder created ==="
-        return
-    fi
-
-    # Cache under $BUILD_DIR (which we own and created) rather than the shared,
-    # world-writable /tmp so a stale file owned by another user can't collide.
-    local temp_file="$BUILD_DIR/${MINGIT_FILENAME}"
-
-    echo ""
-    echo "=== Downloading MinGit ${MINGIT_VERSION} ==="
-    if [[ -f "$temp_file" ]]; then
-        echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$MINGIT_SHA256"
-    else
-        # `--fail` so an HTTP error is a non-zero exit (not a 200-status error
-        # body written to disk) and `--retry` to ride out transient blips.
-        # Download to a .partial and only rename onto the cache path once the
-        # checksum passes, so an interrupted or corrupt download never becomes a
-        # sticky, always-failing cache entry (the fixed-path cache trap from
-        # #152/#153).
-        curl -fL --retry 3 -o "${temp_file}.partial" "$MINGIT_URL"
-        verify_sha256 "${temp_file}.partial" "$MINGIT_SHA256"
-        mv -f "${temp_file}.partial" "$temp_file"
-    fi
-
-    echo ""
-    echo "=== Extracting MinGit into ${GIT_BUNDLE_DIR} ==="
-    # Extract with the standalone Python we just unpacked rather than `unzip`,
-    # which is not shipped with Git for Windows / git-bash and so is exactly the
-    # tool most likely to be missing on the only runner this path runs on.
-    # `python -m zipfile` is stdlib and guaranteed present here.
-    local python_exe="$BUILD_DIR/python-${platform}/python.exe"
-    if [[ ! -f "$python_exe" ]]; then
-        echo "Bundled Python not found at $python_exe; cannot extract MinGit"
-        exit 1
-    fi
-    "$python_exe" -m zipfile -e "$temp_file" "$GIT_BUNDLE_DIR"
 }
 
 # Rewrite pip-generated script shebangs so the bundle is relocatable.
@@ -347,7 +217,6 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUILD_DIR"
 
 prepare_python_for_platform "$PLATFORM"
-prepare_git_for_platform "$PLATFORM"
 
 PYTHON_DIR="$BUILD_DIR/python-${PLATFORM}"
 
@@ -364,9 +233,5 @@ echo ""
 echo "=== Bundle ready ==="
 echo "Location: $BUNDLE_DIR"
 echo "Size: $BUNDLE_SIZE"
-if [[ "$PLATFORM" == "windows-x64" ]]; then
-    GIT_BUNDLE_SIZE=$(du -sh "$GIT_BUNDLE_DIR" | cut -f1)
-    echo "Bundled git: $GIT_BUNDLE_DIR ($GIT_BUNDLE_SIZE)"
-fi
 echo ""
 echo "You can now run 'cargo tauri build' to create the app bundle."
