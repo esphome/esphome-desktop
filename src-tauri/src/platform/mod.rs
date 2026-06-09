@@ -162,6 +162,70 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(bundled_bin)
 }
 
+/// Directory inside the bundled `git` resource that holds `git.exe`.
+///
+/// MinGit lays out a `cmd/git.exe` wrapper (alongside `mingw64/bin/git.exe`);
+/// `cmd` is the directory Git-for-Windows recommends putting on `PATH`.
+#[cfg(target_os = "windows")]
+pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
+    Ok(resource_dir.join("git").join("cmd"))
+}
+
+/// Ensure a usable `git` is on `PATH` for the ESPHome backend we spawn.
+///
+/// ESPHome / PlatformIO / esphome-device-builder shell out to `git` for
+/// external components, `github://` packages, voice models, ESP-IDF managed
+/// components, and `git+https://` deps. Windows ships no git, so we bundle
+/// MinGit (which covers every git feature these use: HTTPS clone + submodules)
+/// and make it discoverable here (see issue #160).
+///
+/// Windows only: prepend the bundled MinGit `cmd` directory to this process's
+/// `PATH`. The spawned daemon inherits the process environment (it never sets
+/// `PATH` itself), and `git_check::notify_if_git_missing` reads the same
+/// `PATH`, so this single mutation both lets ESPHome find git and silences the
+/// missing-git notification. We always use the bundled git rather than probing
+/// for a system one — MinGit does everything we need, so there's no reason to
+/// add the complexity of preferring (and validating) whatever git a user
+/// happens to have.
+///
+/// No-op on macOS (the Command Line Tools prompt covers a missing git) and
+/// Linux (git ships on all but the most minimal installs).
+pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use tracing::{info, warn};
+
+        let git_dir = get_bundled_git_dir(app_handle)?;
+        let git_exe = git_dir.join("git.exe");
+        if !git_exe.exists() {
+            warn!(
+                "Bundled MinGit missing at {:?}; git-dependent features will \
+                 fail until git is on PATH",
+                git_exe
+            );
+            return Ok(());
+        }
+
+        // Prepend the bundled git dir to PATH. Rebuild PATH via split/join so a
+        // non-Unicode existing PATH is preserved and the separator is correct.
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut entries = vec![git_dir];
+        entries.extend(std::env::split_paths(&existing));
+        let new_path = std::env::join_paths(entries)
+            .context("Failed to build PATH with bundled git prepended")?;
+        std::env::set_var("PATH", &new_path);
+        info!("Using bundled MinGit at {:?}", git_exe);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app_handle;
+    }
+
+    Ok(())
+}
+
 /// Filename of the marker recording which desktop-app version copied the
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
 const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";

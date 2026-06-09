@@ -17,10 +17,25 @@ PYTHON_VERSION="3.13.12"
 PBS_VERSION="20260203"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
+# MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
+# PlatformIO and esphome-device-builder shell out to `git` for external
+# components, github:// packages, voice models, ESP-IDF managed components and
+# git+https:// deps; Windows ships no git, so without this the most common
+# configs fail with a cryptic Python traceback (see issue #160). macOS prompts
+# for the Command Line Tools and Linux ships git, so neither needs bundling.
+# The full MinGit tree is required, not just git.exe: its bundled CA bundle
+# (mingw64/etc/ssl/certs/ca-bundle.crt) and system gitconfig are what make
+# HTTPS clones work without a system cert store or $HOME.
+MINGIT_VERSION="2.54.0"
+MINGIT_FILENAME="MinGit-${MINGIT_VERSION}-64-bit.zip"
+MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v${MINGIT_VERSION}.windows.1/${MINGIT_FILENAME}"
+MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 BUNDLE_DIR="$PROJECT_DIR/src-tauri/python"
+GIT_BUNDLE_DIR="$PROJECT_DIR/src-tauri/git"
 
 detect_platform() {
     local os=$(uname -s)
@@ -73,6 +88,70 @@ download_and_extract_python() {
     rm -rf "$python_dir"
     mkdir -p "$python_dir"
     tar -xzf "$temp_file" -C "$python_dir" --strip-components=1
+}
+
+# Verify a file against an expected SHA-256, using whichever hashing tool the
+# runner provides (sha256sum on Linux / git-bash, shasum on macOS). Exits on
+# mismatch so a corrupted or tampered download can never make it into a bundle.
+verify_sha256() {
+    local file="$1"
+    local expected="$2"
+    local actual
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$file" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
+    else
+        echo "No SHA-256 tool (sha256sum/shasum) available; cannot verify $file"
+        exit 1
+    fi
+
+    if [[ "$actual" != "$expected" ]]; then
+        echo "SHA-256 mismatch for $file"
+        echo "  expected: $expected"
+        echo "  actual:   $actual"
+        exit 1
+    fi
+    echo "SHA-256 OK: $file"
+}
+
+# Stage git into $GIT_BUNDLE_DIR (src-tauri/git), bundled as a Tauri resource.
+#
+# Windows: download the pinned MinGit zip, verify its SHA-256, and extract the
+# full tree (cmd/git.exe, mingw64/..., the CA bundle and system gitconfig). At
+# runtime the app prepends git/cmd to PATH so ESPHome can find it.
+#
+# Other platforms: leave an empty directory so the "git" resource path in
+# tauri.conf.json resolves; git is never bundled there (Linux ships it, macOS
+# prompts for the Command Line Tools).
+prepare_git_for_platform() {
+    local platform="$1"
+
+    rm -rf "$GIT_BUNDLE_DIR"
+    mkdir -p "$GIT_BUNDLE_DIR"
+
+    if [[ "$platform" != "windows-x64" ]]; then
+        echo ""
+        echo "=== Skipping git bundle (${platform}); empty git/ placeholder created ==="
+        return
+    fi
+
+    local temp_file="/tmp/${MINGIT_FILENAME}"
+
+    echo ""
+    echo "=== Downloading MinGit ${MINGIT_VERSION} ==="
+    if [[ ! -f "$temp_file" ]]; then
+        curl -L -o "$temp_file" "$MINGIT_URL"
+    else
+        echo "Using cached download: $temp_file"
+    fi
+
+    verify_sha256 "$temp_file" "$MINGIT_SHA256"
+
+    echo ""
+    echo "=== Extracting MinGit into ${GIT_BUNDLE_DIR} ==="
+    unzip -q -o "$temp_file" -d "$GIT_BUNDLE_DIR"
 }
 
 # Rewrite pip-generated script shebangs so the bundle is relocatable.
@@ -217,6 +296,7 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUILD_DIR"
 
 prepare_python_for_platform "$PLATFORM"
+prepare_git_for_platform "$PLATFORM"
 
 PYTHON_DIR="$BUILD_DIR/python-${PLATFORM}"
 
@@ -233,5 +313,9 @@ echo ""
 echo "=== Bundle ready ==="
 echo "Location: $BUNDLE_DIR"
 echo "Size: $BUNDLE_SIZE"
+if [[ "$PLATFORM" == "windows-x64" ]]; then
+    GIT_BUNDLE_SIZE=$(du -sh "$GIT_BUNDLE_DIR" | cut -f1)
+    echo "Bundled git: $GIT_BUNDLE_DIR ($GIT_BUNDLE_SIZE)"
+fi
 echo ""
 echo "You can now run 'cargo tauri build' to create the app bundle."
