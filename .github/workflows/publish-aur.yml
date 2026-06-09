@@ -51,7 +51,7 @@ jobs:
             exit 1
           fi
           SHA256SUM=$(sha256sum /tmp/package.deb | awk '{print $1}')
-          echo "sha256=$SHA256SUM" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256SUM" >> "$GITHUB_OUTPUT"
 
       - name: Prepare PKGBUILD
         run: |
