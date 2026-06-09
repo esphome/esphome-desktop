@@ -53,12 +53,17 @@ detach_orphaned_images() {
     END { flush() }
   ' | while read -r dev; do
     [[ -n "$dev" ]] && hdiutil detach "$dev" -force >/dev/null 2>&1 || true
-  done
+  done || true   # best effort: never let cleanup abort the retry
 }
 
 for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
-  status=0
-  cargo tauri build "$@" 2>&1 | tee "$build_log" || status="${PIPESTATUS[0]}"
+  # Capture cargo's own exit code (PIPESTATUS[0]), independent of tee, so a tee
+  # write failure can't mask a real cargo result. Drop errexit for the pipeline
+  # since a non-zero build is expected and handled explicitly below.
+  set +e
+  cargo tauri build "$@" 2>&1 | tee "$build_log"
+  status="${PIPESTATUS[0]}"
+  set -e
   if (( status == 0 )); then
     exit 0
   fi
