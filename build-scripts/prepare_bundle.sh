@@ -50,22 +50,81 @@ detect_platform() {
     esac
 }
 
+# Compute the SHA-256 of a file using whichever tool the platform provides
+# (Linux ships sha256sum, macOS ships shasum, and both are present under the
+# git-bash environment on Windows runners). Prints the bare hex digest.
+compute_sha256() {
+    local out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$1") || return 1
+        awk '{print $1}' <<<"$out"
+    elif command -v shasum >/dev/null 2>&1; then
+        out=$(shasum -a 256 "$1") || return 1
+        awk '{print $1}' <<<"$out"
+    else
+        echo "ERROR: no SHA-256 tool found (need sha256sum or shasum)" >&2
+        return 1
+    fi
+}
+
 # Download the python-build-standalone tarball for the given platform and
 # extract it to $BUILD_DIR/python-${platform}. Tarball downloads are cached
-# in /tmp so re-runs don't re-download.
+# under $BUILD_DIR/cache (a path we own) so re-runs don't re-download.
+#
+# The interpreter is shipped verbatim to every user, so its integrity matters:
+# we verify the download against the release's SHA256SUMS manifest. The
+# previous version did no verification and reused any pre-existing /tmp file
+# unconditionally — so an interrupted curl (partial tarball), an HTTP error
+# page saved in place of the archive (curl lacked --fail), or a tampered cache
+# would all be extracted and bundled silently. We now (1) fetch the expected
+# digest, (2) re-verify cached files and re-download on mismatch, and (3)
+# download to a temp path promoted to the cache only after the digest checks
+# out, so a failed download never poisons the cache.
 download_and_extract_python() {
     local platform="$1"
     local filename="$2"
     local python_dir="$BUILD_DIR/python-${platform}"
     local url="${BASE_URL}/${filename}"
-    local temp_file="/tmp/${filename}"
+    local cache_dir="$BUILD_DIR/cache"
+    mkdir -p "$cache_dir"
+    local temp_file="$cache_dir/${filename}"
 
     echo ""
     echo "=== Downloading Python ${PYTHON_VERSION} for ${platform} ==="
-    if [[ ! -f "$temp_file" ]]; then
-        curl -L -o "$temp_file" "$url"
-    else
+
+    local sums
+    sums=$(curl -fsSL --retry 3 "${BASE_URL}/SHA256SUMS") || {
+        echo "ERROR: failed to fetch ${BASE_URL}/SHA256SUMS" >&2
+        exit 1
+    }
+    local expected_sha
+    expected_sha=$(awk -v f="$filename" '$2 == f {print $1}' <<<"$sums")
+    if [[ -z "$expected_sha" ]]; then
+        echo "ERROR: no SHA256SUMS entry found for $filename" >&2
+        exit 1
+    fi
+
+    if [[ -f "$temp_file" ]] && [[ "$(compute_sha256 "$temp_file")" == "$expected_sha" ]]; then
         echo "Using cached download: $temp_file"
+    else
+        [[ -f "$temp_file" ]] && echo "Cached file checksum mismatch — re-downloading"
+        local partial="${temp_file}.partial.$$"
+        if ! curl -fL --retry 3 -o "$partial" "$url"; then
+            rm -f "$partial"
+            echo "ERROR: failed to download $url" >&2
+            exit 1
+        fi
+        local actual_sha
+        actual_sha=$(compute_sha256 "$partial")
+        if [[ "$actual_sha" != "$expected_sha" ]]; then
+            rm -f "$partial"
+            echo "ERROR: checksum mismatch for $filename" >&2
+            echo "  expected: $expected_sha" >&2
+            echo "  actual:   $actual_sha" >&2
+            exit 1
+        fi
+        mv "$partial" "$temp_file"
+        echo "Verified SHA-256: $actual_sha"
     fi
 
     echo ""
