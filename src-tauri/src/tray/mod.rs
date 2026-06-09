@@ -368,6 +368,21 @@ async fn refresh_builder_version_display(app_handle: &AppHandle) {
 
 /// Handle menu item clicks
 fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _app: &AppHandle) {
+    /// Acquire the `UpdateGuard` or log and `return` from the spawned task.
+    /// Collapses the acquire-or-bail boilerplate shared by the three multi-step
+    /// menu arms while preserving the `return`-in-closure control flow.
+    macro_rules! guard_or_return {
+        ($state:expr, $what:expr) => {
+            match UpdateGuard::try_acquire($state.update_in_flight.clone()) {
+                Some(g) => g,
+                None => {
+                    info!("Update/switch already in progress; ignoring {}", $what);
+                    return;
+                }
+            }
+        };
+    }
+
     match id {
         ids::OPEN_DASHBOARD => {
             let settings = async_runtime::block_on(state.settings.read());
@@ -380,13 +395,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
-                    Some(g) => g,
-                    None => {
-                        info!("Update/switch already in progress; ignoring Check for Updates");
-                        return;
-                    }
-                };
+                let _guard = guard_or_return!(state, "Check for Updates");
                 // Always check the desktop app first. Installing a self-update
                 // replaces the bundled `python/` directory, which would wipe
                 // any pip bump we do here. If the user accepts the app update
@@ -619,13 +628,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
-                    Some(g) => g,
-                    None => {
-                        info!("Update/switch already in progress; ignoring channel switch");
-                        return;
-                    }
-                };
+                let _guard = guard_or_return!(state, "channel switch");
                 // Read the current channel
                 let old_channel = {
                     let settings = state.settings.read().await;
@@ -786,13 +789,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = match UpdateGuard::try_acquire(state.update_in_flight.clone()) {
-                    Some(g) => g,
-                    None => {
-                        info!("Update/switch already in progress; ignoring backend switch");
-                        return;
-                    }
-                };
+                let _guard = guard_or_return!(state, "backend switch");
                 let old_backend = {
                     let settings = state.settings.read().await;
                     settings.backend
