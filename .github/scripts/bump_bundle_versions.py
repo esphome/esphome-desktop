@@ -37,10 +37,13 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PREPARE_BUNDLE = REPO_ROOT / "build-scripts" / "prepare_bundle.sh"
@@ -140,6 +143,38 @@ def current_python_minor(text: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+_T = TypeVar("_T")
+
+# How many times to attempt a network op before giving up, and the linear
+# backoff base between attempts.
+HTTP_RETRIES = 3
+HTTP_RETRY_BACKOFF = 2
+
+
+def _with_retries(op: Callable[[], _T]) -> _T:
+    """Run `op`, retrying transient network failures with linear backoff.
+
+    We deliberately do NOT swallow a persistent failure into a no-op: if the
+    job can't reach GitHub it should fail loudly (a red nightly run) so the bump
+    is noticed and fixed. The opposite — quietly reporting "nothing to bump" on
+    every error — is the worse failure mode, because the bundled dependency
+    would silently drift and could ship a stale, vulnerable version for a long
+    time before anyone noticed. Retries only paper over momentary blips so a
+    single transient 5xx/timeout doesn't raise a false alarm.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            return op()
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last_exc = exc
+            _warn(f"network attempt {attempt}/{HTTP_RETRIES} failed: {exc}")
+            if attempt < HTTP_RETRIES:
+                time.sleep(HTTP_RETRY_BACKOFF * attempt)
+    assert last_exc is not None  # loop ran at least once and didn't return
+    raise last_exc
+
+
 def _gh_headers() -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
@@ -152,9 +187,12 @@ def _gh_headers() -> dict[str, str]:
 
 
 def _api_get(url: str) -> Any:
-    req = urllib.request.Request(url, headers=_gh_headers())
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
-        return json.load(resp)
+    def fetch() -> Any:
+        req = urllib.request.Request(url, headers=_gh_headers())
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            return json.load(resp)
+
+    return _with_retries(fetch)
 
 
 def resolve_latest_python(minor: str) -> tuple[str, str] | None:
@@ -221,15 +259,18 @@ def _asset_sha256(asset: dict[str, Any]) -> str:
     if digest.startswith("sha256:"):
         return digest.split(":", 1)[1]
 
-    req = urllib.request.Request(
-        asset["browser_download_url"],
-        headers={"User-Agent": "esphome-desktop-version-bump"},
-    )
-    h = hashlib.sha256()
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
-        for chunk in iter(lambda: resp.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    def stream() -> str:
+        req = urllib.request.Request(
+            asset["browser_download_url"],
+            headers={"User-Agent": "esphome-desktop-version-bump"},
+        )
+        h = hashlib.sha256()
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            for chunk in iter(lambda: resp.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    return _with_retries(stream)
 
 
 # --------------------------------------------------------------------------- #

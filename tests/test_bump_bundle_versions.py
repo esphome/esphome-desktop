@@ -110,6 +110,60 @@ def test_apply_bumps_no_change_is_not_changed() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Network retry behaviour.
+# --------------------------------------------------------------------------- #
+
+
+def test_with_retries_returns_on_first_success() -> None:
+    calls = []
+
+    def op() -> str:
+        calls.append(1)
+        return "ok"
+
+    assert bump._with_retries(op) == "ok"
+    assert len(calls) == 1
+
+
+def test_with_retries_recovers_after_transient_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bump.time, "sleep", lambda _s: None)
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def flaky() -> str:
+        attempts["n"] += 1
+        if attempts["n"] < bump.HTTP_RETRIES:
+            raise urllib.error.URLError("transient")
+        return "recovered"
+
+    assert bump._with_retries(flaky) == "recovered"
+    assert attempts["n"] == bump.HTTP_RETRIES
+
+
+def test_with_retries_reraises_persistent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A persistent failure must propagate so the nightly job fails loudly
+    # rather than silently reporting "nothing to bump" and letting the bundled
+    # dependency drift.
+    monkeypatch.setattr(bump.time, "sleep", lambda _s: None)
+    import urllib.error
+
+    attempts = {"n": 0}
+
+    def always_fail() -> str:
+        attempts["n"] += 1
+        raise urllib.error.URLError("down")
+
+    with pytest.raises(urllib.error.URLError):
+        bump._with_retries(always_fail)
+    assert attempts["n"] == bump.HTTP_RETRIES
+
+
+# --------------------------------------------------------------------------- #
 # Upstream resolution (monkeypatched network).
 # --------------------------------------------------------------------------- #
 
