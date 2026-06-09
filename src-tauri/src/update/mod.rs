@@ -956,18 +956,20 @@ mod tests {
     #[test]
     fn test_device_builder_install_args_pre_only_for_beta() {
         for ignore_installed in [false, true] {
-            assert!(device_builder_install_args(Backend::BuilderBeta, ignore_installed)
-                .contains(&"--pre"));
-            assert!(!device_builder_install_args(Backend::BuilderStable, ignore_installed)
-                .contains(&"--pre"));
+            assert!(
+                device_builder_install_args(Backend::BuilderBeta, ignore_installed)
+                    .contains(&"--pre")
+            );
+            assert!(
+                !device_builder_install_args(Backend::BuilderStable, ignore_installed)
+                    .contains(&"--pre")
+            );
         }
     }
 
     #[test]
     fn test_is_missing_record_error() {
-        assert!(is_missing_record_error(
-            "error: uninstall-no-record-file"
-        ));
+        assert!(is_missing_record_error("error: uninstall-no-record-file"));
         assert!(is_missing_record_error(
             "Cannot uninstall esphome-device-builder ...: no RECORD file was found"
         ));
