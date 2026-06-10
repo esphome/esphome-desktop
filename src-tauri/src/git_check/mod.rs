@@ -136,7 +136,10 @@ fn show_git_missing_notification(app_handle: &AppHandle, body: &str) {
 fn trigger_command_line_tools_install() {
     use std::process::Command;
 
-    match Command::new("/usr/bin/xcode-select").arg("--install").output() {
+    match Command::new("/usr/bin/xcode-select")
+        .arg("--install")
+        .output()
+    {
         Ok(out) if out.status.success() => {
             info!("Opened the Command Line Tools installer (xcode-select --install)");
         }
