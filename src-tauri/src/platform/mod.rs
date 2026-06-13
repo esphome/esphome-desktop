@@ -991,8 +991,14 @@ mod tests {
     fn tail_for_log_truncates_to_the_tail_with_marker() {
         let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
         let out = tail_for_log(&s);
-        assert!(out.starts_with("...(stderr truncated"), "marker comes first");
-        assert!(out.ends_with(&"x".repeat(PIP_STDERR_TAIL_BYTES)), "keeps tail");
+        assert!(
+            out.starts_with("...(stderr truncated"),
+            "marker comes first"
+        );
+        assert!(
+            out.ends_with(&"x".repeat(PIP_STDERR_TAIL_BYTES)),
+            "keeps tail"
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1005,7 +1011,10 @@ mod tests {
         let out = tail_for_log(&s);
         assert!(out.contains("truncated"), "long input must be marked");
         let tail = out.split_once('\n').unwrap().1;
-        assert!(tail.len() <= PIP_STDERR_TAIL_BYTES, "tail stays within bound");
+        assert!(
+            tail.len() <= PIP_STDERR_TAIL_BYTES,
+            "tail stays within bound"
+        );
         assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
     }
 }
