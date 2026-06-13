@@ -969,4 +969,43 @@ mod tests {
 
         let _ = fs::remove_dir_all(&base);
     }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn tail_for_log_passes_short_input_through_trimmed() {
+        assert_eq!(tail_for_log("  hello  "), "hello");
+        assert_eq!(tail_for_log("plain"), "plain");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn tail_for_log_keeps_input_at_exactly_the_limit() {
+        let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
+        let out = tail_for_log(&s);
+        assert_eq!(out, s, "input exactly at the limit must pass through");
+        assert!(!out.contains("truncated"), "no marker at the boundary");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn tail_for_log_truncates_to_the_tail_with_marker() {
+        let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
+        let out = tail_for_log(&s);
+        assert!(out.starts_with("...(stderr truncated"), "marker comes first");
+        assert!(out.ends_with(&"x".repeat(PIP_STDERR_TAIL_BYTES)), "keeps tail");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn tail_for_log_does_not_split_a_multibyte_char() {
+        // 1366 * 3 bytes = 4098 > 4096; the naive cut at len-4096 lands at
+        // byte 2, mid-"€". The boundary backup must avoid slicing a char,
+        // so the result stays valid UTF-8 and never panics.
+        let s = "€".repeat(1366);
+        let out = tail_for_log(&s);
+        assert!(out.contains("truncated"), "long input must be marked");
+        let tail = out.split_once('\n').unwrap().1;
+        assert!(tail.len() <= PIP_STDERR_TAIL_BYTES, "tail stays within bound");
+        assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
+    }
 }
