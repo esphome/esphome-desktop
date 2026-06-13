@@ -135,6 +135,28 @@ def current_python_minor(text: str) -> str:
     return m.group(1)
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted numeric version (e.g. "3.13.13") into an int tuple so
+    versions order numerically rather than lexically ("3.13.9" < "3.13.10")."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def is_downgrade(current: str, candidate: str) -> bool:
+    """True when `candidate` is an older CPython release than `current`.
+
+    `resolve_latest_python` returns the highest patch present in the *latest*
+    python-build-standalone release. That release is normally a superset of
+    older ones, but if it ever ships without the currently pinned patch (a
+    yanked or partially-rebuilt release), the resolver would hand back a lower
+    patch. Applying it would silently downgrade the bundled interpreter —
+    losing whatever the newer patch fixed, often a security release — via an
+    automated PR. PYTHON_VERSION and PBS_VERSION are coupled into the asset
+    download URL, so the newer build tag can't keep the higher patch either;
+    the only safe move is to refuse and fail loudly for a human to investigate.
+    """
+    return _version_tuple(candidate) < _version_tuple(current)
+
+
 # --------------------------------------------------------------------------- #
 # Upstream resolution (network).
 # --------------------------------------------------------------------------- #
@@ -289,6 +311,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     pbs_version, python_version = latest
+
+    # Refuse a patch regression. The latest PBS release should never ship a
+    # lower CPython patch than we already pin, but if it does, downgrading the
+    # bundled interpreter via an automated PR would silently undo a (likely
+    # security) patch. Fail loudly instead — same philosophy as the
+    # missing-variable / unresolvable-upstream paths above.
+    current_python = read_assignment(text, "PYTHON_VERSION")
+    if is_downgrade(current_python, python_version):
+        _error(
+            f"latest {PBS_REPO} release ships CPython {python_version}, older "
+            f"than the pinned {current_python}; refusing to downgrade the "
+            "bundled interpreter. Investigate upstream before bumping."
+        )
+        return 1
+
     result = apply_bumps(
         text, {"PYTHON_VERSION": python_version, "PBS_VERSION": pbs_version}
     )
