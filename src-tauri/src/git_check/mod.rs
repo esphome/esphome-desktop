@@ -33,6 +33,8 @@ const GIT_MISSING_BODY: &str = "ESPHome uses Git to download external components
 (github://) packages, voice models, and other dependencies, so many configurations won't \
 compile without it. Install Git, then restart ESPHome Device Builder so it can detect it.";
 
+const PARENT_GIT_REPO_TITLE: &str = "A parent folder is a Git repository";
+
 /// Search a PATH-style value for a git executable.
 ///
 /// `path_var` is the raw value of the `PATH` environment variable, with
@@ -128,6 +130,75 @@ pub fn notify_if_git_missing(app_handle: &AppHandle) {
     }
 }
 
+/// Find a `.git` entry in a *strict ancestor* of `config_dir`, returning the
+/// repository root (the ancestor directory that contains `.git`).
+///
+/// ESP-IDF's CMake Git-revision detection
+/// (`GetGitRevisionDescription.cmake`) walks **upward** from the build tree
+/// looking for the nearest `.git`. If it finds one belonging to an unrelated
+/// repository — e.g. `C:\` or the user's home folder accidentally `git init`ed
+/// — the ESP-IDF package, which has no `.git` of its own, fails the build with
+/// an opaque `head-ref` file error rather than anything actionable (see
+/// <https://github.com/esphome/esphome-desktop/issues/170>).
+///
+/// We deliberately skip `config_dir` itself: version-controlling your ESPHome
+/// configuration directory is a legitimate, encouraged workflow, so a `.git`
+/// *at* the config dir must not warn. Only a `.git` in a parent or higher —
+/// which the user almost never intends to scope over their ESPHome builds — is
+/// flagged. `.git` may be a directory (normal repo) or a file (worktree /
+/// submodule pointer), so existence rather than directory-ness is the test.
+///
+/// Pure apart from filesystem existence checks, so it is unit-testable with a
+/// synthetic directory tree.
+fn git_repo_in_ancestors(config_dir: &Path) -> Option<PathBuf> {
+    // `ancestors()` yields the path itself first; `skip(1)` excludes the
+    // config dir so a version-controlled config folder doesn't trip the check.
+    for ancestor in config_dir.ancestors().skip(1) {
+        if ancestor.join(".git").exists() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Warn (non-blocking) when the ESPHome config directory sits inside an
+/// unrelated Git repository, which can make ESP-IDF builds fail with an opaque
+/// CMake `head-ref` error (issue #170).
+///
+/// Called once per launch, after the daemon starts successfully — same cadence
+/// as [`notify_if_git_missing`]. No-op when no ancestor repository is found.
+pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Path) {
+    let Some(repo_root) = git_repo_in_ancestors(config_dir) else {
+        return;
+    };
+
+    warn!(
+        "config directory {} is inside a Git repository rooted at {}; ESP-IDF \
+         builds may fail with an opaque CMake head-ref error (see issue #170)",
+        config_dir.display(),
+        repo_root.display()
+    );
+
+    let body = format!(
+        "A parent folder ({}) is a Git repository. ESP-IDF builds can pick up \
+         that repository and fail to compile with an opaque CMake \"head-ref\" \
+         error. If your devices fail to build, remove the stray .git folder \
+         from that parent directory, or move your ESPHome configuration outside \
+         the repository.",
+        repo_root.display()
+    );
+
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title(PARENT_GIT_REPO_TITLE)
+        .body(body)
+        .show()
+    {
+        warn!("Failed to show parent-git-repo notification: {}", e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +290,92 @@ mod tests {
         assert_eq!(git_executable_in_path(&path_var), None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn mkdir(path: &Path) {
+        fs::create_dir_all(path).expect("create dir");
+    }
+
+    #[test]
+    fn no_git_in_any_ancestor_yields_none() {
+        let root = unique_temp_dir("anc_none");
+        let config = root.join("a").join("b").join("esphome");
+        mkdir(&config);
+
+        assert_eq!(git_repo_in_ancestors(&config), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_in_parent_is_detected() {
+        let root = unique_temp_dir("anc_parent");
+        let parent = root.join("workspace");
+        let config = parent.join("esphome");
+        mkdir(&config);
+        mkdir(&parent.join(".git"));
+
+        assert_eq!(git_repo_in_ancestors(&config), Some(parent));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_in_grandparent_is_detected() {
+        let root = unique_temp_dir("anc_grandparent");
+        let grandparent = root.join("repo");
+        let config = grandparent.join("nested").join("esphome");
+        mkdir(&config);
+        mkdir(&grandparent.join(".git"));
+
+        assert_eq!(git_repo_in_ancestors(&config), Some(grandparent));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_at_config_dir_itself_is_ignored() {
+        // Version-controlling the ESPHome config directory is a legitimate
+        // workflow, so a `.git` *at* the config dir must not be flagged.
+        let root = unique_temp_dir("anc_self");
+        let config = root.join("esphome");
+        mkdir(&config);
+        mkdir(&config.join(".git"));
+
+        assert_eq!(git_repo_in_ancestors(&config), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nearest_ancestor_repo_wins() {
+        // When both a parent and a grandparent are repositories, the nearest
+        // (the parent) is reported.
+        let root = unique_temp_dir("anc_nearest");
+        let grandparent = root.join("outer");
+        let parent = grandparent.join("inner");
+        let config = parent.join("esphome");
+        mkdir(&config);
+        mkdir(&grandparent.join(".git"));
+        mkdir(&parent.join(".git"));
+
+        assert_eq!(git_repo_in_ancestors(&config), Some(parent));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_as_a_file_is_detected() {
+        // A `.git` *file* (worktree / submodule pointer) counts as a repo.
+        let root = unique_temp_dir("anc_gitfile");
+        let parent = root.join("worktree");
+        let config = parent.join("esphome");
+        mkdir(&config);
+        fs::write(parent.join(".git"), b"gitdir: /elsewhere\n").expect("write .git file");
+
+        assert_eq!(git_repo_in_ancestors(&config), Some(parent));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(unix)]
