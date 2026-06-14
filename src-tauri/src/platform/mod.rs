@@ -188,7 +188,7 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        use tracing::info;
+        use tracing::{info, warn};
 
         let data_dir = get_data_dir(app_handle)?;
         let user_python = data_dir.join("python");
@@ -214,14 +214,23 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             // wipe so we can restore them after the bundled tree is in place.
             // Without this, a user who pip-bumped ESPHome past the bundled
             // version would silently get downgraded by every app self-update.
+            //
+            // If the probe FAILS (as opposed to the package being absent), we
+            // cannot tell whether the user pinned a newer version, so wiping
+            // the tree now would silently discard it — exactly the downgrade
+            // this snapshot exists to prevent. In that case defer the refresh:
+            // keep the working tree, log a warning, and retry next launch.
             let preserved = if python_check.exists() {
-                let old_python_bin = python_check.clone();
-                PreservedVersions {
-                    esphome: read_package_version(&old_python_bin, "esphome"),
-                    esphome_device_builder: read_package_version(
-                        &old_python_bin,
-                        "esphome-device-builder",
-                    ),
+                match snapshot_preserved_versions(&python_check) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(
+                            "Could not read existing Python package versions ({e:#}); \
+                             deferring the bundled-Python refresh to avoid downgrading a \
+                             user-pinned version. Will retry on next launch."
+                        );
+                        return Ok(());
+                    }
                 }
             } else {
                 PreservedVersions::default()
@@ -271,6 +280,19 @@ struct PreservedVersions {
     esphome_device_builder: Option<String>,
 }
 
+/// Snapshot the user-pinned versions of the packages we preserve across a
+/// bundled-Python refresh. Returns `Err` if any probe FAILS (a `None` from
+/// [`read_package_version`] means the package is genuinely absent, which is a
+/// successful snapshot). The caller must not wipe a tree it could not read, or
+/// it would silently downgrade a version the user deliberately pinned.
+#[cfg(not(target_os = "windows"))]
+fn snapshot_preserved_versions(python_bin: &Path) -> Result<PreservedVersions> {
+    Ok(PreservedVersions {
+        esphome: read_package_version(python_bin, "esphome")?,
+        esphome_device_builder: read_package_version(python_bin, "esphome-device-builder")?,
+    })
+}
+
 /// Reinstall any preserved package whose pinned version is newer than the
 /// version that just shipped in the new bundled Python tree. Bundled wins
 /// for ties and for when bundled is newer (so users always benefit from the
@@ -289,10 +311,22 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
         ),
     ] {
         let Some(saved) = saved else { continue };
-        let Some(bundled) = read_package_version(python_bin, package) else {
-            // Package isn't in the bundled tree (shouldn't happen for these
-            // two, but don't fight it). Skip the restore.
-            continue;
+        let bundled = match read_package_version(python_bin, package) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                // Package isn't in the bundled tree (shouldn't happen for these
+                // two, but don't fight it). Skip the restore.
+                continue;
+            }
+            Err(e) => {
+                // Couldn't read the freshly-copied bundled version, so we can't
+                // compare. Skip rather than blindly reinstall (which might
+                // downgrade if bundled is actually newer).
+                warn!(
+                    "Could not read bundled {package} version ({e:#}); skipping {saved} restore."
+                );
+                continue;
+            }
         };
         if !crate::update::is_newer_version(saved, &bundled) {
             debug!(
@@ -315,12 +349,22 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 }
 
 /// Read the installed version of a Python package via `importlib.metadata`.
-/// Returns `None` if the package isn't installed or the call fails.
+///
+/// Returns:
+/// - `Ok(Some(v))` — installed at version `v`.
+/// - `Ok(None)` — confirmed not installed (`PackageNotFoundError`).
+/// - `Err(_)` — the probe itself failed (couldn't spawn the interpreter, or it
+///   exited non-zero on an unexpected exception). This is deliberately distinct
+///   from "not installed": callers that snapshot versions before a destructive
+///   refresh must not treat a flaky probe as "absent" — see
+///   [`snapshot_preserved_versions`].
 #[cfg(not(target_os = "windows"))]
-fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
+fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
     // Written as a single-line literal with explicit `\n` so each Python
     // statement starts at column zero — avoids any ambiguity about whether
-    // a Rust line-continuation strips the source-line indentation.
+    // a Rust line-continuation strips the source-line indentation. A clean
+    // exit with no output means PackageNotFoundError; any other exception
+    // propagates as a non-zero exit and is surfaced as an error below.
     let script = format!(
         "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
@@ -328,16 +372,32 @@ fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-c", &script]);
     configure_no_window_command(&mut cmd);
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to run version probe for {package}"))?;
+    parse_probe_output(package, output.status.success(), &output.stdout, &output.stderr)
+}
+
+/// Pure parser for [`read_package_version`]'s subprocess result. A successful
+/// run with empty stdout means the package is absent (`Ok(None)`); a non-empty
+/// stdout yields the trimmed version; a failed run is an error carrying the
+/// (tail-truncated) stderr.
+#[cfg(not(target_os = "windows"))]
+fn parse_probe_output(
+    package: &str,
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Option<String>> {
+    if !success {
+        let stderr = String::from_utf8_lossy(stderr);
+        anyhow::bail!(
+            "version probe for {package} exited non-zero: {}",
+            tail_for_log(&stderr)
+        );
     }
-    let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    let v = String::from_utf8_lossy(stdout).trim().to_string();
+    Ok(if v.is_empty() { None } else { Some(v) })
 }
 
 /// Hard upper bound on a single `pip install` invocation during the
@@ -968,5 +1028,29 @@ mod tests {
         assert_eq!(fs::read_link(&current).unwrap(), Path::new("3.13"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_probe_output_reports_version() {
+        let v = parse_probe_output("esphome", true, b"2026.5.0\n", b"").unwrap();
+        assert_eq!(v, Some("2026.5.0".to_string()));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_probe_output_empty_means_absent() {
+        let v = parse_probe_output("esphome", true, b"", b"").unwrap();
+        assert_eq!(v, None, "clean exit with no output means not installed");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_probe_output_failure_is_error_not_absent() {
+        // A non-zero exit must NOT be conflated with "not installed" — that
+        // conflation would let a flaky probe silently discard a user-pinned
+        // version during the bundled-Python refresh.
+        let err = parse_probe_output("esphome", false, b"", b"Traceback: boom").unwrap_err();
+        assert!(err.to_string().contains("esphome"), "error names the package");
     }
 }
