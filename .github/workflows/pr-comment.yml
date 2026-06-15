@@ -99,7 +99,7 @@ jobs:
           > These macOS builds are not signed or notarized, so Gatekeeper will refuse to open them. To run one, download the dmg, then re-sign it locally with the helper script from this repo. It needs no Apple certificate; by default it applies an ad-hoc signature that lets the app open on your own machine. No local clone required — download the script and run it directly:
           >
           > ```bash
-          > curl -fsSL https://raw.githubusercontent.com/esphome/esphome-desktop/main/build-scripts/sign_macos_local.sh -o sign_macos_local.sh
+          > curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/build-scripts/sign_macos_local.sh -o sign_macos_local.sh
           > bash sign_macos_local.sh ~/Downloads/the-downloaded.dmg
           > ```
           >
