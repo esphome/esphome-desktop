@@ -232,6 +232,9 @@ pub fn run(cli: Cli) {
             // No-op on non-macOS and after the user has answered once.
             platform::cleanup_legacy_macos_app(app.handle());
 
+            // Perform platform-specific initialization
+            platform::init(app.handle());
+
             // Initialize app state
             let state = Arc::new(AppState::new(app.handle())?);
             app.manage(state.clone());
