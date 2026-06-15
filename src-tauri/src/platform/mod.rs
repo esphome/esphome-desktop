@@ -701,9 +701,10 @@ pub fn send_ctrl_break(pid: u32) -> bool {
 }
 
 /// Platform-specific initialization
-pub fn init() {
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn init(app_handle: &AppHandle) {
     #[cfg(target_os = "macos")]
-    macos::init();
+    macos::init(app_handle);
 
     #[cfg(target_os = "windows")]
     windows::init();
@@ -714,9 +715,14 @@ pub fn init() {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    pub fn init() {
-        // macOS-specific initialization
-        // e.g., set activation policy for menu bar app
+    use tauri::{ActivationPolicy, AppHandle};
+
+    pub fn init(app_handle: &AppHandle) {
+        // Tray-only app with no windows: mark it as an accessory app so it
+        // doesn't appear in the Dock or the Cmd+Tab switcher.
+        if let Err(e) = app_handle.set_activation_policy(ActivationPolicy::Accessory) {
+            tracing::warn!("Failed to set macOS activation policy to Accessory: {e}");
+        }
     }
 }
 
