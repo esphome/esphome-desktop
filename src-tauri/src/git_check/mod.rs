@@ -58,20 +58,20 @@ finish that install, then restart ESPHome Device Builder so it can detect it.";
 /// can be unit-tested by passing a synthetic PATH rather than mutating the
 /// process environment.
 pub fn git_executable_in_path(path_var: &OsStr) -> Option<PathBuf> {
-    for dir in std::env::split_paths(path_var) {
+    git_executables_in_path(path_var).next()
+}
+
+/// Iterate over every git executable found on a PATH-style value, in
+/// left-to-right order. Unlike [`git_executable_in_path`], which stops at the
+/// first match, this yields all candidates so callers can keep scanning past an
+/// unusable one (e.g. the macOS `/usr/bin/git` stub shadowing a later real git).
+fn git_executables_in_path(path_var: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path_var)
         // Skip empty entries (e.g. a trailing separator), which would
         // otherwise resolve to the current working directory.
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        for name in GIT_EXECUTABLES {
-            let candidate = dir.join(name);
-            if is_git_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| GIT_EXECUTABLES.iter().map(move |name| dir.join(name)))
+        .filter(|candidate| is_git_executable(candidate))
 }
 
 /// Whether `path` is a usable git executable.
@@ -105,12 +105,10 @@ fn is_git_executable(path: &Path) -> bool {
 /// binary.
 fn is_git_available() -> bool {
     // `var_os` (not `var`) so a non-Unicode PATH doesn't read as "git missing".
-    let found = match std::env::var_os("PATH") {
-        Some(path) => git_executable_in_path(&path),
-        None => return false,
-    };
-    match found {
-        Some(path) => git_is_usable(&path),
+    // Scan every git on PATH and accept the first *usable* one, so a macOS
+    // `/usr/bin/git` stub earlier in PATH doesn't mask a real git later in it.
+    match std::env::var_os("PATH") {
+        Some(path) => git_executables_in_path(&path).any(|p| git_is_usable(&p)),
         None => false,
     }
 }
@@ -133,7 +131,7 @@ fn is_git_available() -> bool {
 fn git_is_usable(found: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
-        macos_git_usable(found, command_line_tools_installed())
+        macos_git_usable(found, command_line_tools_installed)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -145,9 +143,12 @@ fn git_is_usable(found: &Path) -> bool {
 /// Pure decision for [`git_is_usable`] on macOS: a `/usr/bin/git` is real only
 /// when the Command Line Tools are installed; any other path is taken as-is.
 /// Split out from the `xcode-select` probe so the stub logic is unit-testable.
+///
+/// `clt_installed` is taken lazily so the `xcode-select` probe only runs for the
+/// `/usr/bin/git` stub — a non-stub path (e.g. Homebrew) never shells out.
 #[cfg(target_os = "macos")]
-fn macos_git_usable(found: &Path, clt_installed: bool) -> bool {
-    found != Path::new("/usr/bin/git") || clt_installed
+fn macos_git_usable(found: &Path, clt_installed: impl FnOnce() -> bool) -> bool {
+    found != Path::new("/usr/bin/git") || clt_installed()
 }
 
 /// Whether the macOS Command Line Tools are installed.
@@ -162,8 +163,8 @@ fn command_line_tools_installed() -> bool {
 
     Command::new("/usr/bin/xcode-select")
         .arg("-p")
-        .output()
-        .map(|out| out.status.success())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -348,15 +349,18 @@ mod tests {
     #[test]
     fn macos_usr_bin_git_needs_command_line_tools() {
         // The `/usr/bin/git` stub is only a real git once the CLT are installed.
-        assert!(!macos_git_usable(Path::new("/usr/bin/git"), false));
-        assert!(macos_git_usable(Path::new("/usr/bin/git"), true));
+        assert!(!macos_git_usable(Path::new("/usr/bin/git"), || false));
+        assert!(macos_git_usable(Path::new("/usr/bin/git"), || true));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_non_stub_git_is_usable_without_command_line_tools() {
-        // A git found anywhere else (e.g. Homebrew) is never the stub.
-        assert!(macos_git_usable(Path::new("/opt/homebrew/bin/git"), false));
+        // A git found anywhere else (e.g. Homebrew) is never the stub, so the
+        // CLT probe is never consulted (this closure must not run).
+        assert!(macos_git_usable(Path::new("/opt/homebrew/bin/git"), || {
+            panic!("CLT probe must not run for a non-stub path")
+        }));
     }
 
     #[cfg(unix)]
