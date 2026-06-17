@@ -44,7 +44,8 @@
       }
     },
     "resources": [
-      "python"
+      "python",
+      "git"
     ]
   },
   "plugins": {
