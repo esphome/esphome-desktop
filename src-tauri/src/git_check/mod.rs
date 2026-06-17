@@ -261,12 +261,33 @@ pub fn notify_if_git_missing(app_handle: &AppHandle) {
 /// flagged. `.git` may be a directory (normal repo) or a file (worktree /
 /// submodule pointer), so existence rather than directory-ness is the test.
 ///
-/// Pure apart from filesystem existence checks, so it is unit-testable with a
-/// synthetic directory tree.
+/// A **relative** `config_dir` (the `PathBuf::from("esphome")` `home_dir()`
+/// fallback, or a relative user-supplied `settings.config_dir`) is first
+/// absolutized against the current working directory. Without this the ancestor
+/// chain would terminate in an empty path `""`, whose `.join(".git")` resolves
+/// relative to the cwd — yielding an empty repo root and a confusing
+/// "A parent folder ()" notification. Empty ancestors are also skipped
+/// defensively.
+///
+/// Pure apart from filesystem existence checks (and the cwd lookup), so it is
+/// unit-testable with a synthetic directory tree.
 fn git_repo_in_ancestors(config_dir: &Path) -> Option<PathBuf> {
+    // Absolutize a relative config dir so the ancestor walk terminates at a
+    // real filesystem root rather than an empty path.
+    let absolute;
+    let config_dir = if config_dir.is_absolute() {
+        config_dir
+    } else {
+        absolute = std::env::current_dir().ok()?.join(config_dir);
+        &absolute
+    };
+
     // `ancestors()` yields the path itself first; `skip(1)` excludes the
     // config dir so a version-controlled config folder doesn't trip the check.
     for ancestor in config_dir.ancestors().skip(1) {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
         if ancestor.join(".git").exists() {
             return Some(ancestor.to_path_buf());
         }
@@ -295,9 +316,9 @@ pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Pat
     let body = format!(
         "A parent folder ({}) is a Git repository. ESP-IDF builds can pick up \
          that repository and fail to compile with an opaque CMake \"head-ref\" \
-         error. If your devices fail to build, remove the stray .git folder \
-         from that parent directory, or move your ESPHome configuration outside \
-         the repository.",
+         error. If your devices fail to build, remove the stray .git entry \
+         (file or folder) from that parent directory, or move your ESPHome \
+         configuration outside the repository.",
         repo_root.display()
     );
 
