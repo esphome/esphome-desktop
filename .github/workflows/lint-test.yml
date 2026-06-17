@@ -136,11 +136,13 @@ jobs:
           # (matches build.yml). Harmless on Windows.
           cache-bin: false
 
-      # Stub the gitignored `python` bundle resource (see the Linux job). `bash`
+      # Stub the gitignored `python` and `git` bundle resources (see the Linux
+      # job). `tauri.conf.json` declares both at the top-level `bundle` block, so
+      # both are resources on macOS/Windows too (git = MinGit on Windows). `bash`
       # is forced so `mkdir -p` works on the Windows runner too.
-      - name: Stub bundle resource dir
+      - name: Stub bundle resource dirs
         shell: bash
-        run: mkdir -p src-tauri/python
+        run: mkdir -p src-tauri/python src-tauri/git
 
       # fmt is cfg-agnostic and already green on Linux; advisory here only to
       # guard against a Windows newline quirk on this first run.
