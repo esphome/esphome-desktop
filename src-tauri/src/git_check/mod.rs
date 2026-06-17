@@ -45,26 +45,22 @@ const GIT_MISSING_BODY_MACOS: &str = "ESPHome uses Git to download external comp
 compile without it. macOS is opening its Command Line Tools installer, which includes Git \u{2014} \
 finish that install, then restart ESPHome Device Builder so it can detect it.";
 
-/// Search a PATH-style value for a git executable.
+/// Iterate over every git executable found on a PATH-style value, in
+/// left-to-right order.
 ///
 /// `path_var` is the raw value of the `PATH` environment variable, with
 /// entries separated by the platform path separator (`:` on Unix, `;` on
 /// Windows). It is an `OsStr` rather than a `str` so a non-Unicode `PATH`
 /// (legal on both Unix and Windows) is handled instead of being treated as
-/// "git missing". Returns the first existing candidate found, scanning entries
-/// left-to-right, or `None` if git is not present in any entry.
+/// "git missing".
+///
+/// All candidates are yielded (rather than stopping at the first match) so
+/// callers can keep scanning past an unusable one — e.g. the macOS
+/// `/usr/bin/git` stub shadowing a later real git.
 ///
 /// This is intentionally pure apart from filesystem existence checks, so it
 /// can be unit-tested by passing a synthetic PATH rather than mutating the
 /// process environment.
-pub fn git_executable_in_path(path_var: &OsStr) -> Option<PathBuf> {
-    git_executables_in_path(path_var).next()
-}
-
-/// Iterate over every git executable found on a PATH-style value, in
-/// left-to-right order. Unlike [`git_executable_in_path`], which stops at the
-/// first match, this yields all candidates so callers can keep scanning past an
-/// unusable one (e.g. the macOS `/usr/bin/git` stub shadowing a later real git).
 fn git_executables_in_path(path_var: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
     std::env::split_paths(path_var)
         // Skip empty entries (e.g. a trailing separator), which would
@@ -120,7 +116,7 @@ fn is_git_available() -> bool {
 /// the Xcode Command Line Tools still ships `/usr/bin/git` as a **stub** whose
 /// only job is to pop the CLT installer when invoked. That stub is a real,
 /// executable file, so it satisfies the PATH + execute-bit checks and makes
-/// `git_executable_in_path` report git as present even though no working git
+/// the PATH scan report git as present even though no working git
 /// exists. ESPHome would then resolve the same stub and fail deep inside
 /// Python, exactly the cryptic failure this module exists to prevent.
 ///
@@ -288,7 +284,7 @@ mod tests {
         let git = touch_git_executable(&dir);
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), Some(git));
+        assert_eq!(git_executables_in_path(&path_var).next(), Some(git));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -298,14 +294,14 @@ mod tests {
         let dir = unique_temp_dir("absent");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn empty_path_yields_none() {
-        assert_eq!(git_executable_in_path(OsStr::new("")), None);
+        assert_eq!(git_executables_in_path(OsStr::new("")).next(), None);
     }
 
     #[test]
@@ -319,7 +315,7 @@ mod tests {
         let missing = empty.join("does-not-exist");
         let path_var = join_path(&[missing.as_path(), empty.as_path(), with_git.as_path()]);
 
-        assert_eq!(git_executable_in_path(&path_var), Some(git));
+        assert_eq!(git_executables_in_path(&path_var).next(), Some(git));
 
         let _ = fs::remove_dir_all(&empty);
         let _ = fs::remove_dir_all(&with_git);
@@ -333,7 +329,7 @@ mod tests {
         fs::create_dir_all(dir.join(GIT_EXECUTABLES[0])).expect("create git dir");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -375,7 +371,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod -x");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
     }

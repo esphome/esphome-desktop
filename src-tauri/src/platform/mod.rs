@@ -178,7 +178,7 @@ pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// Pure (no environment mutation) so the prepend ordering, separator
 /// correctness, and non-Unicode `PATH` preservation can be unit-tested with a
 /// synthetic value rather than touching the real process environment — the same
-/// split-the-logic pattern `git_check::git_executable_in_path` uses. Going
+/// split-the-logic pattern `git_check::git_executables_in_path` uses. Going
 /// through `split_paths`/`join_paths` keeps the platform separator correct and
 /// round-trips a non-Unicode `PATH` instead of lossily dropping it.
 fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
