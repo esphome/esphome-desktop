@@ -337,28 +337,17 @@ impl UpdateChecker {
             // dependency (e.g. zeroconf) has no RECORD file, retry skipping the
             // uninstall step — same broken-RECORD recovery as #155, here on the
             // dev/GitHub path (#183).
-            let output = run_dev_install(&python_path, false).await?;
-
-            if output.status.success() {
-                info!("ESPHome dev installed successfully from GitHub");
-                return Ok(());
-            }
-
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !is_missing_record_error(&stderr) {
-                anyhow::bail!("pip install from GitHub failed: {}", stderr);
-            }
-
-            info!("ESPHome dev install hit missing RECORD file; retrying with --ignore-installed");
-            let retry = run_dev_install(&python_path, true).await?;
-
-            if retry.status.success() {
-                info!("ESPHome dev installed successfully from GitHub (--ignore-installed fallback)");
-                Ok(())
-            } else {
-                let retry_stderr = String::from_utf8_lossy(&retry.stderr);
-                anyhow::bail!("pip install from GitHub failed: {}", retry_stderr)
-            }
+            let pp = python_path.clone();
+            install_with_record_retry(
+                move |ignore| {
+                    let pp = pp.clone();
+                    async move { run_dev_install(&pp, ignore).await }
+                },
+                "ESPHome dev installed successfully from GitHub",
+                "ESPHome dev install hit missing RECORD file; retrying with --ignore-installed",
+                "pip install from GitHub failed",
+            )
+            .await
         } else {
             info!("Updating ESPHome to version {}", version);
 
@@ -398,33 +387,17 @@ impl UpdateChecker {
         // copy). Only if pip aborts on a missing RECORD file (#155) do we retry
         // with --ignore-installed, which skips the uninstall but orphans stale
         // files — so we limit that trade-off to the broken-RECORD case.
-        let output = run_device_builder_install(&python_path, backend, false).await?;
-
-        if output.status.success() {
-            info!("esphome-device-builder installed/upgraded successfully");
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !is_missing_record_error(&stderr) {
-            anyhow::bail!("pip install esphome-device-builder failed: {}", stderr);
-        }
-
-        info!(
-            "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed"
-        );
-        let retry = run_device_builder_install(&python_path, backend, true).await?;
-
-        if retry.status.success() {
-            info!("esphome-device-builder installed/upgraded successfully (--ignore-installed fallback)");
-            Ok(())
-        } else {
-            let retry_stderr = String::from_utf8_lossy(&retry.stderr);
-            anyhow::bail!(
-                "pip install esphome-device-builder failed: {}",
-                retry_stderr
-            )
-        }
+        let pp = python_path.clone();
+        install_with_record_retry(
+            move |ignore| {
+                let pp = pp.clone();
+                async move { run_device_builder_install(&pp, backend, ignore).await }
+            },
+            "esphome-device-builder installed/upgraded successfully",
+            "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed",
+            "pip install esphome-device-builder failed",
+        )
+        .await
     }
 
     /// Query PyPI for the latest available `esphome-device-builder` version.
@@ -851,6 +824,45 @@ fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
+/// Run a pip install with the shared broken-RECORD recovery policy (#155/#183).
+///
+/// `run(false)` performs the normal install (a clean uninstall of the old
+/// copy). If that aborts because a package has no `dist-info/RECORD` file
+/// (`is_missing_record_error`), `run(true)` retries with `--ignore-installed`,
+/// which skips the uninstall and installs over the top. Any other failure
+/// bails immediately, surfacing the original stderr. Both install paths share
+/// this orchestration so the recovery policy lives in one place.
+async fn install_with_record_retry<F, Fut>(
+    run: F,
+    success_msg: &str,
+    retry_log: &str,
+    fail_prefix: &str,
+) -> Result<()>
+where
+    F: Fn(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<std::process::Output>>,
+{
+    let output = run(false).await?;
+    if output.status.success() {
+        info!("{success_msg}");
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !is_missing_record_error(&stderr) {
+        anyhow::bail!("{fail_prefix}: {stderr}");
+    }
+
+    info!("{retry_log}");
+    let retry = run(true).await?;
+    if retry.status.success() {
+        info!("{success_msg} (--ignore-installed fallback)");
+        Ok(())
+    } else {
+        anyhow::bail!("{fail_prefix}: {}", String::from_utf8_lossy(&retry.stderr));
+    }
+}
+
 /// Get the installed ESPHome version
 pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
     let python_path = platform::get_python_path(app_handle)?;
@@ -1142,6 +1154,101 @@ mod tests {
         assert!(args.contains(&"--ignore-installed"));
         assert!(args.contains(&"--force-reinstall"));
         assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
+    }
+
+    /// Build a canned `Output` with the given success flag and stderr, so the
+    /// retry orchestration can be unit-tested without spawning pip.
+    fn fake_output(success: bool, stderr: &str) -> std::process::Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            // Unix wait-status: 0 is success; exit code 1 encodes as 1 << 8.
+            std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 })
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(if success { 0 } else { 1 })
+        };
+        std::process::Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_with_record_retry_success_first_try() {
+        // A clean install never triggers the --ignore-installed retry.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let seen = calls.clone();
+        let result = install_with_record_retry(
+            move |ignore| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(ignore);
+                    Ok(fake_output(true, ""))
+                }
+            },
+            "ok",
+            "retrying",
+            "failed",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(*calls.lock().unwrap(), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn test_install_with_record_retry_recovers_on_missing_record() {
+        // First attempt aborts on a missing RECORD file; the helper retries
+        // with ignore_installed=true and succeeds (issues #155/#183).
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let seen = calls.clone();
+        let result = install_with_record_retry(
+            move |ignore| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(ignore);
+                    if ignore {
+                        Ok(fake_output(true, ""))
+                    } else {
+                        Ok(fake_output(false, "error: uninstall-no-record-file"))
+                    }
+                }
+            },
+            "ok",
+            "retrying",
+            "failed",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+    }
+
+    #[tokio::test]
+    async fn test_install_with_record_retry_bails_on_other_failure() {
+        // A failure that is NOT a missing-RECORD abort bails immediately,
+        // surfacing the original stderr without retrying.
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let seen = calls.clone();
+        let result = install_with_record_retry(
+            move |ignore| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(ignore);
+                    Ok(fake_output(false, "some other pip failure"))
+                }
+            },
+            "ok",
+            "retrying",
+            "pip blew up",
+        )
+        .await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("pip blew up"));
+        assert!(err.contains("some other pip failure"));
+        assert_eq!(*calls.lock().unwrap(), vec![false]);
     }
 
     #[test]
