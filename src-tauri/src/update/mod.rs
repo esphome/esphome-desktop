@@ -333,24 +333,31 @@ impl UpdateChecker {
         if channel == ReleaseChannel::Dev || version == "dev" {
             info!("Installing ESPHome from GitHub (dev channel)");
 
-            let mut cmd = tokio::process::Command::new(&python_path);
-            cmd.args([
-                "-m",
-                "pip",
-                "install",
-                "--force-reinstall",
-                "https://github.com/esphome/esphome/archive/dev.zip",
-            ]);
-            platform::configure_no_window_tokio_command(&mut cmd);
-
-            let output = cmd.output().await.context("Failed to run pip install")?;
+            // Try a clean --force-reinstall first. If pip aborts because a
+            // dependency (e.g. zeroconf) has no RECORD file, retry skipping the
+            // uninstall step — same broken-RECORD recovery as #155, here on the
+            // dev/GitHub path (#183).
+            let output = run_dev_install(&python_path, false).await?;
 
             if output.status.success() {
                 info!("ESPHome dev installed successfully from GitHub");
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !is_missing_record_error(&stderr) {
+                anyhow::bail!("pip install from GitHub failed: {}", stderr);
+            }
+
+            info!("ESPHome dev install hit missing RECORD file; retrying with --ignore-installed");
+            let retry = run_dev_install(&python_path, true).await?;
+
+            if retry.status.success() {
+                info!("ESPHome dev installed successfully from GitHub (--ignore-installed fallback)");
                 Ok(())
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("pip install from GitHub failed: {}", stderr)
+                let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+                anyhow::bail!("pip install from GitHub failed: {}", retry_stderr)
             }
         } else {
             info!("Updating ESPHome to version {}", version);
@@ -804,6 +811,40 @@ async fn run_device_builder_install(
     cmd.output().await.context("Failed to run pip install")
 }
 
+/// URL of the ESPHome dev-branch source archive installed on the Dev channel.
+const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/dev.zip";
+
+/// Build the `pip` argument list for installing ESPHome from the dev GitHub zip.
+///
+/// When `ignore_installed` is false this is a plain `--force-reinstall`, which
+/// uninstalls the existing copy of each affected package first. Pass `true`
+/// only as a fallback for the missing-RECORD case: a bundled dependency such as
+/// `zeroconf` can ship without a `dist-info/RECORD` file, and `--force-reinstall`
+/// then aborts with `error: uninstall-no-record-file` ("no RECORD file was
+/// found", issue #183). `--ignore-installed` skips the uninstall and installs
+/// over the top — pip's own documented recovery — at the cost of leaving stale
+/// files orphaned, so it is limited to the genuinely-broken RECORD case.
+fn dev_install_args(ignore_installed: bool) -> Vec<&'static str> {
+    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--force-reinstall"];
+    if ignore_installed {
+        args.push("--ignore-installed");
+    }
+    args.push(ESPHOME_DEV_ZIP_URL);
+    args
+}
+
+/// Run `pip install` for the ESPHome dev GitHub zip with the given flags.
+async fn run_dev_install(
+    python_path: &std::path::Path,
+    ignore_installed: bool,
+) -> Result<std::process::Output> {
+    let args = dev_install_args(ignore_installed);
+    let mut cmd = tokio::process::Command::new(python_path);
+    cmd.args(&args);
+    platform::configure_no_window_tokio_command(&mut cmd);
+    cmd.output().await.context("Failed to run pip install")
+}
+
 /// Detect pip's missing-RECORD abort, which is the failure that warrants the
 /// `--ignore-installed` retry (issue #155).
 fn is_missing_record_error(stderr: &str) -> bool {
@@ -1072,6 +1113,35 @@ mod tests {
             "Cannot uninstall esphome-device-builder ...: no RECORD file was found"
         ));
         assert!(!is_missing_record_error("some other pip failure"));
+    }
+
+    #[test]
+    fn test_is_missing_record_error_dev_zeroconf() {
+        // The #183 dev-channel failure: a dependency (zeroconf) lacks a RECORD
+        // file, which must also trigger the --ignore-installed retry.
+        assert!(is_missing_record_error(
+            "error: uninstall-no-record-file\n\n× Cannot uninstall zeroconf None\n╰─> The package's contents are unknown: no RECORD file was found for zeroconf."
+        ));
+    }
+
+    #[test]
+    fn test_dev_install_args_default_no_ignore_installed() {
+        // The default (first-attempt) dev install must NOT pass
+        // --ignore-installed, so a normal install still reinstalls cleanly.
+        let args = dev_install_args(false);
+        assert!(!args.contains(&"--ignore-installed"));
+        assert!(args.contains(&"--force-reinstall"));
+        assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
+    }
+
+    #[test]
+    fn test_dev_install_args_ignore_installed_fallback() {
+        // The fallback adds --ignore-installed so a missing RECORD file in a
+        // bundled dependency can't abort the retry (issue #183).
+        let args = dev_install_args(true);
+        assert!(args.contains(&"--ignore-installed"));
+        assert!(args.contains(&"--force-reinstall"));
+        assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
     }
 
     #[test]
