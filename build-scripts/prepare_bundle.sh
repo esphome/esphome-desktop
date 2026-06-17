@@ -26,9 +26,13 @@ BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download
 # The full MinGit tree is required, not just git.exe: its bundled CA bundle
 # (mingw64/etc/ssl/certs/ca-bundle.crt) and system gitconfig are what make
 # HTTPS clones work without a system cert store or $HOME.
+# MINGIT_VERSION is display-only; MINGIT_URL is the literal asset URL rather
+# than something rebuilt from the version, because Git for Windows rebuilds
+# encode their build number differently in the tag and the filename (e.g. tag
+# v2.53.0.windows.3 ships MinGit-2.53.0.3-64-bit.zip). All three are rewritten
+# by the nightly `bump_bundle_versions.py --target mingit` job.
 MINGIT_VERSION="2.54.0"
-MINGIT_FILENAME="MinGit-${MINGIT_VERSION}-64-bit.zip"
-MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v${MINGIT_VERSION}.windows.1/${MINGIT_FILENAME}"
+MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
 MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -189,7 +193,7 @@ prepare_git_for_platform() {
 
     # Cache under $BUILD_DIR (which we own and created) rather than the shared,
     # world-writable /tmp so a stale file owned by another user can't collide.
-    local temp_file="$BUILD_DIR/${MINGIT_FILENAME}"
+    local temp_file="$BUILD_DIR/$(basename "$MINGIT_URL")"
 
     echo ""
     echo "=== Downloading MinGit ${MINGIT_VERSION} ==="
