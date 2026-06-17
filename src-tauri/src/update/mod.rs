@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -878,8 +879,17 @@ fn prerelease_ord(tag: &str) -> u8 {
 /// the tier logic already ranks correctly. Only `.dev` is normalized: among PEP
 /// 440 pre-release kinds it is the only one that uses a dot separator (`aN`,
 /// `bN`, `rcN` attach directly), so this fully closes the dot-separator gap.
-fn normalize_dev_separator(s: &str) -> String {
-    s.replace(".dev", "-dev")
+///
+/// Returns a borrowed `Cow` when the input has no `.dev` segment (the common
+/// case while scanning PyPI releases), allocating only when a substitution is
+/// needed. PEP 440 permits at most one `.devN` segment, so only the first
+/// occurrence is replaced.
+fn normalize_dev_separator(s: &str) -> Cow<'_, str> {
+    if s.contains(".dev") {
+        Cow::Owned(s.replacen(".dev", "-dev", 1))
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
 /// Parse a version string like "2024.1.0b1", "2026.5.0-dev", or the PEP 440
