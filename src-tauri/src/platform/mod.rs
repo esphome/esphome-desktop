@@ -1127,7 +1127,7 @@ mod tests {
             "marker comes first"
         );
         assert!(
-            out.ends_with(&"x".repeat(PIP_STDERR_TAIL_BYTES)),
+            out.ends_with(&s[s.len() - PIP_STDERR_TAIL_BYTES..]),
             "keeps tail"
         );
     }
@@ -1136,8 +1136,9 @@ mod tests {
     #[test]
     fn tail_for_log_does_not_split_a_multibyte_char() {
         // 1366 * 3 bytes = 4098 > 4096; the naive cut at len-4096 lands at
-        // byte 2, mid-"€". The boundary backup must avoid slicing a char,
-        // so the result stays valid UTF-8 and never panics.
+        // byte 2, mid-"€". The function advances past the partial leading
+        // char to the next char boundary, so the result stays valid UTF-8
+        // and never panics.
         let s = "€".repeat(1366);
         let out = tail_for_log(&s);
         assert!(out.contains("truncated"), "long input must be marked");
