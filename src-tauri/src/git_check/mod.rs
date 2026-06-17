@@ -45,33 +45,29 @@ const GIT_MISSING_BODY_MACOS: &str = "ESPHome uses Git to download external comp
 compile without it. macOS is opening its Command Line Tools installer, which includes Git \u{2014} \
 finish that install, then restart ESPHome Device Builder so it can detect it.";
 
-/// Search a PATH-style value for a git executable.
+/// Iterate over every git executable found on a PATH-style value, in
+/// left-to-right order.
 ///
 /// `path_var` is the raw value of the `PATH` environment variable, with
 /// entries separated by the platform path separator (`:` on Unix, `;` on
 /// Windows). It is an `OsStr` rather than a `str` so a non-Unicode `PATH`
 /// (legal on both Unix and Windows) is handled instead of being treated as
-/// "git missing". Returns the first existing candidate found, scanning entries
-/// left-to-right, or `None` if git is not present in any entry.
+/// "git missing".
+///
+/// All candidates are yielded (rather than stopping at the first match) so
+/// callers can keep scanning past an unusable one — e.g. the macOS
+/// `/usr/bin/git` stub shadowing a later real git.
 ///
 /// This is intentionally pure apart from filesystem existence checks, so it
 /// can be unit-tested by passing a synthetic PATH rather than mutating the
 /// process environment.
-pub fn git_executable_in_path(path_var: &OsStr) -> Option<PathBuf> {
-    for dir in std::env::split_paths(path_var) {
+fn git_executables_in_path(path_var: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path_var)
         // Skip empty entries (e.g. a trailing separator), which would
         // otherwise resolve to the current working directory.
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        for name in GIT_EXECUTABLES {
-            let candidate = dir.join(name);
-            if is_git_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| GIT_EXECUTABLES.iter().map(move |name| dir.join(name)))
+        .filter(|candidate| is_git_executable(candidate))
 }
 
 /// Whether `path` is a usable git executable.
@@ -105,10 +101,67 @@ fn is_git_executable(path: &Path) -> bool {
 /// binary.
 fn is_git_available() -> bool {
     // `var_os` (not `var`) so a non-Unicode PATH doesn't read as "git missing".
+    // Scan every git on PATH and accept the first *usable* one, so a macOS
+    // `/usr/bin/git` stub earlier in PATH doesn't mask a real git later in it.
     match std::env::var_os("PATH") {
-        Some(path) => git_executable_in_path(&path).is_some(),
+        Some(path) => git_executables_in_path(&path).any(|p| git_is_usable(&p)),
         None => false,
     }
+}
+
+/// Whether a git executable found on `PATH` is actually runnable.
+///
+/// On most platforms, presence on `PATH` (with an execute bit, checked by
+/// [`is_git_executable`]) is sufficient. macOS is the exception: a Mac without
+/// the Xcode Command Line Tools still ships `/usr/bin/git` as a **stub** whose
+/// only job is to pop the CLT installer when invoked. That stub is a real,
+/// executable file, so it satisfies the PATH + execute-bit checks and makes
+/// the PATH scan report git as present even though no working git
+/// exists. ESPHome would then resolve the same stub and fail deep inside
+/// Python, exactly the cryptic failure this module exists to prevent.
+///
+/// `xcode-select -p` exits 0 only when the Command Line Tools are actually
+/// installed and is side-effect free, so we use it to tell a real git from the
+/// stub. We only second-guess `/usr/bin/git`; any other path (Homebrew, a real
+/// CLT git resolved elsewhere) is taken at face value.
+fn git_is_usable(found: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        macos_git_usable(found, command_line_tools_installed)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = found; // the stub only exists on macOS; elsewhere PATH presence is enough.
+        true
+    }
+}
+
+/// Pure decision for [`git_is_usable`] on macOS: a `/usr/bin/git` is real only
+/// when the Command Line Tools are installed; any other path is taken as-is.
+/// Split out from the `xcode-select` probe so the stub logic is unit-testable.
+///
+/// `clt_installed` is taken lazily so the `xcode-select` probe only runs for the
+/// `/usr/bin/git` stub — a non-stub path (e.g. Homebrew) never shells out.
+#[cfg(target_os = "macos")]
+fn macos_git_usable(found: &Path, clt_installed: impl FnOnce() -> bool) -> bool {
+    found != Path::new("/usr/bin/git") || clt_installed()
+}
+
+/// Whether the macOS Command Line Tools are installed.
+///
+/// `xcode-select -p` prints the active developer directory and exits 0 only
+/// when the tools are present; it exits non-zero (and is otherwise a no-op)
+/// when they are absent, so it is a safe, side-effect-free probe for telling a
+/// working git from the `/usr/bin/git` installer stub.
+#[cfg(target_os = "macos")]
+fn command_line_tools_installed() -> bool {
+    use std::process::Command;
+
+    Command::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Show the git-missing notification with the given body.
@@ -231,7 +284,7 @@ mod tests {
         let git = touch_git_executable(&dir);
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), Some(git));
+        assert_eq!(git_executables_in_path(&path_var).next(), Some(git));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -241,14 +294,14 @@ mod tests {
         let dir = unique_temp_dir("absent");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn empty_path_yields_none() {
-        assert_eq!(git_executable_in_path(OsStr::new("")), None);
+        assert_eq!(git_executables_in_path(OsStr::new("")).next(), None);
     }
 
     #[test]
@@ -262,7 +315,7 @@ mod tests {
         let missing = empty.join("does-not-exist");
         let path_var = join_path(&[missing.as_path(), empty.as_path(), with_git.as_path()]);
 
-        assert_eq!(git_executable_in_path(&path_var), Some(git));
+        assert_eq!(git_executables_in_path(&path_var).next(), Some(git));
 
         let _ = fs::remove_dir_all(&empty);
         let _ = fs::remove_dir_all(&with_git);
@@ -276,9 +329,34 @@ mod tests {
         fs::create_dir_all(dir.join(GIT_EXECUTABLES[0])).expect("create git dir");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_normal_git_path_is_usable() {
+        // Any path other than the macOS `/usr/bin/git` stub is taken at face
+        // value on every platform (on non-macOS, all paths are).
+        assert!(git_is_usable(Path::new("/opt/homebrew/bin/git")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_usr_bin_git_needs_command_line_tools() {
+        // The `/usr/bin/git` stub is only a real git once the CLT are installed.
+        assert!(!macos_git_usable(Path::new("/usr/bin/git"), || false));
+        assert!(macos_git_usable(Path::new("/usr/bin/git"), || true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_non_stub_git_is_usable_without_command_line_tools() {
+        // A git found anywhere else (e.g. Homebrew) is never the stub, so the
+        // CLT probe is never consulted (this closure must not run).
+        assert!(macos_git_usable(Path::new("/opt/homebrew/bin/git"), || {
+            panic!("CLT probe must not run for a non-stub path")
+        }));
     }
 
     #[cfg(unix)]
@@ -293,7 +371,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod -x");
 
         let path_var = join_path(&[dir.as_path()]);
-        assert_eq!(git_executable_in_path(&path_var), None);
+        assert_eq!(git_executables_in_path(&path_var).next(), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
