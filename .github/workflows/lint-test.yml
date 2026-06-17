@@ -85,3 +85,78 @@ jobs:
       - name: Tests
         working-directory: src-tauri
         run: cargo test --all-features --verbose
+
+  # Cross-platform coverage for the Windows/macOS `#[cfg]` branches. The
+  # `lint-test` job above only ever lints/tests the Linux compilation: clippy
+  # and `cargo test` evaluate code for the *host* target, so every
+  # `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "macos")]` block (the
+  # Win32 console/process-group code, the macOS app-cleanup and CLT git probe,
+  # the platform-specific Python paths, …) is invisible to the required gate.
+  # `cargo fmt` is the exception — it formats stripped-out branches regardless
+  # of target — so formatting is checked here just like on Linux (advisory on
+  # this job).
+  #
+  # Every step here is ADVISORY: these checks run for the first time on these
+  # platforms and have no established green baseline, so a real lint, a Windows
+  # newline quirk, or a path-separator assumption in a test would otherwise
+  # block unrelated PRs. A failure surfaces as a `::warning::` annotation
+  # instead of a red check. This mirrors exactly how the Linux clippy/fmt gates
+  # were introduced (advisory first, promoted once green). To promote: drop the
+  # `|| echo "::warning::…"` tails and add these checks to branch protection.
+  lint-test-cross:
+    name: Rust lint & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Same pinned toolchain as the Linux job so the advisory clippy/fmt lints
+      # match what a maintainer would promote later. No webkit/appindicator
+      # deps are needed: Tauri uses the system WebView2 (Windows) / WKWebView
+      # (macOS), not the GTK/webkit stack.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, pinned via toolchain: below
+        with:
+          toolchain: 1.96.0
+          components: clippy, rustfmt
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: src-tauri
+          key: lint-test-${{ matrix.os }}
+          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
+          # produces broken cargo/rustc symlinks on the new macOS runner image
+          # (matches build.yml). Harmless on Windows.
+          cache-bin: false
+
+      # Stub the gitignored `python` and `git` bundle resources (see the Linux
+      # job). `tauri.conf.json` declares both at the top-level `bundle` block, so
+      # both are resources on macOS/Windows too (git = MinGit on Windows). `bash`
+      # is forced so `mkdir -p` works on the Windows runner too.
+      - name: Stub bundle resource dirs
+        shell: bash
+        run: mkdir -p src-tauri/python src-tauri/git
+
+      # fmt is cfg-agnostic and already green on Linux; advisory here only to
+      # guard against a Windows newline quirk on this first run.
+      - name: Formatting (advisory)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo fmt --all --check || echo "::warning::cargo fmt --check failed on ${{ matrix.os }} (advisory — not blocking)"
+
+      - name: Clippy (advisory)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo clippy --all-targets --all-features -- -D warnings || echo "::warning::clippy found issues on ${{ matrix.os }} (advisory — not blocking)"
+
+      - name: Tests (advisory)
+        working-directory: src-tauri
+        shell: bash
+        run: cargo test --all-features --verbose || echo "::warning::cargo test failed on ${{ matrix.os }} (advisory — not blocking)"
