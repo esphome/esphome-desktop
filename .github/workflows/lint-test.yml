@@ -93,7 +93,8 @@ jobs:
   # Win32 console/process-group code, the macOS app-cleanup and CLT git probe,
   # the platform-specific Python paths, …) is invisible to the required gate.
   # `cargo fmt` is the exception — it formats stripped-out branches regardless
-  # of target — so formatting is enforced here just like on Linux.
+  # of target — so formatting is checked here just like on Linux (advisory on
+  # this job).
   #
   # Every step here is ADVISORY: these checks run for the first time on these
   # platforms and have no established green baseline, so a real lint, a Windows
@@ -130,6 +131,10 @@ jobs:
         with:
           workspaces: src-tauri
           key: lint-test-${{ matrix.os }}
+          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
+          # produces broken cargo/rustc symlinks on the new macOS runner image
+          # (matches build.yml). Harmless on Windows.
+          cache-bin: false
 
       # Stub the gitignored `python` bundle resource (see the Linux job). `bash`
       # is forced so `mkdir -p` works on the Windows runner too.
