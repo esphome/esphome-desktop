@@ -404,7 +404,13 @@ fn set_launch_at_startup(app_handle: &AppHandle, state: &Arc<AppState>, enable: 
             e
         );
     }
-    update_startup_checks(enable);
+    // Reflect the actual OS state rather than the requested one: enable/disable
+    // can fail (permissions, policy, platform limits), and showing the requested
+    // state would mislead. Fall back to the requested value only if the query
+    // itself fails. The persisted setting keeps the user's intent, so the
+    // launch-time reconcile retries.
+    let actual = manager.is_enabled().unwrap_or(enable);
+    update_startup_checks(actual);
 }
 
 /// Re-detect the installed version and update the tray version display.
