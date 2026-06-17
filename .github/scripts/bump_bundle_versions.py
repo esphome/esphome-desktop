@@ -264,7 +264,12 @@ def _asset_sha256(asset: dict[str, Any]) -> str:
     digest = asset.get("digest") or ""
     if digest.startswith("sha256:"):
         return digest.split(":", 1)[1]
-    return _download_sha256(asset["browser_download_url"])
+    url = asset.get("browser_download_url")
+    if not url:
+        raise ResolutionError(
+            f"asset {asset.get('name')!r} has no digest or download URL"
+        )
+    return _download_sha256(url)
 
 
 def resolve_latest_mingit() -> tuple[str, str, str]:
@@ -344,9 +349,25 @@ def resolve_python_bump(text: str) -> tuple[BumpResult, str]:
     return result, title
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted MinGit version (e.g. "2.54.0" or rebuild "2.53.0.3")."""
+    return tuple(int(part) for part in version.split("."))
+
+
 def resolve_mingit_bump(text: str) -> tuple[BumpResult, str]:
     """Resolve the latest MinGit and compute the bump over `text`."""
+    current = read_assignment(text, "MINGIT_VERSION")
     version, url, sha256 = resolve_latest_mingit()
+    # Git for Windows releases move forward, so a resolved version older than the
+    # current pin means upstream republished an old tag as `latest` or unpublished
+    # a release. That's a broken assumption, not a routine skip: fail loudly
+    # rather than open a PR moving bundled git backwards (the sha check would pass
+    # on a genuine older release, so only this guard catches it).
+    if _version_tuple(version) < _version_tuple(current):
+        raise ResolutionError(
+            f"latest MinGit {version} is older than the pinned {current}; "
+            "refusing to downgrade"
+        )
     result = apply_bumps(
         text,
         {"MINGIT_VERSION": version, "MINGIT_URL": url, "MINGIT_SHA256": sha256},

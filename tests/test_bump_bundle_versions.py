@@ -277,6 +277,13 @@ def test_asset_sha256_falls_back_to_download(monkeypatch: pytest.MonkeyPatch) ->
     assert bump._asset_sha256(asset) == "ef" * 32
 
 
+def test_asset_sha256_raises_resolution_error_without_digest_or_url() -> None:
+    # Neither a usable digest nor a download URL: a clean ResolutionError rather
+    # than a bare KeyError, matching the rest of the broken-upstream handling.
+    with pytest.raises(bump.ResolutionError):
+        bump._asset_sha256({"name": "MinGit-2.54.0-64-bit.zip"})
+
+
 # --------------------------------------------------------------------------- #
 # CLI behaviour (failure paths, output emission).
 # --------------------------------------------------------------------------- #
@@ -424,6 +431,36 @@ def test_main_mingit_no_op_when_already_current(
     assert rc == 0
     assert script.read_text() == SAMPLE_SCRIPT
     assert "changed=false" in out.read_text()
+
+
+def test_main_mingit_refuses_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Current pin is 2.53.0; a resolved older release (upstream republished an
+    # old tag as latest) must fail loudly rather than open a backwards PR.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    old_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.52.0.windows.1/MinGit-2.52.0-64-bit.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_mingit", lambda: ("2.52.0", old_url, "aa" * 32)
+    )
+
+    rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 1
+    # The file is untouched and no bump output is written.
+    assert script.read_text() == SAMPLE_SCRIPT
+    assert not out.exists() or "changed=true" not in out.read_text()
+
+
+def test_version_tuple_orders_rebuilds_after_base() -> None:
+    # A .windows.N rebuild (2.53.0.3) must sort after the base release (2.53.0).
+    assert bump._version_tuple("2.53.0.3") > bump._version_tuple("2.53.0")
+    assert bump._version_tuple("2.54.0") > bump._version_tuple("2.53.0.3")
 
 
 def test_main_mingit_fails_when_variables_absent(
