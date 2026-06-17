@@ -13,8 +13,8 @@
 
 set -e
 
-PYTHON_VERSION="3.13.13"
-PBS_VERSION="20260602"
+PYTHON_VERSION="3.13.14"
+PBS_VERSION="20260610"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
