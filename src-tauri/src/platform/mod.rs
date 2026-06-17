@@ -457,7 +457,12 @@ fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<Strin
     let output = cmd
         .output()
         .with_context(|| format!("Failed to run version probe for {package}"))?;
-    parse_probe_output(package, output.status.success(), &output.stdout, &output.stderr)
+    parse_probe_output(
+        package,
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )
 }
 
 /// Pure parser for [`read_package_version`]'s subprocess result. A successful
@@ -1231,6 +1236,9 @@ mod tests {
         // conflation would let a flaky probe silently discard a user-pinned
         // version during the bundled-Python refresh.
         let err = parse_probe_output("esphome", false, b"", b"Traceback: boom").unwrap_err();
-        assert!(err.to_string().contains("esphome"), "error names the package");
+        assert!(
+            err.to_string().contains("esphome"),
+            "error names the package"
+        );
     }
 }
