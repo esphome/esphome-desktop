@@ -1,10 +1,11 @@
 name: Bump bundle versions
 
-# Nightly check for a newer pinned bundled Python in
-# build-scripts/prepare_bundle.sh and open a PR when one is available. The
-# Python interpreter (python-build-standalone) stays on its current minor and
-# only takes newer patches. The PR (not a direct push) runs the full Build +
-# lint/test CI so a human merges only after the platforms are green.
+# Nightly check for newer pinned bundled dependencies in
+# build-scripts/prepare_bundle.sh, one PR per target when an update is
+# available. Python (python-build-standalone) stays on its current minor and
+# only takes newer patches; MinGit (Git for Windows) tracks the latest release.
+# The PR (not a direct push) runs the full Build + lint/test CI so a human
+# merges only after the platforms are green.
 
 on:
   schedule:
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   bump:
-    name: Bump Python
+    name: Bump ${{ matrix.target }}
     runs-on: ubuntu-22.04
     # Backstop the whole job well under the 6h default. The work is a couple of
     # API calls plus a PR open; the per-request urlopen timeouts cover the
@@ -32,6 +33,12 @@ jobs:
     # trigger the Build + lint/test workflows.
     permissions:
       contents: read
+    strategy:
+      # Each target is independent; a transient failure resolving one must not
+      # cancel the other's bump.
+      fail-fast: false
+      matrix:
+        target: [python, mingit]
 
     steps:
       - name: Generate a token
@@ -55,14 +62,14 @@ jobs:
         id: bump
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
-        run: python3 .github/scripts/bump_bundle_versions.py
+        run: python3 .github/scripts/bump_bundle_versions.py --target ${{ matrix.target }}
 
       - name: Create or update pull request
         if: steps.bump.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.generate-token.outputs.token }}
-          branch: auto/bump-python
+          branch: auto/bump-${{ matrix.target }}
           base: main
           delete-branch: true
           title: ${{ steps.bump.outputs.title }}

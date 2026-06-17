@@ -33,6 +33,10 @@ set -e
 PYTHON_VERSION="3.13.12"
 PBS_VERSION="20260203"
 BASE_URL="https://example/${PBS_VERSION}"
+
+MINGIT_VERSION="2.53.0"
+MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.53.0.windows.1/MinGit-2.53.0-64-bit.zip"
+MINGIT_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 """
 
 
@@ -195,6 +199,91 @@ def test_resolve_latest_python_ignores_other_minor(
     assert bump.resolve_latest_python("3.12") is None
 
 
+def _gfw_release(tag: str, mingit_ver: str) -> dict[str, Any]:
+    """A git-for-windows release shaped like the real API payload.
+
+    The plain 64-bit MinGit zip must be chosen over the busybox, arm64 and
+    32-bit siblings, and the version token must come straight from its name (so
+    a `.windows.N` rebuild's `MinGit-2.53.0.3-64-bit.zip` resolves to 2.53.0.3).
+    """
+    base = f"https://github.com/git-for-windows/git/releases/download/{tag}"
+    names = [
+        f"MinGit-{mingit_ver}-32-bit.zip",
+        f"MinGit-{mingit_ver}-arm64.zip",
+        f"MinGit-{mingit_ver}-busybox-64-bit.zip",
+        f"MinGit-{mingit_ver}-64-bit.zip",
+    ]
+    return {
+        "tag_name": tag,
+        "assets": [
+            {
+                "name": n,
+                "browser_download_url": f"{base}/{n}",
+                "digest": f"sha256:{'ab' * 32}",
+            }
+            for n in names
+        ],
+    }
+
+
+def test_resolve_latest_mingit_picks_plain_64bit_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bump, "_api_get", lambda url: _gfw_release("v2.54.0.windows.1", "2.54.0")
+    )
+    version, url, sha = bump.resolve_latest_mingit()
+    assert version == "2.54.0"
+    assert url.endswith("/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip")
+    assert sha == "ab" * 32
+
+
+def test_resolve_latest_mingit_handles_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A .windows.N rebuild encodes the build number in the filename; the literal
+    # URL and the version both come from the asset, not a reconstruction.
+    monkeypatch.setattr(
+        bump, "_api_get", lambda url: _gfw_release("v2.53.0.windows.3", "2.53.0.3")
+    )
+    version, url, _sha = bump.resolve_latest_mingit()
+    assert version == "2.53.0.3"
+    assert url.endswith("/v2.53.0.windows.3/MinGit-2.53.0.3-64-bit.zip")
+
+
+def test_resolve_latest_mingit_raises_when_no_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bump, "_api_get", lambda url: {"tag_name": "v2.54.0.windows.1", "assets": []}
+    )
+    with pytest.raises(bump.ResolutionError):
+        bump.resolve_latest_mingit()
+
+
+def test_asset_sha256_prefers_digest_without_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_download(url: str) -> str:
+        raise AssertionError("should not download when a digest is present")
+
+    monkeypatch.setattr(bump, "_download_sha256", _no_download)
+    assert bump._asset_sha256({"digest": f"sha256:{'cd' * 32}"}) == "cd" * 32
+
+
+def test_asset_sha256_falls_back_to_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bump, "_download_sha256", lambda url: "ef" * 32)
+    asset = {"digest": None, "browser_download_url": "https://example/MinGit.zip"}
+    assert bump._asset_sha256(asset) == "ef" * 32
+
+
+def test_asset_sha256_raises_resolution_error_without_digest_or_url() -> None:
+    # Neither a usable digest nor a download URL: a clean ResolutionError rather
+    # than a bare KeyError, matching the rest of the broken-upstream handling.
+    with pytest.raises(bump.ResolutionError):
+        bump._asset_sha256({"name": "MinGit-2.54.0-64-bit.zip"})
+
+
 # --------------------------------------------------------------------------- #
 # CLI behaviour (failure paths, output emission).
 # --------------------------------------------------------------------------- #
@@ -292,3 +381,98 @@ def test_main_no_op_when_already_current(
     assert rc == 0
     assert script.read_text() == SAMPLE_SCRIPT
     assert "changed=false" in out.read_text()
+
+
+def test_main_mingit_writes_file_and_outputs_on_bump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    new_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_mingit", lambda: ("2.54.0", new_url, "ff" * 32)
+    )
+
+    rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 0
+    text = script.read_text()
+    assert 'MINGIT_VERSION="2.54.0"' in text
+    assert f'MINGIT_URL="{new_url}"' in text
+    assert f'MINGIT_SHA256="{"ff" * 32}"' in text
+    # The Python pins are untouched by a MinGit bump.
+    assert 'PYTHON_VERSION="3.13.12"' in text
+
+    output = out.read_text()
+    assert "changed=true" in output
+    assert "Bump bundled MinGit to 2.54.0" in output
+
+
+def test_main_mingit_no_op_when_already_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    current_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.53.0.windows.1/MinGit-2.53.0-64-bit.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_mingit", lambda: ("2.53.0", current_url, "0" * 64)
+    )
+
+    rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 0
+    assert script.read_text() == SAMPLE_SCRIPT
+    assert "changed=false" in out.read_text()
+
+
+def test_main_mingit_refuses_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Current pin is 2.53.0; a resolved older release (upstream republished an
+    # old tag as latest) must fail loudly rather than open a backwards PR.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    old_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.52.0.windows.1/MinGit-2.52.0-64-bit.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_mingit", lambda: ("2.52.0", old_url, "aa" * 32)
+    )
+
+    rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 1
+    # The file is untouched and no bump output is written.
+    assert script.read_text() == SAMPLE_SCRIPT
+    assert not out.exists() or "changed=true" not in out.read_text()
+
+
+def test_version_tuple_orders_rebuilds_after_base() -> None:
+    # A .windows.N rebuild (2.53.0.3) must sort after the base release (2.53.0).
+    assert bump._version_tuple("2.53.0.3") > bump._version_tuple("2.53.0")
+    assert bump._version_tuple("2.54.0") > bump._version_tuple("2.53.0.3")
+
+
+def test_main_mingit_fails_when_variables_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No MinGit pins present: a real breakage that must fail the job rather than
+    # silently no-op and let the bundled git drift.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text('PYTHON_VERSION="3.13.12"\nPBS_VERSION="20260203"\n')
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 1
+    assert not out.exists() or "changed=true" not in out.read_text()

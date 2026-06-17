@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Bump the pinned bundled Python version in build-scripts/prepare_bundle.sh.
+"""Bump pinned bundled dependencies in build-scripts/prepare_bundle.sh.
 
-Run nightly by .github/workflows/bump-bundle-versions.yml. It resolves the
-latest python-build-standalone release, rewrites the pinned version in
-prepare_bundle.sh, and emits GitHub Actions outputs that the workflow turns
-into a pull request.
+Run nightly by .github/workflows/bump-bundle-versions.yml, once per target
+(`--target python` and `--target mingit`). Each resolves the latest upstream
+release, rewrites the pinned values in prepare_bundle.sh, and emits GitHub
+Actions outputs that the workflow turns into its own pull request.
 
-Policy: PBS_VERSION (the build-date tag) always moves to the latest release;
-PYTHON_VERSION only takes a newer *patch* within the currently pinned minor
-(e.g. 3.13.x), never a minor or major jump, which could break
+Python policy: PBS_VERSION (the build-date tag) always moves to the latest
+release; PYTHON_VERSION only takes a newer *patch* within the currently pinned
+minor (e.g. 3.13.x), never a minor or major jump, which could break
 ESPHome/PlatformIO. A deliberate minor bump stays a manual change.
+
+MinGit policy: always track the latest git-for-windows release. Git is invoked
+as a subprocess, so a new minor or major won't break ESPHome/PlatformIO the way
+a Python minor could, and Git for Windows only maintains the newest line.
 
 The script fails loudly (non-zero exit) if the expected variables aren't found
 in prepare_bundle.sh, or if the latest upstream release can't be resolved —
@@ -24,12 +28,14 @@ workflow runs.
 
 Usage (GITHUB_TOKEN keeps the API calls off the anonymous rate limit):
 
-    GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py
+    GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py --target python
+    GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py --target mingit
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -46,6 +52,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PREPARE_BUNDLE = REPO_ROOT / "build-scripts" / "prepare_bundle.sh"
 
 PBS_REPO = "astral-sh/python-build-standalone"
+
+GFW_REPO = "git-for-windows/git"
+
+# The plain 64-bit MinGit zip — not busybox, arm64 or 32-bit. The version token
+# is digits/dots only, so MinGit-2.54.0-busybox-64-bit.zip can't match while
+# rebuilds like MinGit-2.53.0.3-64-bit.zip still do.
+MINGIT_ASSET_RE = re.compile(r"MinGit-(?P<ver>[\d.]+)-64-bit\.zip")
 
 # Per-request network timeout. A stalled connection otherwise blocks the nightly
 # job until the workflow's multi-hour default timeout fires; failing fast lets
@@ -69,6 +82,14 @@ def _warn(msg: str) -> None:
 def _error(msg: str) -> None:
     """Emit a GitHub-Actions-style error to stderr (also readable locally)."""
     print(f"::error::{msg}", file=sys.stderr)
+
+
+class ResolutionError(Exception):
+    """An upstream assumption broke (missing asset, unresolvable release).
+
+    Raised so the nightly job fails loudly rather than silently no-opping and
+    letting a bundled dependency drift to a stale, vulnerable version.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +239,57 @@ def resolve_latest_python(minor: str) -> tuple[str, str] | None:
     return pbs_version, ".".join(str(p) for p in best)
 
 
+def _download_sha256(url: str) -> str:
+    """Stream a URL and return its SHA-256 hex digest."""
+
+    def fetch() -> str:
+        req = urllib.request.Request(url, headers=_gh_headers())
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            for chunk in iter(lambda: resp.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    return _with_retries(fetch)
+
+
+def _asset_sha256(asset: dict[str, Any]) -> str:
+    """SHA-256 hex of a release asset.
+
+    Prefer the digest GitHub reports on the asset (no download); fall back to
+    streaming the asset and hashing it if the API ever omits it. A wrong value
+    can't ship: prepare_bundle.sh verifies the download at build time, so the
+    Windows build goes red on mismatch rather than bundling the wrong bytes.
+    """
+    digest = asset.get("digest") or ""
+    if digest.startswith("sha256:"):
+        return digest.split(":", 1)[1]
+    url = asset.get("browser_download_url")
+    if not url:
+        raise ResolutionError(
+            f"asset {asset.get('name')!r} has no digest or download URL"
+        )
+    return _download_sha256(url)
+
+
+def resolve_latest_mingit() -> tuple[str, str, str]:
+    """Return `(version, url, sha256)` for the latest 64-bit MinGit zip.
+
+    Picks the plain x86-64 MinGit asset from the latest git-for-windows release
+    and reads its checksum, so the literal download URL and digest land in
+    prepare_bundle.sh even for `.windows.N` rebuilds whose filename carries the
+    build number.
+    """
+    release = _api_get(f"https://api.github.com/repos/{GFW_REPO}/releases/latest")
+    for asset in release.get("assets", []):
+        m = MINGIT_ASSET_RE.fullmatch(asset.get("name", ""))
+        if m is not None:
+            return m.group("ver"), asset["browser_download_url"], _asset_sha256(asset)
+    raise ResolutionError(
+        f"no 64-bit MinGit asset in {GFW_REPO} release {release.get('tag_name')!r}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Output + CLI glue.
 # --------------------------------------------------------------------------- #
@@ -242,51 +314,27 @@ def _emit_outputs(**outputs: str) -> None:
         sys.stdout.write(payload)
 
 
-def _build_body(var_changes: dict[str, tuple[str, str]]) -> str:
+def _build_body(subject: str, var_changes: dict[str, tuple[str, str]]) -> str:
     """Short, human-readable PR body describing the bump."""
     bullets = "\n".join(
         f"* {var} {old} to {new}" for var, (old, new) in var_changes.items()
     )
     return (
-        "Automated nightly bump of the bundled Python interpreter.\n\n"
+        f"Automated nightly bump of the bundled {subject}.\n\n"
         f"{bullets}\n\n"
         "CI builds and tests this branch; merge once the platform builds pass."
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--file",
-        default=str(PREPARE_BUNDLE),
-        help="Path to prepare_bundle.sh (defaults to the in-repo copy).",
-    )
-    args = parser.parse_args(argv)
-
-    path = Path(args.file)
-    text = path.read_text(encoding="utf-8")
-
-    # These variables are expected to exist. A missing one means
-    # prepare_bundle.sh was renamed/restructured and this script needs
-    # updating, so fail loudly rather than silently reporting "nothing to bump"
-    # — a quiet no-op would let the bundled Python drift and could ship a stale,
-    # vulnerable version unnoticed.
-    required = ("PYTHON_VERSION", "PBS_VERSION")
-    missing = [var for var in required if not has_assignment(text, var)]
-    if missing:
-        _error(
-            f"{', '.join(missing)} not found in {path.name}; "
-            "the Python bump script needs updating"
-        )
-        return 1
-
+def resolve_python_bump(text: str) -> tuple[BumpResult, str]:
+    """Resolve the latest Python and compute the bump over `text`."""
     latest = resolve_latest_python(current_python_minor(text))
     if latest is None:
         # The pinned minor has no build in the latest release (resolver already
-        # logged why). That's a broken assumption, not a routine skip, so fail
-        # rather than silently never bumping.
-        _error("could not resolve the latest Python for the pinned minor")
-        return 1
+        # logged why). That's a broken assumption, not a routine skip.
+        raise ResolutionError(
+            "could not resolve the latest Python for the pinned minor"
+        )
 
     pbs_version, python_version = latest
     result = apply_bumps(
@@ -298,21 +346,110 @@ def main(argv: list[str] | None = None) -> int:
         title = f"Bump bundled Python to {python_version}"
     else:
         title = f"Bump bundled Python build to {pbs_version} ({python_version})"
+    return result, title
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted MinGit version (e.g. "2.54.0" or rebuild "2.53.0.3")."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def resolve_mingit_bump(text: str) -> tuple[BumpResult, str]:
+    """Resolve the latest MinGit and compute the bump over `text`."""
+    current = read_assignment(text, "MINGIT_VERSION")
+    version, url, sha256 = resolve_latest_mingit()
+    # Git for Windows releases move forward, so a resolved version older than the
+    # current pin means upstream republished an old tag as `latest` or unpublished
+    # a release. That's a broken assumption, not a routine skip: fail loudly
+    # rather than open a PR moving bundled git backwards (the sha check would pass
+    # on a genuine older release, so only this guard catches it).
+    if _version_tuple(version) < _version_tuple(current):
+        raise ResolutionError(
+            f"latest MinGit {version} is older than the pinned {current}; "
+            "refusing to downgrade"
+        )
+    result = apply_bumps(
+        text,
+        {"MINGIT_VERSION": version, "MINGIT_URL": url, "MINGIT_SHA256": sha256},
+    )
+    return result, f"Bump bundled MinGit to {version}"
+
+
+# Resolves the latest upstream release and computes the bump over the file text.
+_Resolver = Callable[[str], tuple[BumpResult, str]]
+
+# Each target names the prepare_bundle.sh variables that must exist (a missing
+# one means the file was restructured and this script needs updating), the
+# resolver that computes its bump, and the noun used in the PR body.
+TARGETS: dict[str, tuple[tuple[str, ...], _Resolver, str]] = {
+    "python": (
+        ("PYTHON_VERSION", "PBS_VERSION"),
+        resolve_python_bump,
+        "Python interpreter",
+    ),
+    "mingit": (
+        ("MINGIT_VERSION", "MINGIT_URL", "MINGIT_SHA256"),
+        resolve_mingit_bump,
+        "MinGit (Git for Windows)",
+    ),
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--target",
+        choices=sorted(TARGETS),
+        default="python",
+        help="Which bundled dependency to bump.",
+    )
+    parser.add_argument(
+        "--file",
+        default=str(PREPARE_BUNDLE),
+        help="Path to prepare_bundle.sh (defaults to the in-repo copy).",
+    )
+    args = parser.parse_args(argv)
+
+    required, resolve_bump, subject = TARGETS[args.target]
+
+    path = Path(args.file)
+    text = path.read_text(encoding="utf-8")
+
+    # These variables are expected to exist. A missing one means
+    # prepare_bundle.sh was renamed/restructured and this script needs
+    # updating, so fail loudly rather than silently reporting "nothing to bump"
+    # — a quiet no-op would let the bundled dependency drift and could ship a
+    # stale, vulnerable version unnoticed.
+    missing = [var for var in required if not has_assignment(text, var)]
+    if missing:
+        _error(
+            f"{', '.join(missing)} not found in {path.name}; "
+            "the bump script needs updating"
+        )
+        return 1
+
+    try:
+        result, title = resolve_bump(text)
+    except ResolutionError as exc:
+        # A broken upstream assumption, not a routine skip: fail loudly rather
+        # than silently never bumping.
+        _error(str(exc))
+        return 1
 
     if not result.changed:
-        print("Bundled Python already up to date; nothing to bump.")
+        print(f"Bundled {subject} already up to date; nothing to bump.")
         _emit_outputs(changed="false")
         return 0
 
     path.write_text(result.text, encoding="utf-8")
-    print("Bumped bundled Python:")
+    print(f"Bumped bundled {subject}:")
     for var, (old, new) in result.var_changes.items():
         print(f"  {var}: {old} -> {new}")
 
     _emit_outputs(
         changed="true",
         title=title,
-        body=_build_body(result.var_changes),
+        body=_build_body(subject, result.var_changes),
     )
     return 0
 
