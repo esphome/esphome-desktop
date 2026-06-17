@@ -83,6 +83,12 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub open_on_start: bool,
 
+    /// Launch the app automatically at system login/boot. On by default so a
+    /// remote builder comes back online after a reboot; the OS login item is
+    /// reconciled to this value on every launch.
+    #[serde(default = "default_true")]
+    pub launch_at_startup: bool,
+
     /// Check for updates automatically
     #[serde(default = "default_true")]
     pub check_updates: bool,
@@ -114,6 +120,7 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             config_dir: None,
             open_on_start: true,
+            launch_at_startup: true,
             check_updates: true,
             release_channel: ReleaseChannel::default(),
             backend: Backend::default(),
