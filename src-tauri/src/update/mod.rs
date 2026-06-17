@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -859,12 +860,45 @@ fn prerelease_ord(tag: &str) -> u8 {
     }
 }
 
-/// Parse a version string like "2024.1.0b1" or "2026.5.0-dev" into a
-/// comparable representation.
+/// Re-attach a PEP 440 `.devN` developmental segment to the numeric release
+/// segment that precedes it.
+///
+/// PyPI's JSON API and `importlib.metadata.version()` report developmental
+/// releases in normalized PEP 440 form with a **dot** separator
+/// (`"2025.5.0.dev3"`), not the hyphenated form (`"2025.5.0-dev"`) the segment
+/// parser handles. Without this, `parse_version` splits `"dev3"` off as its own
+/// dot-segment, finds no leading digit, and drops it entirely — so the dev
+/// build parses identically to the stable `"2025.5.0"`. That silently breaks
+/// the device-builder beta channel: a user on one `.devN` build is never
+/// notified of a newer `.devN` build of the same base (they compare equal), and
+/// `find_latest_any` ranks a dev equal-to-stable / above a beta of the same
+/// base, inverting the PEP 440 ordering that [`prerelease_ord`] is meant to
+/// enforce.
+///
+/// Converting `".dev"` → `"-dev"` routes the dev tag through the hyphenated path
+/// the tier logic already ranks correctly. Only `.dev` is normalized: among PEP
+/// 440 pre-release kinds it is the only one that uses a dot separator (`aN`,
+/// `bN`, `rcN` attach directly), so this fully closes the dot-separator gap.
+///
+/// Returns a borrowed `Cow` when the input has no `.dev` segment (the common
+/// case while scanning PyPI releases), allocating only when a substitution is
+/// needed. PEP 440 permits at most one `.devN` segment, so only the first
+/// occurrence is replaced.
+fn normalize_dev_separator(s: &str) -> Cow<'_, str> {
+    if s.contains(".dev") {
+        Cow::Owned(s.replacen(".dev", "-dev", 1))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+/// Parse a version string like "2024.1.0b1", "2026.5.0-dev", or the PEP 440
+/// normalized "2026.5.0.dev1" into a comparable representation.
 /// Each dot-separated segment becomes (numeric_part, prerelease_order, prerelease_num).
 /// A stable segment like "0" becomes (0, 255, 0) so it sorts higher than any pre-release.
 fn parse_version(s: &str) -> Vec<(u32, u8, u32)> {
-    s.split('.')
+    normalize_dev_separator(s)
+        .split('.')
         .filter_map(|part| {
             // Split on pre-release tag boundaries: "0b1", "0-dev"
             // Take the leading digits first
@@ -965,6 +999,32 @@ mod tests {
 
         // "c" is an accepted alias for "rc".
         assert!(is_newer_version("2025.4.0c1", "2025.4.0b9"));
+    }
+
+    #[test]
+    fn test_pep440_dot_dev_separator() {
+        // PyPI / importlib.metadata report dev releases with a dot separator.
+        // These must rank identically to the hyphenated form.
+
+        // Stable is newer than a dot-form dev of the same base.
+        assert!(is_newer_version("2025.5.0", "2025.5.0.dev3"));
+        assert!(!is_newer_version("2025.5.0.dev3", "2025.5.0"));
+
+        // A newer dev build of the same base is detected (the bug: both used to
+        // collapse to the stable representation and compare equal).
+        assert!(is_newer_version("2025.5.0.dev5", "2025.5.0.dev3"));
+        assert!(!is_newer_version("2025.5.0.dev3", "2025.5.0.dev5"));
+
+        // Dot-form dev sorts below a beta/rc of the same base (PEP 440 order).
+        assert!(is_newer_version("2025.5.0b1", "2025.5.0.dev9"));
+        assert!(is_newer_version("2025.5.0rc1", "2025.5.0.dev9"));
+
+        // Dot and hyphen forms of the same dev build are equivalent.
+        assert!(!is_newer_version("2025.5.0.dev3", "2025.5.0-dev3"));
+        assert!(!is_newer_version("2025.5.0-dev3", "2025.5.0.dev3"));
+
+        // A newer base version dev is still newer than an older stable.
+        assert!(is_newer_version("2025.6.0.dev1", "2025.5.0"));
     }
 
     #[test]
