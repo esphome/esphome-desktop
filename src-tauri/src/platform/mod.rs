@@ -1334,7 +1334,10 @@ mod tests {
     fn refresh_defer_count_missing_marker_is_zero() {
         let base = unique_temp_dir("defer-missing");
         let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(read_refresh_defer_count(&base.join(".refresh-defer-count")), 0);
+        assert_eq!(
+            read_refresh_defer_count(&base.join(".refresh-defer-count")),
+            0
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
