@@ -456,7 +456,7 @@ fn read_refresh_defer_count(marker_path: &Path) -> u32 {
 /// risks one extra defer cycle, so log and carry on rather than fail startup.
 #[cfg(not(target_os = "windows"))]
 fn bump_refresh_defer_count(marker_path: &Path, count: u32) {
-    if let Err(e) = crate::util::atomic_write(marker_path, &count.to_string()) {
+    if let Err(e) = crate::util::atomic_write(marker_path, count.to_string()) {
         tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
     }
 }
