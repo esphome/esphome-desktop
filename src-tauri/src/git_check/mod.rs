@@ -348,11 +348,12 @@ pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Pat
     );
 
     let body = format!(
-        "A folder above your ESPHome configuration ({}) is a Git repository. \
-         ESP-IDF builds can pick up that repository and fail to compile with an \
-         opaque CMake \"head-ref\" error. If your devices fail to build, remove \
-         the stray .git entry (file or folder) from that folder, or move your \
-         ESPHome configuration outside that repository.",
+        "Your ESPHome configuration ({}) sits inside a Git repository rooted at \
+         {}. ESP-IDF builds can pick up that repository and fail to compile with \
+         an opaque CMake \"head-ref\" error. If your devices fail to build, \
+         remove the stray .git entry (file or folder) from that repository root, \
+         or move your ESPHome configuration outside that repository.",
+        config_dir.display(),
         repo_root.display()
     );
 
