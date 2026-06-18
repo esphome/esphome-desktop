@@ -20,6 +20,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, RunEvent,
 };
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -207,6 +208,14 @@ pub fn run(cli: Cli) {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Launch silently on login (tray only, no browser) so a remote builder
+        // comes back online after a reboot; manual launches still open the
+        // dashboard. Whether the login item is registered is reconciled to the
+        // `launch_at_startup` setting in setup() below.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--no-open-dashboard"]),
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             // Another instance tried to start - open the dashboard instead
             info!(
@@ -274,6 +283,28 @@ pub fn run(cli: Cli) {
             } else {
                 false
             };
+
+            // Reconcile the OS login item to the persisted preference. This
+            // applies the on-by-default on first run and re-asserts a user's
+            // choice on every launch (so an "off" sticks and drift self-heals).
+            {
+                let want = async_runtime::block_on(state.settings.read()).launch_at_startup;
+                let manager = app.autolaunch();
+                match manager.is_enabled() {
+                    Ok(current) if current != want => {
+                        let result = if want {
+                            manager.enable()
+                        } else {
+                            manager.disable()
+                        };
+                        if let Err(e) = result {
+                            warn!("Failed to set autostart to {}: {}", want, e);
+                        }
+                    }
+                    Err(e) => warn!("Failed to query autostart state: {}", e),
+                    _ => {}
+                }
+            }
 
             // Build and set up the tray menu (if tray support is available)
             let tray_available = if platform::is_tray_supported() {

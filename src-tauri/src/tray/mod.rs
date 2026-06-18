@@ -9,6 +9,7 @@ use tauri::{
     menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, SubmenuBuilder},
     AppHandle,
 };
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
@@ -77,6 +78,10 @@ mod ids {
     pub const BACKEND_CLASSIC: &str = "backend_classic";
     pub const BACKEND_BUILDER_STABLE: &str = "backend_builder_stable";
     pub const BACKEND_BUILDER_BETA: &str = "backend_builder_beta";
+
+    // Startup submenu items
+    pub const STARTUP_ENABLE: &str = "startup_enable";
+    pub const STARTUP_DISABLE: &str = "startup_disable";
 }
 
 /// Build the tray menu
@@ -199,6 +204,32 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&backend_builder_beta)
         .build()?;
 
+    // Startup submenu items (radio group, mirroring Backend). Label from the
+    // actual OS login-item state so a failed startup reconcile doesn't show a
+    // lie; fall back to the persisted intent only if the query itself errors.
+    let launch_at_startup = app_handle
+        .autolaunch()
+        .is_enabled()
+        .unwrap_or(settings.launch_at_startup);
+    let startup_enable = MenuItemBuilder::with_id(
+        ids::STARTUP_ENABLE,
+        radio_label("Launch at Login", launch_at_startup),
+    )
+    .build(app_handle)?;
+    let startup_disable = MenuItemBuilder::with_id(
+        ids::STARTUP_DISABLE,
+        radio_label("Don't Launch at Login", !launch_at_startup),
+    )
+    .build(app_handle)?;
+
+    let _ = STARTUP_ENABLE_ITEM.set(startup_enable.clone());
+    let _ = STARTUP_DISABLE_ITEM.set(startup_disable.clone());
+
+    let startup_submenu = SubmenuBuilder::with_id(app_handle, "startup", "Startup")
+        .item(&startup_enable)
+        .item(&startup_disable)
+        .build()?;
+
     let menu = MenuBuilder::new(app_handle)
         .item(
             &MenuItemBuilder::with_id(ids::OPEN_DASHBOARD, "Open Dashboard")
@@ -218,6 +249,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .separator()
         .item(&backend_submenu)
         .item(&channel_submenu)
+        .item(&startup_submenu)
         .item(
             &MenuItemBuilder::with_id(ids::CHECK_UPDATES, "Check for Updates...")
                 .build(app_handle)?,
@@ -263,6 +295,10 @@ static BACKEND_BUILDER_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
 static BACKEND_BUILDER_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
     std::sync::OnceLock::new();
+
+/// Startup menu items stored globally for radio-button behavior
+static STARTUP_ENABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static STARTUP_DISABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 /// Update the tray status text
 pub fn update_status(_app_handle: &AppHandle, running: bool) {
@@ -335,6 +371,55 @@ fn update_backend_checks(backend: Backend) {
     }
 }
 
+/// Update the startup menu item labels to reflect whether autostart is enabled.
+fn update_startup_checks(enabled: bool) {
+    if let Some(item) = STARTUP_ENABLE_ITEM.get() {
+        let _ = item.set_text(radio_label("Launch at Login", enabled));
+    }
+    if let Some(item) = STARTUP_DISABLE_ITEM.get() {
+        let _ = item.set_text(radio_label("Don't Launch at Login", !enabled));
+    }
+}
+
+/// Persist the autostart preference, reconcile the OS login item, and refresh
+/// the tray radio labels. Runs inline: registering the login item is a quick OS
+/// operation with no daemon work, unlike the channel/backend switch sequences.
+fn set_launch_at_startup(app_handle: &AppHandle, state: &Arc<AppState>, enable: bool) {
+    {
+        let mut settings = async_runtime::block_on(state.settings.write());
+        if settings.launch_at_startup != enable {
+            settings.launch_at_startup = enable;
+            if let Err(e) = settings.save(app_handle) {
+                warn!("Failed to save settings: {}", e);
+            }
+        }
+    }
+
+    // Always (re)apply the OS call, even when the persisted value already
+    // matches, so clicking an already-selected item retries a registration that
+    // failed earlier (e.g. the startup reconcile) instead of no-opping.
+    let manager = app_handle.autolaunch();
+    let result = if enable {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    if let Err(e) = result {
+        error!(
+            "Failed to {} autostart: {}",
+            if enable { "enable" } else { "disable" },
+            e
+        );
+    }
+    // Reflect the actual OS state rather than the requested one: enable/disable
+    // can fail (permissions, policy, platform limits), and showing the requested
+    // state would mislead. Fall back to the requested value only if the query
+    // itself fails. The persisted setting keeps the user's intent, so the
+    // launch-time reconcile retries.
+    let actual = manager.is_enabled().unwrap_or(enable);
+    update_startup_checks(actual);
+}
+
 /// Re-detect the installed version and update the tray version display.
 fn refresh_version_display(app_handle: &AppHandle) {
     let version =
@@ -391,6 +476,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 error!("Failed to open browser: {}", e);
             }
         }
+        ids::STARTUP_ENABLE => set_launch_at_startup(app_handle, state, true),
+        ids::STARTUP_DISABLE => set_launch_at_startup(app_handle, state, false),
         ids::CHECK_UPDATES => {
             let state = state.clone();
             let app = app_handle.clone();
