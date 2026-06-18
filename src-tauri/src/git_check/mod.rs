@@ -286,6 +286,11 @@ fn config_dir_filesystem_root(config_dir: &Path) -> Option<PathBuf> {
     };
 
     // `ancestors()` yields the path itself first and the filesystem root last.
+    // This assumes the config dir shares a drive with the platformio build dir
+    // (`C:\esphb-XXXX`). If the user relocates `settings.config_dir` to another
+    // drive (e.g. `D:\esphome` while builds run on `C:`), we check that drive's
+    // root, not the build drive — niche, and deriving the build drive reliably
+    // cross-platform is hard, so the build dir's real anchor stays implicit.
     let root = config_dir.ancestors().last()?;
     if root.as_os_str().is_empty() || root == config_dir {
         return None;
@@ -509,6 +514,24 @@ mod tests {
         let fs_root = root.ancestors().last().unwrap();
 
         assert_eq!(config_dir_filesystem_root(fs_root), None);
+    }
+
+    #[test]
+    fn relative_config_dir_absolutizes_against_cwd() {
+        // The `home_dir()` fallback (`PathBuf::from("esphome")`) and relative
+        // user settings are absolutized against cwd, so the ancestor walk
+        // terminates at a real filesystem root rather than an empty path.
+        let cwd_root = std::env::current_dir()
+            .expect("cwd")
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+
+        let root = config_dir_filesystem_root(Path::new("esphome"));
+
+        assert_eq!(root, Some(cwd_root));
+        assert!(!root.unwrap().as_os_str().is_empty());
     }
 
     #[cfg(unix)]
