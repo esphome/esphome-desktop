@@ -306,12 +306,28 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                 match snapshot_preserved_versions(&python_check) {
                     Ok(p) => p,
                     Err(e) => {
+                        // A probe error means we can't trust a snapshot — but
+                        // WHY matters. If the interpreter itself is unusable
+                        // (can't even run a trivial script), the tree is broken
+                        // and the destructive refresh is the only recovery
+                        // path, so fall through and wipe. If the interpreter
+                        // runs but the probe failed (non-zero exit, possibly
+                        // transient), defer to avoid discarding a user-pinned
+                        // version we just couldn't read.
+                        if interpreter_is_usable(&python_check) {
+                            warn!(
+                                "Could not read existing Python package versions ({e:#}); \
+                                 deferring the bundled-Python refresh to avoid downgrading a \
+                                 user-pinned version. Will retry on next launch."
+                            );
+                            return Ok(());
+                        }
                         warn!(
-                            "Could not read existing Python package versions ({e:#}); \
-                             deferring the bundled-Python refresh to avoid downgrading a \
-                             user-pinned version. Will retry on next launch."
+                            "Existing Python interpreter at {:?} is unusable ({e:#}); \
+                             wiping and re-copying the bundled tree to recover.",
+                            python_check
                         );
-                        return Ok(());
+                        PreservedVersions::default()
                     }
                 }
             } else {
@@ -373,6 +389,20 @@ fn snapshot_preserved_versions(python_bin: &Path) -> Result<PreservedVersions> {
         esphome: read_package_version(python_bin, "esphome")?,
         esphome_device_builder: read_package_version(python_bin, "esphome-device-builder")?,
     })
+}
+
+/// Returns `true` if the interpreter can run a trivial script with a clean
+/// exit. A `false` result means the tree is broken badly enough (interpreter
+/// can't spawn or can't execute at all) that the destructive bundled-Python
+/// refresh is the right recovery, rather than deferring forever and leaving a
+/// corrupt tree with no automatic repair path. Used to split a transient probe
+/// error (defer) from a genuinely unusable interpreter (wipe & recover).
+#[cfg(not(target_os = "windows"))]
+fn interpreter_is_usable(python_bin: &Path) -> bool {
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-c", "pass"]);
+    configure_no_window_command(&mut cmd);
+    matches!(cmd.output(), Ok(o) if o.status.success())
 }
 
 /// Reinstall any preserved package whose pinned version is newer than the
