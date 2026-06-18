@@ -204,8 +204,13 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&backend_builder_beta)
         .build()?;
 
-    // Startup submenu items (radio group, mirroring Backend)
-    let launch_at_startup = settings.launch_at_startup;
+    // Startup submenu items (radio group, mirroring Backend). Label from the
+    // actual OS login-item state so a failed startup reconcile doesn't show a
+    // lie; fall back to the persisted intent only if the query itself errors.
+    let launch_at_startup = app_handle
+        .autolaunch()
+        .is_enabled()
+        .unwrap_or(settings.launch_at_startup);
     let startup_enable = MenuItemBuilder::with_id(
         ids::STARTUP_ENABLE,
         radio_label("Launch at Login", launch_at_startup),
@@ -382,15 +387,17 @@ fn update_startup_checks(enabled: bool) {
 fn set_launch_at_startup(app_handle: &AppHandle, state: &Arc<AppState>, enable: bool) {
     {
         let mut settings = async_runtime::block_on(state.settings.write());
-        if settings.launch_at_startup == enable {
-            return;
-        }
-        settings.launch_at_startup = enable;
-        if let Err(e) = settings.save(app_handle) {
-            warn!("Failed to save settings: {}", e);
+        if settings.launch_at_startup != enable {
+            settings.launch_at_startup = enable;
+            if let Err(e) = settings.save(app_handle) {
+                warn!("Failed to save settings: {}", e);
+            }
         }
     }
 
+    // Always (re)apply the OS call, even when the persisted value already
+    // matches, so clicking an already-selected item retries a registration that
+    // failed earlier (e.g. the startup reconcile) instead of no-opping.
     let manager = app_handle.autolaunch();
     let result = if enable {
         manager.enable()
