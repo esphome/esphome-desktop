@@ -110,6 +110,22 @@ def test_apply_bumps_no_change_is_not_changed() -> None:
     assert result.text == SAMPLE_SCRIPT
 
 
+def test_is_downgrade_detects_older_patch() -> None:
+    assert bump.is_downgrade("3.13.13", "3.13.12")
+
+
+def test_is_downgrade_false_for_upgrade_and_equal() -> None:
+    assert not bump.is_downgrade("3.13.12", "3.13.13")
+    assert not bump.is_downgrade("3.13.12", "3.13.12")
+
+
+def test_is_downgrade_orders_patches_numerically_not_lexically() -> None:
+    # "3.13.9" must count as older than "3.13.10"; a string compare would
+    # wrongly call the 9 -> 10 move a downgrade.
+    assert not bump.is_downgrade("3.13.9", "3.13.10")
+    assert bump.is_downgrade("3.13.10", "3.13.9")
+
+
 # --------------------------------------------------------------------------- #
 # Network retry behaviour.
 # --------------------------------------------------------------------------- #
@@ -364,6 +380,29 @@ def test_main_build_only_bump_titles_the_build_not_the_version(
     output = out.read_text()
     assert "changed=true" in output
     assert "Bump bundled Python build to 20260602 (3.13.12)" in output
+
+
+def test_main_refuses_patch_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pinned 3.13.13, but the latest PBS release only ships 3.13.12 (a yanked
+    # or partially-rebuilt release). Applying it would silently downgrade the
+    # bundled interpreter, so main must fail loudly and leave the file untouched
+    # rather than open a downgrade PR.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text('PYTHON_VERSION="3.13.13"\nPBS_VERSION="20260203"\n')
+    original = script.read_text()
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(
+        bump, "resolve_latest_python", lambda minor: ("20260602", "3.13.12")
+    )
+
+    rc = bump.main(["--file", str(script)])
+    assert rc == 1
+    # No write, no PR-triggering output.
+    assert script.read_text() == original
+    assert not out.exists() or "changed=true" not in out.read_text()
 
 
 def test_main_no_op_when_already_current(
