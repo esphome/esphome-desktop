@@ -208,12 +208,12 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let launch_at_startup = settings.launch_at_startup;
     let startup_enable = MenuItemBuilder::with_id(
         ids::STARTUP_ENABLE,
-        radio_label("Launch at Startup", launch_at_startup),
+        radio_label("Launch at Login", launch_at_startup),
     )
     .build(app_handle)?;
     let startup_disable = MenuItemBuilder::with_id(
         ids::STARTUP_DISABLE,
-        radio_label("Don't Launch at Startup", !launch_at_startup),
+        radio_label("Don't Launch at Login", !launch_at_startup),
     )
     .build(app_handle)?;
 
@@ -369,10 +369,10 @@ fn update_backend_checks(backend: Backend) {
 /// Update the startup menu item labels to reflect whether autostart is enabled.
 fn update_startup_checks(enabled: bool) {
     if let Some(item) = STARTUP_ENABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Launch at Startup", enabled));
+        let _ = item.set_text(radio_label("Launch at Login", enabled));
     }
     if let Some(item) = STARTUP_DISABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Don't Launch at Startup", !enabled));
+        let _ = item.set_text(radio_label("Don't Launch at Login", !enabled));
     }
 }
 

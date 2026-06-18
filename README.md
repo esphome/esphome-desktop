@@ -61,7 +61,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 
 ### Running as a remote builder
 
-To keep a machine acting as an always-on builder, leave **Startup → Launch at Startup** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
+To keep a machine acting as an always-on builder, leave **Startup → Launch at Login** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
 
 ### Data Locations
 
