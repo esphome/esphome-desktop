@@ -403,6 +403,17 @@ pub fn run(cli: Cli) {
                         // we don't stack a git warning onto an unrelated startup
                         // failure.
                         git_check::notify_if_git_missing(&daemon_app);
+
+                        // Warn (non-blocking) if the config directory lives
+                        // inside an unrelated Git repository. ESP-IDF's CMake
+                        // git-revision detection walks upward and picks up the
+                        // stray repo, failing the build with an opaque
+                        // "head-ref" error rather than anything actionable
+                        // (issue #170).
+                        git_check::notify_if_config_dir_in_git_repo(
+                            &daemon_app,
+                            daemon_state.daemon.config_dir(),
+                        );
                     }
                     Err(e) => {
                         error!("Failed to start ESPHome daemon: {}", e);
