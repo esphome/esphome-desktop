@@ -521,7 +521,10 @@ mod tests {
         let near = Path::new("/home/me/dev");
         let is_repo = |p: &Path| p == near || p == Path::new("/home");
 
-        assert_eq!(find_parent_git_repo(config, is_repo), Some(near.to_path_buf()));
+        assert_eq!(
+            find_parent_git_repo(config, is_repo),
+            Some(near.to_path_buf())
+        );
     }
 
     #[cfg(not(target_os = "windows"))]
