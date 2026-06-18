@@ -50,11 +50,18 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Open Dashboard** - Open the dashboard in your browser
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
+- **Backend** - Choose the classic ESPHome dashboard or the ESPHome Device Builder backend
+- **Release Channel** - Choose the update channel (Stable, Beta, Dev)
+- **Startup** - Choose whether the app launches automatically at login (on by default; see [Running as a remote builder](#running-as-a-remote-builder))
 - **Check for Updates** - Check for a new ESPHome Device Builder desktop release, then new ESPHome (Python) and device-builder versions
 - **View Logs** - Open the logs folder
 - **Open Config Folder** - Open where your ESPHome configs are stored
 - **Restart Dashboard** - Restart the ESPHome process
 - **Quit ESPHome** - Stop the daemon and exit
+
+### Running as a remote builder
+
+To keep a machine acting as an always-on builder, leave **Startup → Launch at Startup** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
 
 ### Data Locations
 
@@ -142,6 +149,7 @@ Settings are stored in `settings.json`:
   "port": 6052,
   "config_dir": null,
   "open_on_start": true,
+  "launch_at_startup": true,
   "check_updates": true
 }
 ```
@@ -149,6 +157,7 @@ Settings are stored in `settings.json`:
 - `port` - Dashboard port (default: 6052)
 - `config_dir` - Custom config directory (null = use default)
 - `open_on_start` - Open browser when app starts
+- `launch_at_startup` - Launch the app automatically at login (default: true; see [Running as a remote builder](#running-as-a-remote-builder))
 - `check_updates` - Check for ESPHome updates automatically
 
 ## Troubleshooting
