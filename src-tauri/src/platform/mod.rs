@@ -248,6 +248,19 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
 const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
+/// Filename of the counter tracking consecutive launches that deferred the
+/// bundled-Python refresh because the version probe failed on a still-usable
+/// interpreter. Lives inside the user Python tree, so it is reset for free the
+/// moment the tree is wiped. See [`MAX_REFRESH_DEFERS`].
+const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
+
+/// Maximum consecutive refresh defers before forcing the destructive refresh.
+/// A usable interpreter whose package metadata is persistently unreadable
+/// (e.g. a corrupt `.dist-info`) would otherwise defer on every launch,
+/// gating the self-heal behind the very metadata that is broken. After this
+/// many defers we stop deferring and wipe to re-copy a clean bundle.
+const MAX_REFRESH_DEFERS: u32 = 3;
+
 /// Ensure the user Python exists by copying from bundled Python if needed.
 ///
 /// A version marker file is written into the user Python directory after the
@@ -314,20 +327,43 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                         // runs but the probe failed (non-zero exit, possibly
                         // transient), defer to avoid discarding a user-pinned
                         // version we just couldn't read.
+                        //
+                        // Deferring is bounded: a usable interpreter whose
+                        // package metadata is *persistently* unreadable would
+                        // otherwise defer forever, gating the self-heal wipe
+                        // behind the very metadata that is broken. After
+                        // MAX_REFRESH_DEFERS consecutive defers we proceed with
+                        // the wipe to re-copy a clean bundle. The counter lives
+                        // inside the tree, so it resets the moment we wipe.
                         if interpreter_is_usable(&python_check) {
+                            let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
+                            let defers = read_refresh_defer_count(&defer_marker);
+                            if defers < MAX_REFRESH_DEFERS {
+                                bump_refresh_defer_count(&defer_marker, defers + 1);
+                                warn!(
+                                    "Could not read existing Python package versions ({e:#}); \
+                                     deferring the bundled-Python refresh to avoid downgrading a \
+                                     user-pinned version (defer {}/{}). Will retry on next launch.",
+                                    defers + 1,
+                                    MAX_REFRESH_DEFERS
+                                );
+                                return Ok(());
+                            }
                             warn!(
-                                "Could not read existing Python package versions ({e:#}); \
-                                 deferring the bundled-Python refresh to avoid downgrading a \
-                                 user-pinned version. Will retry on next launch."
+                                "Could not read existing Python package versions ({e:#}) after \
+                                 {MAX_REFRESH_DEFERS} consecutive defers; the package metadata \
+                                 appears persistently broken. Wiping and re-copying the bundled \
+                                 tree to recover."
                             );
-                            return Ok(());
+                            PreservedVersions::default()
+                        } else {
+                            warn!(
+                                "Existing Python interpreter at {:?} is unusable ({e:#}); \
+                                 wiping and re-copying the bundled tree to recover.",
+                                python_check
+                            );
+                            PreservedVersions::default()
                         }
-                        warn!(
-                            "Existing Python interpreter at {:?} is unusable ({e:#}); \
-                             wiping and re-copying the bundled tree to recover.",
-                            python_check
-                        );
-                        PreservedVersions::default()
                     }
                 }
             } else {
@@ -403,6 +439,26 @@ fn interpreter_is_usable(python_bin: &Path) -> bool {
     cmd.args(["-c", "pass"]);
     configure_no_window_command(&mut cmd);
     matches!(cmd.output(), Ok(o) if o.status.success())
+}
+
+/// Read the consecutive-defer counter, returning 0 when the marker is missing
+/// or unparseable (treat a damaged counter as a fresh start rather than
+/// blocking the self-heal wipe).
+#[cfg(not(target_os = "windows"))]
+fn read_refresh_defer_count(marker_path: &Path) -> u32 {
+    std::fs::read_to_string(marker_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the consecutive-defer counter. Best-effort: a write failure only
+/// risks one extra defer cycle, so log and carry on rather than fail startup.
+#[cfg(not(target_os = "windows"))]
+fn bump_refresh_defer_count(marker_path: &Path, count: u32) {
+    if let Err(e) = crate::util::atomic_write(marker_path, &count.to_string()) {
+        tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
+    }
 }
 
 /// Reinstall any preserved package whose pinned version is newer than the
@@ -1271,5 +1327,37 @@ mod tests {
             err.to_string().contains("esphome"),
             "error names the package"
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refresh_defer_count_missing_marker_is_zero() {
+        let base = unique_temp_dir("defer-missing");
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(read_refresh_defer_count(&base.join(".refresh-defer-count")), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refresh_defer_count_round_trips_and_bounds_defers() {
+        // A persistently failing probe must stop deferring after the bound,
+        // so the destructive self-heal wipe can run instead of looping forever.
+        let base = unique_temp_dir("defer-bound");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let marker = base.join(".refresh-defer-count");
+
+        let mut count = read_refresh_defer_count(&marker);
+        let mut defers = 0;
+        while count < MAX_REFRESH_DEFERS {
+            bump_refresh_defer_count(&marker, count + 1);
+            count = read_refresh_defer_count(&marker);
+            defers += 1;
+        }
+        assert_eq!(defers, MAX_REFRESH_DEFERS, "defers are bounded");
+        assert_eq!(count, MAX_REFRESH_DEFERS, "counter persists across reads");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
