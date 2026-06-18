@@ -250,31 +250,37 @@ fn has_git_entry(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
-/// Resolve the filesystem/drive root of `config_dir` whose stray `.git` could
-/// break ESP-IDF builds, or `None` when there is nothing to flag.
+/// Resolve the parent Git repository above `config_dir` that could break
+/// ESP-IDF builds, or `None` when there is nothing to flag. `is_repo` reports
+/// whether a directory is itself a repo — production passes [`has_git_entry`];
+/// tests pass a fake so the resolution stays unit-testable without touching the
+/// filesystem.
 ///
-/// ESP-IDF's CMake Git-revision detection
-/// (`GetGitRevisionDescription.cmake`) walks **upward** from the *build* tree —
-/// not the config dir — looking for the nearest `.git`. On Windows that build
-/// directory is `C:\esphb-XXXX` (set by esphome/platformio, never by this app),
-/// whose only ancestor is the drive root `C:\`. So the only stray repo that
-/// actually breaks a build is one at the filesystem root, e.g. `C:\.git` (see
-/// <https://github.com/esphome/esphome-desktop/issues/170>).
+/// ESP-IDF's CMake Git-revision detection (`GetGitRevisionDescription.cmake`)
+/// walks **upward** from the *build* tree looking for the nearest `.git` (see
+/// <https://github.com/esphome/esphome-desktop/issues/170>). Where that build
+/// tree sits differs by platform, so the scope of the check does too — per
+/// @bdraco's review ("on windows this should check the drive root, and on
+/// linux/mac it should keep the tree check"):
 ///
-/// We therefore check **only the filesystem root**, not every strict ancestor
-/// of the config dir. Walking all ancestors over-warns on legitimate layouts
-/// that never feed the build — configs kept inside a project repo
-/// (`C:\Users\me\dev\esphome` + `C:\Users\me\dev\.git`) or a home-dir dotfiles
-/// repo (`~/.git`) — because those repos are not ancestors of the build dir.
+/// - **Windows**: the build directory is `C:\esphb-XXXX` (set by
+///   esphome/platformio, never by this app), whose only ancestor is the drive
+///   root `C:\`. So `C:\.git` is the one stray repo that actually breaks a
+///   build. Checking every config-dir ancestor would over-warn on legitimate
+///   layouts that never feed the build — configs kept inside a project repo
+///   (`C:\Users\me\dev\esphome` + `C:\Users\me\dev\.git`) or a `~\.git`
+///   dotfiles repo — so **only the drive root** is checked.
+/// - **Unix (Linux/macOS)**: the build tree lives under the config directory,
+///   so any enclosing repo can feed CMake's upward walk. We therefore keep the
+///   full **tree check** — every strict ancestor, nearest wins. The config dir
+///   itself is skipped: version-controlling your ESPHome configs is legitimate
+///   and must not warn.
 ///
 /// A **relative** `config_dir` (the `PathBuf::from("esphome")` `home_dir()`
 /// fallback, or a relative user-supplied `settings.config_dir`) is first
 /// absolutized against the current working directory so the ancestor chain
-/// terminates at a real root rather than an empty path. The config dir is never
-/// flagged when it *is* the root (or the path is rootless).
-///
-/// Pure apart from the cwd lookup, so the root resolution is unit-testable.
-fn config_dir_filesystem_root(config_dir: &Path) -> Option<PathBuf> {
+/// terminates at a real root rather than an empty path.
+fn find_parent_git_repo(config_dir: &Path, is_repo: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     // Absolutize a relative config dir so the ancestor walk terminates at a
     // real filesystem root rather than an empty path.
     let absolute;
@@ -285,38 +291,48 @@ fn config_dir_filesystem_root(config_dir: &Path) -> Option<PathBuf> {
         &absolute
     };
 
-    // `ancestors()` yields the path itself first and the filesystem root last.
-    // This assumes the config dir shares a drive with the platformio build dir
-    // (`C:\esphb-XXXX`). If the user relocates `settings.config_dir` to another
-    // drive (e.g. `D:\esphome` while builds run on `C:`), we check that drive's
-    // root, not the build drive — niche, and deriving the build drive reliably
-    // cross-platform is hard, so the build dir's real anchor stays implicit.
-    let root = config_dir.ancestors().last()?;
-    if root.as_os_str().is_empty() || root == config_dir {
-        return None;
+    #[cfg(target_os = "windows")]
+    {
+        // Only the drive root can feed the build dir's (`C:\esphb-XXXX`) upward
+        // CMake walk. `ancestors()` yields the path itself first and the drive
+        // root last. The config dir is never flagged when it *is* the root.
+        let root = config_dir.ancestors().last()?;
+        if root.as_os_str().is_empty() || root == config_dir {
+            return None;
+        }
+        is_repo(root).then(|| root.to_path_buf())
     }
-    Some(root.to_path_buf())
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Walk strict ancestors (skip the config dir itself), nearest first;
+        // the build tree sits under the config dir, so any enclosing repo is a
+        // candidate.
+        config_dir
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+            .find(|a| is_repo(a))
+            .map(Path::to_path_buf)
+    }
 }
 
-/// Warn (non-blocking) when a stray Git repository sits at the filesystem/drive
-/// root above the ESPHome config directory, which can make ESP-IDF builds fail
-/// with an opaque CMake `head-ref` error (issue #170).
+/// Warn (non-blocking) when a stray Git repository sits above the ESPHome
+/// config directory, which can make ESP-IDF builds fail with an opaque CMake
+/// `head-ref` error (issue #170).
 ///
-/// Only the filesystem root is checked — not every config-dir ancestor — so the
-/// warning fires on the case that actually breaks builds (`C:\.git`) without
-/// over-warning on configs kept inside a project repo or a home-dir dotfiles
-/// repo (per PR review by @bdraco). See [`config_dir_filesystem_root`].
+/// The scope is platform-specific — the Windows drive root, the full ancestor
+/// tree on Linux/macOS (per @bdraco's review). See [`find_parent_git_repo`].
 ///
 /// Called once per launch, after the daemon starts successfully — same cadence
-/// as [`notify_if_git_missing`]. No-op when no root repository is found.
+/// as [`notify_if_git_missing`]. No-op when no parent repository is found.
 pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Path) {
-    let Some(repo_root) = config_dir_filesystem_root(config_dir).filter(|r| has_git_entry(r))
-    else {
+    let Some(repo_root) = find_parent_git_repo(config_dir, has_git_entry) else {
         return;
     };
 
     warn!(
-        "config directory {} sits under a Git repository at the drive root {}; \
+        "config directory {} sits inside a Git repository rooted at {}; \
          ESP-IDF builds may fail with an opaque CMake head-ref error (see issue \
          #170)",
         config_dir.display(),
@@ -324,11 +340,11 @@ pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Pat
     );
 
     let body = format!(
-        "The drive root ({}) is a Git repository. ESP-IDF builds can pick up \
-         that repository and fail to compile with an opaque CMake \"head-ref\" \
-         error. If your devices fail to build, remove the stray .git entry \
-         (file or folder) from that folder, or move your ESPHome configuration \
-         onto a drive that is not a Git repository.",
+        "A folder above your ESPHome configuration ({}) is a Git repository. \
+         ESP-IDF builds can pick up that repository and fail to compile with an \
+         opaque CMake \"head-ref\" error. If your devices fail to build, remove \
+         the stray .git entry (file or folder) from that folder, or move your \
+         ESPHome configuration outside that repository.",
         repo_root.display()
     );
 
@@ -497,30 +513,78 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn filesystem_root_of_nested_config_dir_is_the_drive_root() {
-        // Detection is scoped to the drive root (the only ancestor of the
-        // platformio build dir), not every config-dir ancestor.
-        let config = Path::new("/Users/me/dev/esphome");
-        let expected = config.ancestors().last().unwrap().to_path_buf();
+    fn unix_nearest_ancestor_repo_wins() {
+        // Tree check (Linux/macOS): the nearest enclosing repo is reported.
+        let config = Path::new("/home/me/dev/esphome");
+        let near = Path::new("/home/me/dev");
+        let is_repo = |p: &Path| p == near || p == Path::new("/home");
 
-        assert_eq!(config_dir_filesystem_root(config), Some(expected));
+        assert_eq!(find_parent_git_repo(config, is_repo), Some(near.to_path_buf()));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn config_dir_that_is_the_root_yields_none() {
-        // A config dir that is itself the filesystem root has no parent to flag.
-        let root = Path::new("/Users/me/dev/esphome");
-        let fs_root = root.ancestors().last().unwrap();
+    fn unix_config_dir_itself_is_not_flagged() {
+        // Version-controlling the config dir is legitimate; only ancestors count.
+        let config = Path::new("/home/me/dev/esphome");
+        let is_repo = |p: &Path| p == config;
 
-        assert_eq!(config_dir_filesystem_root(fs_root), None);
+        assert_eq!(find_parent_git_repo(config, is_repo), None);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_no_ancestor_repo_yields_none() {
+        let config = Path::new("/home/me/dev/esphome");
+
+        assert_eq!(find_parent_git_repo(config, |_| false), None);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_config_dir_at_root_yields_none() {
+        // A config dir that is itself the filesystem root has no parent to flag.
+        let fs_root = Path::new("/home/me").ancestors().last().unwrap();
+
+        assert_eq!(find_parent_git_repo(fs_root, |_| true), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_checks_only_the_drive_root() {
+        // On Windows the build dir's only ancestor is the drive root, so an
+        // intermediate repo must NOT be flagged...
+        let config = Path::new(r"C:\Users\me\dev\esphome");
+        let intermediate = |p: &Path| p == Path::new(r"C:\Users\me\dev");
+        assert_eq!(find_parent_git_repo(config, intermediate), None);
+
+        // ...only a repo at the drive root is.
+        let drive_root = config.ancestors().last().unwrap().to_path_buf();
+        let at_root = {
+            let drive_root = drive_root.clone();
+            move |p: &Path| p == drive_root
+        };
+        assert_eq!(find_parent_git_repo(config, at_root), Some(drive_root));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_config_dir_at_drive_root_yields_none() {
+        // A config dir that is itself the drive root has no parent to flag.
+        let drive_root = Path::new(r"C:\Users\me").ancestors().last().unwrap();
+
+        assert_eq!(find_parent_git_repo(drive_root, |_| true), None);
     }
 
     #[test]
     fn relative_config_dir_absolutizes_against_cwd() {
         // The `home_dir()` fallback (`PathBuf::from("esphome")`) and relative
         // user settings are absolutized against cwd, so the ancestor walk
-        // terminates at a real filesystem root rather than an empty path.
+        // terminates at a real filesystem root rather than an empty path. The
+        // filesystem/drive root is a strict ancestor on every platform (and the
+        // sole checked one on Windows), so flagging it works cross-platform.
         let cwd_root = std::env::current_dir()
             .expect("cwd")
             .ancestors()
@@ -528,10 +592,9 @@ mod tests {
             .unwrap()
             .to_path_buf();
 
-        let root = config_dir_filesystem_root(Path::new("esphome"));
+        let root = find_parent_git_repo(Path::new("esphome"), |p| p == cwd_root);
 
         assert_eq!(root, Some(cwd_root));
-        assert!(!root.unwrap().as_os_str().is_empty());
     }
 
     #[cfg(unix)]
