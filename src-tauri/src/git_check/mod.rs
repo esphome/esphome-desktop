@@ -263,13 +263,21 @@ fn has_git_entry(dir: &Path) -> bool {
 /// @bdraco's review ("on windows this should check the drive root, and on
 /// linux/mac it should keep the tree check"):
 ///
-/// - **Windows**: the build directory is `C:\esphb-XXXX` (set by
-///   esphome/platformio, never by this app), whose only ancestor is the drive
-///   root `C:\`. So `C:\.git` is the one stray repo that actually breaks a
-///   build. Checking every config-dir ancestor would over-warn on legitimate
-///   layouts that never feed the build — configs kept inside a project repo
-///   (`C:\Users\me\dev\esphome` + `C:\Users\me\dev\.git`) or a `~\.git`
-///   dotfiles repo — so **only the drive root** is checked.
+/// - **Windows**: the build directory is `C:\esphb\<id8>` (nested under a
+///   shared `C:\esphb`, set by esphome-device-builder's own
+///   `windows_short_build_paths` helper, never by this app). `C:\esphb` is
+///   app-created/owned (no stray `.git`), and the only ancestor it shares with
+///   the config dir is the drive root `C:\`. So `C:\.git` is the one stray repo
+///   that actually breaks a build. Checking every config-dir ancestor would
+///   over-warn on legitimate layouts that never feed the build — configs kept
+///   inside a project repo (`C:\Users\me\dev\esphome` + `C:\Users\me\dev\.git`)
+///   or a `~\.git` dotfiles repo — so **only the drive root** is checked.
+///
+///   Caveat: `windows_short_build_paths` is a no-op when `ESPHOME_DATA_DIR` is
+///   preset (or dashboard-id / relocation setup fails), in which case the build
+///   tree falls back to `<config>/.esphome`, under the config dir like Unix.
+///   The drive-root-only check then misses an intermediate breaker; this is a
+///   known, narrow under-warn gap on that fallback path.
 /// - **Unix (Linux/macOS)**: the build tree lives under the config directory,
 ///   so any enclosing repo can feed CMake's upward walk. We therefore keep the
 ///   full **tree check** — every strict ancestor, nearest wins. The config dir
@@ -293,8 +301,8 @@ fn find_parent_git_repo(config_dir: &Path, is_repo: impl Fn(&Path) -> bool) -> O
 
     #[cfg(target_os = "windows")]
     {
-        // Only the drive root can feed the build dir's (`C:\esphb-XXXX`) upward
-        // CMake walk. `ancestors()` yields the path itself first and the drive
+        // Only the drive root can feed the build dir's (`C:\esphb\<id8>`)
+        // upward CMake walk. `ancestors()` yields the path itself first and the drive
         // root last. The config dir is never flagged when it *is* the root.
         let root = config_dir.ancestors().last()?;
         if root.as_os_str().is_empty() || root == config_dir {
