@@ -63,6 +63,8 @@ Right-click (or left-click on some platforms) the tray icon to access:
 
 To keep a machine acting as an always-on builder, leave **Startup → Launch at Login** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
 
+Turn autostart off with **Startup → Don't Launch at Login**, not the OS's own login-items UI: the app reconciles the login item to its saved preference on every launch, so an entry removed through *System Settings → Login Items* (macOS), *Startup Apps* (Windows), or `~/.config/autostart` (Linux) is re-created on the next start.
+
 ### Data Locations
 
 Application data (bundled Python, logs, settings):
