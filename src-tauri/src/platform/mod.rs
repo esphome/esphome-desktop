@@ -463,6 +463,7 @@ fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<Strin
         &output.stdout,
         &output.stderr,
     )
+    .with_context(|| format!("version probe for {package} via {python_bin:?}"))
 }
 
 /// Pure parser for [`read_package_version`]'s subprocess result. A successful
