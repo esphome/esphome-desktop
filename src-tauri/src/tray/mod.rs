@@ -955,9 +955,16 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             }
         }
         ids::RESTART => {
-            info!("Restarting ESPHome backend");
             let state = state.clone();
             async_runtime::spawn(async move {
+                // restart() is a stop()->start() sequence, so it must hold the
+                // same re-entrancy guard as the channel/backend switch arms.
+                // Without it a Restart click during an in-flight switch can run
+                // start() with the OLD backend before the switch persists the
+                // new one, leaving the running process out of sync with the
+                // saved settings and tray radio state.
+                let _guard = guard_or_return!(state, "restart");
+                info!("Restarting ESPHome backend");
                 if let Err(e) = state.daemon.restart().await {
                     error!("Failed to restart daemon: {}", e);
                 }
