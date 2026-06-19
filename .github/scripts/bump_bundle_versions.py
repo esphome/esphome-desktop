@@ -367,12 +367,14 @@ def resolve_python_bump(text: str) -> tuple[BumpResult, str]:
     # missing-variable / unresolvable-upstream paths above.
     current_python = read_assignment(text, "PYTHON_VERSION")
     if is_downgrade(current_python, python_version):
-        _error(
+        # A broken upstream assumption, not a routine skip. Raise so main's
+        # ResolutionError handler logs it and returns 1; returning 1 here would
+        # be unpacked as a (result, title) tuple and crash.
+        raise ResolutionError(
             f"latest {PBS_REPO} release ships CPython {python_version}, older "
             f"than the pinned {current_python}; refusing to downgrade the "
             "bundled interpreter. Investigate upstream before bumping."
         )
-        return 1
 
     result = apply_bumps(
         text, {"PYTHON_VERSION": python_version, "PBS_VERSION": pbs_version}
