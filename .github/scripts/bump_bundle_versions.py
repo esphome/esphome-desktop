@@ -60,6 +60,11 @@ GFW_REPO = "git-for-windows/git"
 # rebuilds like MinGit-2.53.0.3-64-bit.zip still do.
 MINGIT_ASSET_RE = re.compile(r"MinGit-(?P<ver>[\d.]+)-64-bit\.zip")
 
+# The 64-bit PortableGit self-extracting archive from the same release. We harvest
+# a GNU patch.exe from it (issue #189); pinning it to the same release as MinGit
+# keeps patch.exe ABI-matched to MinGit's msys-2.0.dll.
+PORTABLEGIT_ASSET_RE = re.compile(r"PortableGit-(?P<ver>[\d.]+)-64-bit\.7z\.exe")
+
 # Per-request network timeout. A stalled connection otherwise blocks the nightly
 # job until the workflow's multi-hour default timeout fires; failing fast lets
 # the run fail promptly (after retries) and surface a clear error.
@@ -157,8 +162,10 @@ def current_python_minor(text: str) -> str:
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a dotted numeric version (e.g. "3.13.13") into an int tuple so
-    versions order numerically rather than lexically ("3.13.9" < "3.13.10")."""
+    """Parse a dotted numeric version into an int tuple so versions order
+    numerically rather than lexically ("3.13.9" < "3.13.10"). Shared by the
+    CPython downgrade guard and the MinGit downgrade guard; both pin dotted
+    versions (e.g. "3.13.13", "2.54.0", or a rebuild "2.53.0.3")."""
     return tuple(int(part) for part in version.split("."))
 
 
@@ -294,22 +301,32 @@ def _asset_sha256(asset: dict[str, Any]) -> str:
     return _download_sha256(url)
 
 
-def resolve_latest_mingit() -> tuple[str, str, str]:
-    """Return `(version, url, sha256)` for the latest 64-bit MinGit zip.
-
-    Picks the plain x86-64 MinGit asset from the latest git-for-windows release
-    and reads its checksum, so the literal download URL and digest land in
-    prepare_bundle.sh even for `.windows.N` rebuilds whose filename carries the
-    build number.
-    """
-    release = _api_get(f"https://api.github.com/repos/{GFW_REPO}/releases/latest")
+def _find_asset(
+    release: dict[str, Any], pattern: re.Pattern[str], label: str
+) -> tuple[str, str, str]:
+    """Return `(version, url, sha256)` for the asset matching `pattern`."""
     for asset in release.get("assets", []):
-        m = MINGIT_ASSET_RE.fullmatch(asset.get("name", ""))
+        m = pattern.fullmatch(asset.get("name", ""))
         if m is not None:
             return m.group("ver"), asset["browser_download_url"], _asset_sha256(asset)
     raise ResolutionError(
-        f"no 64-bit MinGit asset in {GFW_REPO} release {release.get('tag_name')!r}"
+        f"no {label} asset in {GFW_REPO} release {release.get('tag_name')!r}"
     )
+
+
+def resolve_latest_mingit() -> tuple[str, str, str, str, str]:
+    """Resolve the MinGit and PortableGit assets from the latest GfW release.
+
+    Returns `(version, mingit_url, mingit_sha256, portablegit_url,
+    portablegit_sha256)`. Both assets come from the same `releases/latest`
+    response (one request), so the harvested patch.exe stays ABI-matched to
+    MinGit's msys-2.0.dll. The literal URLs and digests land in prepare_bundle.sh
+    even for `.windows.N` rebuilds whose filenames carry the build number.
+    """
+    release = _api_get(f"https://api.github.com/repos/{GFW_REPO}/releases/latest")
+    version, mingit_url, mingit_sha = _find_asset(release, MINGIT_ASSET_RE, "MinGit")
+    _, pg_url, pg_sha = _find_asset(release, PORTABLEGIT_ASSET_RE, "PortableGit")
+    return version, mingit_url, mingit_sha, pg_url, pg_sha
 
 
 # --------------------------------------------------------------------------- #
@@ -388,15 +405,10 @@ def resolve_python_bump(text: str) -> tuple[BumpResult, str]:
     return result, title
 
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a dotted MinGit version (e.g. "2.54.0" or rebuild "2.53.0.3")."""
-    return tuple(int(part) for part in version.split("."))
-
-
 def resolve_mingit_bump(text: str) -> tuple[BumpResult, str]:
-    """Resolve the latest MinGit and compute the bump over `text`."""
+    """Resolve the latest MinGit + PortableGit and compute the bump over `text`."""
     current = read_assignment(text, "MINGIT_VERSION")
-    version, url, sha256 = resolve_latest_mingit()
+    version, url, sha256, pg_url, pg_sha256 = resolve_latest_mingit()
     # Git for Windows releases move forward, so a resolved version older than the
     # current pin means upstream republished an old tag as `latest` or unpublished
     # a release. That's a broken assumption, not a routine skip: fail loudly
@@ -407,9 +419,17 @@ def resolve_mingit_bump(text: str) -> tuple[BumpResult, str]:
             f"latest MinGit {version} is older than the pinned {current}; "
             "refusing to downgrade"
         )
+    # MinGit and the PortableGit we harvest patch.exe from are bumped together so
+    # patch.exe stays ABI-matched to MinGit's msys-2.0.dll.
     result = apply_bumps(
         text,
-        {"MINGIT_VERSION": version, "MINGIT_URL": url, "MINGIT_SHA256": sha256},
+        {
+            "MINGIT_VERSION": version,
+            "MINGIT_URL": url,
+            "MINGIT_SHA256": sha256,
+            "PORTABLEGIT_URL": pg_url,
+            "PORTABLEGIT_SHA256": pg_sha256,
+        },
     )
     return result, f"Bump bundled MinGit to {version}"
 
@@ -427,7 +447,13 @@ TARGETS: dict[str, tuple[tuple[str, ...], _Resolver, str]] = {
         "Python interpreter",
     ),
     "mingit": (
-        ("MINGIT_VERSION", "MINGIT_URL", "MINGIT_SHA256"),
+        (
+            "MINGIT_VERSION",
+            "MINGIT_URL",
+            "MINGIT_SHA256",
+            "PORTABLEGIT_URL",
+            "PORTABLEGIT_SHA256",
+        ),
         resolve_mingit_bump,
         "MinGit (Git for Windows)",
     ),

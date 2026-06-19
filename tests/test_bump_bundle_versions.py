@@ -37,6 +37,8 @@ BASE_URL="https://example/${PBS_VERSION}"
 MINGIT_VERSION="2.53.0"
 MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.53.0.windows.1/MinGit-2.53.0-64-bit.zip"
 MINGIT_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.53.0.windows.1/PortableGit-2.53.0-64-bit.7z.exe"
+PORTABLEGIT_SHA256="1111111111111111111111111111111111111111111111111111111111111111"
 """
 
 
@@ -228,6 +230,8 @@ def _gfw_release(tag: str, mingit_ver: str) -> dict[str, Any]:
         f"MinGit-{mingit_ver}-arm64.zip",
         f"MinGit-{mingit_ver}-busybox-64-bit.zip",
         f"MinGit-{mingit_ver}-64-bit.zip",
+        f"PortableGit-{mingit_ver}-32-bit.7z.exe",
+        f"PortableGit-{mingit_ver}-64-bit.7z.exe",
     ]
     return {
         "tag_name": tag,
@@ -248,10 +252,13 @@ def test_resolve_latest_mingit_picks_plain_64bit_asset(
     monkeypatch.setattr(
         bump, "_api_get", lambda url: _gfw_release("v2.54.0.windows.1", "2.54.0")
     )
-    version, url, sha = bump.resolve_latest_mingit()
+    version, url, sha, pg_url, pg_sha = bump.resolve_latest_mingit()
     assert version == "2.54.0"
     assert url.endswith("/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip")
     assert sha == "ab" * 32
+    # The PortableGit asset (patch.exe source) is resolved from the same release.
+    assert pg_url.endswith("/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe")
+    assert pg_sha == "ab" * 32
 
 
 def test_resolve_latest_mingit_handles_rebuild(
@@ -262,9 +269,10 @@ def test_resolve_latest_mingit_handles_rebuild(
     monkeypatch.setattr(
         bump, "_api_get", lambda url: _gfw_release("v2.53.0.windows.3", "2.53.0.3")
     )
-    version, url, _sha = bump.resolve_latest_mingit()
+    version, url, _sha, pg_url, _pg_sha = bump.resolve_latest_mingit()
     assert version == "2.53.0.3"
     assert url.endswith("/v2.53.0.windows.3/MinGit-2.53.0.3-64-bit.zip")
+    assert pg_url.endswith("/v2.53.0.windows.3/PortableGit-2.53.0.3-64-bit.7z.exe")
 
 
 def test_resolve_latest_mingit_raises_when_no_asset(
@@ -274,6 +282,26 @@ def test_resolve_latest_mingit_raises_when_no_asset(
         bump, "_api_get", lambda url: {"tag_name": "v2.54.0.windows.1", "assets": []}
     )
     with pytest.raises(bump.ResolutionError):
+        bump.resolve_latest_mingit()
+
+
+def test_resolve_latest_mingit_raises_when_portablegit_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MinGit present but no PortableGit (the patch.exe source) is a broken release
+    # assumption that must fail loudly, not silently ship without patch.
+    release = {
+        "tag_name": "v2.54.0.windows.1",
+        "assets": [
+            {
+                "name": "MinGit-2.54.0-64-bit.zip",
+                "browser_download_url": "https://example/MinGit-2.54.0-64-bit.zip",
+                "digest": f"sha256:{'ab' * 32}",
+            }
+        ],
+    }
+    monkeypatch.setattr(bump, "_api_get", lambda url: release)
+    with pytest.raises(bump.ResolutionError, match="PortableGit"):
         bump.resolve_latest_mingit()
 
 
@@ -433,8 +461,14 @@ def test_main_mingit_writes_file_and_outputs_on_bump(
         "https://github.com/git-for-windows/git/releases/download/"
         "v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
     )
+    new_pg_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
+    )
     monkeypatch.setattr(
-        bump, "resolve_latest_mingit", lambda: ("2.54.0", new_url, "ff" * 32)
+        bump,
+        "resolve_latest_mingit",
+        lambda: ("2.54.0", new_url, "ff" * 32, new_pg_url, "ee" * 32),
     )
 
     rc = bump.main(["--target", "mingit", "--file", str(script)])
@@ -443,6 +477,9 @@ def test_main_mingit_writes_file_and_outputs_on_bump(
     assert 'MINGIT_VERSION="2.54.0"' in text
     assert f'MINGIT_URL="{new_url}"' in text
     assert f'MINGIT_SHA256="{"ff" * 32}"' in text
+    # PortableGit (patch.exe source) is bumped in lockstep with MinGit.
+    assert f'PORTABLEGIT_URL="{new_pg_url}"' in text
+    assert f'PORTABLEGIT_SHA256="{"ee" * 32}"' in text
     # The Python pins are untouched by a MinGit bump.
     assert 'PYTHON_VERSION="3.13.12"' in text
 
@@ -462,8 +499,14 @@ def test_main_mingit_no_op_when_already_current(
         "https://github.com/git-for-windows/git/releases/download/"
         "v2.53.0.windows.1/MinGit-2.53.0-64-bit.zip"
     )
+    current_pg_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.53.0.windows.1/PortableGit-2.53.0-64-bit.7z.exe"
+    )
     monkeypatch.setattr(
-        bump, "resolve_latest_mingit", lambda: ("2.53.0", current_url, "0" * 64)
+        bump,
+        "resolve_latest_mingit",
+        lambda: ("2.53.0", current_url, "0" * 64, current_pg_url, "1" * 64),
     )
 
     rc = bump.main(["--target", "mingit", "--file", str(script)])
@@ -485,8 +528,14 @@ def test_main_mingit_refuses_downgrade(
         "https://github.com/git-for-windows/git/releases/download/"
         "v2.52.0.windows.1/MinGit-2.52.0-64-bit.zip"
     )
+    old_pg_url = (
+        "https://github.com/git-for-windows/git/releases/download/"
+        "v2.52.0.windows.1/PortableGit-2.52.0-64-bit.7z.exe"
+    )
     monkeypatch.setattr(
-        bump, "resolve_latest_mingit", lambda: ("2.52.0", old_url, "aa" * 32)
+        bump,
+        "resolve_latest_mingit",
+        lambda: ("2.52.0", old_url, "aa" * 32, old_pg_url, "bb" * 32),
     )
 
     rc = bump.main(["--target", "mingit", "--file", str(script)])
