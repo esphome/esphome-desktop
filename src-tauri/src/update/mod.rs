@@ -388,7 +388,7 @@ impl UpdateChecker {
         // with --ignore-installed, which skips the uninstall but orphans stale
         // files — so we limit that trade-off to the broken-RECORD case.
         let pp = python_path.clone();
-        install_with_record_retry(
+        let result = install_with_record_retry(
             move |ignore| {
                 let pp = pp.clone();
                 async move { run_device_builder_install(&pp, backend, ignore).await }
@@ -397,7 +397,16 @@ impl UpdateChecker {
             "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed",
             "pip install esphome-device-builder failed",
         )
-        .await
+        .await;
+
+        // On success, prune any `.dist-info` dirs the --ignore-installed retry
+        // may have orphaned, so the next version check resolves a single, real
+        // version instead of looping on "None" (#190). Best-effort.
+        if result.is_ok() {
+            let _ = dedupe_device_builder_dist_info(app_handle);
+        }
+
+        result
     }
 
     /// Query PyPI for the latest available `esphome-device-builder` version.
@@ -444,7 +453,7 @@ impl UpdateChecker {
             return;
         }
 
-        let installed = match get_installed_device_builder_version(app_handle) {
+        let installed = match detect_device_builder_version_with_heal(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
                 debug!("esphome-device-builder is not installed; skipping update check");
@@ -503,7 +512,7 @@ impl UpdateChecker {
             return None;
         }
 
-        let installed = match get_installed_device_builder_version(app_handle) {
+        let installed = match detect_device_builder_version_with_heal(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
                 warn!("esphome-device-builder is not installed");
@@ -705,44 +714,126 @@ fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Strin
     best
 }
 
+/// Maintenance helper run with the bundled interpreter as `python -c <src>
+/// <mode>`. `detect` prints the highest installed device-builder version (empty
+/// if undeterminable); `dedupe` removes orphaned duplicate `.dist-info` dirs and
+/// prints how many it removed. Embedded so it ships with the binary and stays in
+/// sync with its pytest suite (`tests/test_device_builder_maintenance.py`).
+const DEVICE_BUILDER_MAINT_PY: &str = include_str!("../../scripts/device_builder_maintenance.py");
+
 /// Get the installed `esphome-device-builder` package version.
 ///
 /// - `Ok(Some(v))` — package is installed, returns the version string.
-/// - `Ok(None)` — Python ran successfully but the version is not determinable:
-///   the package is not installed (importlib.metadata raised
-///   `PackageNotFoundError`), or the lookup returned an empty/`"None"` result
-///   because duplicate dist-info dirs confused it (#190).
-/// - `Err(e)` — detection itself failed (bundled Python missing, spawn
-///   error, etc.); the caller should surface this rather than treat it as
-///   "not installed".
+/// - `Ok(None)` — `detect` ran successfully (exit 0) but printed no version: the
+///   package is not installed, or duplicate dist-info dirs left it
+///   undeterminable (#190).
+/// - `Err(e)` — detection itself failed: the bundled Python is missing, the
+///   spawn failed, or the helper exited non-zero (a broken interpreter / import
+///   error). The caller should surface this rather than treat it as "not
+///   installed".
 pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
     let mut cmd = std::process::Command::new(&python_path);
-    cmd.args([
-        "-c",
-        "from importlib.metadata import version; print(version('esphome-device-builder'))",
-    ]);
+    // Enumerate all device-builder distributions and take the highest version,
+    // which is robust to the duplicate dist-info pileup that makes a plain
+    // `importlib.metadata.version(...)` return None or an older version (#190).
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
+    // sys.path so detection only ever sees the managed bundled install.
+    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"]);
     platform::configure_no_window_command(&mut cmd);
 
     let output = cmd.output().context("Failed to run python")?;
 
     if output.status.success() {
+        // `detect` logs skipped/unreadable distributions to stderr; surface it so
+        // the reason a version came back undeterminable isn't lost.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            warn!("device-builder version detection: {stderr}");
+        }
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // An empty result, or the literal "None" that `importlib.metadata` prints
-        // when duplicate dist-info dirs confuse the lookup, means we could not
-        // determine the version. Treat it as "not determinable" rather than a
-        // real version, so the updater does not offer an endless update (#190).
+        // `detect` prints nothing when it cannot determine a version (no install
+        // or an unresolvable pileup); the "None" guard is belt-and-suspenders.
+        // Treat either as "not determinable" so the updater does not offer an
+        // endless update (#190).
         if version.is_empty() || version == "None" {
             return Ok(None);
         }
         Ok(Some(version))
     } else {
-        // Non-zero exit means importlib.metadata raised PackageNotFoundError —
-        // the package isn't installed. That's a distinct state from a
-        // detection failure (which would have errored out above).
-        Ok(None)
+        // `detect` exits 0 even when the package is absent (it prints nothing),
+        // so a non-zero exit is a real execution failure (broken bundled
+        // interpreter, import error, etc.). Surface it rather than silently
+        // misclassifying it as "not installed" and skipping the update check.
+        anyhow::bail!(
+            "device-builder version detection failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     }
+}
+
+/// Remove orphaned duplicate `.dist-info` directories for the device-builder
+/// package and its frontend, keeping the highest version's metadata.
+///
+/// The `--ignore-installed` install fallback (#155/#183) skips the uninstall and
+/// leaves the previous version's `.dist-info` behind; once several pile up,
+/// `importlib.metadata` can no longer resolve a single version and the updater
+/// loops forever offering "version None" (#190). This heals that state. It is
+/// best-effort: a failure is logged and swallowed so it can never block an
+/// install or an update check.
+pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
+    let python_path = platform::get_python_path(app_handle)?;
+
+    let mut cmd = std::process::Command::new(&python_path);
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
+    // sys.path so this destructive prune can only ever touch the managed bundled
+    // install, never a user-site or externally-injected tree.
+    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "dedupe"]);
+    platform::configure_no_window_command(&mut cmd);
+
+    let output = cmd.output().context("Failed to run dist-info dedup")?;
+
+    if output.status.success() {
+        // The helper logs dist-info it couldn't read or remove to stderr;
+        // surface it so a partial prune isn't silently lost.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            warn!("device-builder dist-info dedup: {stderr}");
+        }
+        let removed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !removed.is_empty() && removed != "0" {
+            info!("Removed {removed} stale device-builder dist-info dir(s)");
+        }
+    } else {
+        warn!(
+            "device-builder dist-info dedup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Detect the installed device-builder version, healing a duplicate dist-info
+/// pileup once if the first lookup cannot determine a version.
+///
+/// A `None` result is the exact symptom of the pileup (#190), so prune the
+/// duplicates and re-query before giving up. A genuinely-absent package stays
+/// `None` (dedup finds nothing to remove), at the cost of one extra Python spawn
+/// only on the already-unusual not-determinable path.
+fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Option<String>> {
+    let installed = get_installed_device_builder_version(app_handle)?;
+    if installed.is_some() {
+        return Ok(installed);
+    }
+    if let Err(e) = dedupe_device_builder_dist_info(app_handle) {
+        // The heal is best-effort, but a failed attempt shouldn't be invisible:
+        // the re-query below will just return the same undeterminable result.
+        warn!("device-builder dist-info heal failed: {e}");
+    }
+    get_installed_device_builder_version(app_handle)
 }
 
 /// Build the `pip` argument list for installing/upgrading
@@ -1042,6 +1133,17 @@ mod tests {
         assert!(!is_newer_version("2026.5.0-dev", "2026.5.0"));
         // A newer base version dev is still newer than an older stable
         assert!(is_newer_version("2026.5.0-dev", "2026.4.0"));
+    }
+
+    #[test]
+    fn test_device_builder_maint_py_well_formed() {
+        // Behavior is covered in depth by tests/test_device_builder_maintenance.py;
+        // here we only pin the argv-mode contract this module invokes it with, so
+        // a rename of the modes (not the internal functions) can't pass silently.
+        // Match the bare mode words so the check is tolerant of quote style.
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 
     #[test]

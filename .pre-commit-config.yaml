@@ -31,6 +31,14 @@ repos:
       - id: check-json
       - id: mixed-line-ending
         args: [--fix=lf]
+  # Lint and format first-party Python (release tooling + the embedded
+  # device-builder maintenance helper). Pinned to match the Scripts Test CI job.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.13
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+        args: [--check]
   - repo: local
     hooks:
       - id: forbid-nul-bytes
