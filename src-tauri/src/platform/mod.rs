@@ -248,6 +248,19 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
 const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
+/// Filename of the counter tracking consecutive launches that deferred the
+/// bundled-Python refresh because the version probe failed on a still-usable
+/// interpreter. Lives inside the user Python tree, so it is reset for free the
+/// moment the tree is wiped. See [`MAX_REFRESH_DEFERS`].
+const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
+
+/// Maximum consecutive refresh defers before forcing the destructive refresh.
+/// A usable interpreter whose package metadata is persistently unreadable
+/// (e.g. a corrupt `.dist-info`) would otherwise defer on every launch,
+/// gating the self-heal behind the very metadata that is broken. After this
+/// many defers we stop deferring and wipe to re-copy a clean bundle.
+const MAX_REFRESH_DEFERS: u32 = 3;
+
 /// Ensure the user Python exists by copying from bundled Python if needed.
 ///
 /// A version marker file is written into the user Python directory after the
@@ -270,7 +283,7 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        use tracing::info;
+        use tracing::{info, warn};
 
         let data_dir = get_data_dir(app_handle)?;
         let user_python = data_dir.join("python");
@@ -296,14 +309,67 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             // wipe so we can restore them after the bundled tree is in place.
             // Without this, a user who pip-bumped ESPHome past the bundled
             // version would silently get downgraded by every app self-update.
+            //
+            // If the probe FAILS (as opposed to the package being absent), we
+            // cannot tell whether the user pinned a newer version, so wiping
+            // the tree now would silently discard it — exactly the downgrade
+            // this snapshot exists to prevent. In that case defer the refresh:
+            // keep the working tree, log a warning, and retry next launch.
             let preserved = if python_check.exists() {
-                let old_python_bin = python_check.clone();
-                PreservedVersions {
-                    esphome: read_package_version(&old_python_bin, "esphome"),
-                    esphome_device_builder: read_package_version(
-                        &old_python_bin,
-                        "esphome-device-builder",
-                    ),
+                match snapshot_preserved_versions(&python_check) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // A probe error means we can't trust a snapshot — but
+                        // WHY matters. If the interpreter itself is unusable
+                        // (can't even run a trivial script), the tree is broken
+                        // and the destructive refresh is the only recovery
+                        // path, so fall through and wipe. If the interpreter
+                        // runs but the probe failed (non-zero exit, possibly
+                        // transient), defer to avoid discarding a user-pinned
+                        // version we just couldn't read.
+                        //
+                        // Deferring is bounded: a usable interpreter whose
+                        // package metadata is *persistently* unreadable would
+                        // otherwise defer forever, gating the self-heal wipe
+                        // behind the very metadata that is broken. After
+                        // MAX_REFRESH_DEFERS consecutive defers we proceed with
+                        // the wipe to re-copy a clean bundle. The counter lives
+                        // inside the tree, so it resets the moment we wipe.
+                        if interpreter_is_usable(&python_check) {
+                            let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
+                            let defers = read_refresh_defer_count(&defer_marker);
+                            if defers < MAX_REFRESH_DEFERS
+                                && bump_refresh_defer_count(&defer_marker, defers + 1)
+                            {
+                                warn!(
+                                    "Could not read existing Python package versions ({e:#}); \
+                                     deferring the bundled-Python refresh to avoid downgrading a \
+                                     user-pinned version (defer {}/{}). Will retry on next launch.",
+                                    defers + 1,
+                                    MAX_REFRESH_DEFERS
+                                );
+                                return Ok(());
+                            }
+                            // Either we hit the defer bound, or the counter is
+                            // unwritable so it can never advance to that bound.
+                            // Both mean "stop deferring and self-heal" — wiping
+                            // re-copies a clean bundle and resets the marker.
+                            warn!(
+                                "Could not read existing Python package versions ({e:#}); the \
+                                 package metadata appears persistently broken (or the defer \
+                                 counter is unwritable). Wiping and re-copying the bundled tree \
+                                 to recover."
+                            );
+                            PreservedVersions::default()
+                        } else {
+                            warn!(
+                                "Existing Python interpreter at {:?} is unusable ({e:#}); \
+                                 wiping and re-copying the bundled tree to recover.",
+                                python_check
+                            );
+                            PreservedVersions::default()
+                        }
+                    }
                 }
             } else {
                 PreservedVersions::default()
@@ -353,6 +419,60 @@ struct PreservedVersions {
     esphome_device_builder: Option<String>,
 }
 
+/// Snapshot the user-pinned versions of the packages we preserve across a
+/// bundled-Python refresh. Returns `Err` if any probe FAILS (a `None` from
+/// [`read_package_version`] means the package is genuinely absent, which is a
+/// successful snapshot). The caller must not wipe a tree it could not read, or
+/// it would silently downgrade a version the user deliberately pinned.
+#[cfg(not(target_os = "windows"))]
+fn snapshot_preserved_versions(python_bin: &Path) -> Result<PreservedVersions> {
+    Ok(PreservedVersions {
+        esphome: read_package_version(python_bin, "esphome")?,
+        esphome_device_builder: read_package_version(python_bin, "esphome-device-builder")?,
+    })
+}
+
+/// Returns `true` if the interpreter can run a trivial script with a clean
+/// exit. A `false` result means the tree is broken badly enough (interpreter
+/// can't spawn or can't execute at all) that the destructive bundled-Python
+/// refresh is the right recovery, rather than deferring forever and leaving a
+/// corrupt tree with no automatic repair path. Used to split a transient probe
+/// error (defer) from a genuinely unusable interpreter (wipe & recover).
+#[cfg(not(target_os = "windows"))]
+fn interpreter_is_usable(python_bin: &Path) -> bool {
+    let mut cmd = std::process::Command::new(python_bin);
+    cmd.args(["-c", "pass"]);
+    configure_no_window_command(&mut cmd);
+    matches!(cmd.output(), Ok(o) if o.status.success())
+}
+
+/// Read the consecutive-defer counter, returning 0 when the marker is missing
+/// or unparseable (treat a damaged counter as a fresh start rather than
+/// blocking the self-heal wipe).
+#[cfg(not(target_os = "windows"))]
+fn read_refresh_defer_count(marker_path: &Path) -> u32 {
+    std::fs::read_to_string(marker_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Persist the consecutive-defer counter. Returns `true` if the new count was
+/// durably written. A `false` (write failed) means the counter can't advance,
+/// so the caller must NOT defer again — otherwise a persistently unwritable
+/// marker would re-introduce the defer-forever shape this counter exists to
+/// bound, just triggered by a failed write instead of a failed read.
+#[cfg(not(target_os = "windows"))]
+fn bump_refresh_defer_count(marker_path: &Path, count: u32) -> bool {
+    match crate::util::atomic_write(marker_path, count.to_string()) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
+            false
+        }
+    }
+}
+
 /// Reinstall any preserved package whose pinned version is newer than the
 /// version that just shipped in the new bundled Python tree. Bundled wins
 /// for ties and for when bundled is newer (so users always benefit from the
@@ -371,10 +491,22 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
         ),
     ] {
         let Some(saved) = saved else { continue };
-        let Some(bundled) = read_package_version(python_bin, package) else {
-            // Package isn't in the bundled tree (shouldn't happen for these
-            // two, but don't fight it). Skip the restore.
-            continue;
+        let bundled = match read_package_version(python_bin, package) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                // Package isn't in the bundled tree (shouldn't happen for these
+                // two, but don't fight it). Skip the restore.
+                continue;
+            }
+            Err(e) => {
+                // Couldn't read the freshly-copied bundled version, so we can't
+                // compare. Skip rather than blindly reinstall (which might
+                // downgrade if bundled is actually newer).
+                warn!(
+                    "Could not read bundled {package} version ({e:#}); skipping {saved} restore."
+                );
+                continue;
+            }
         };
         if !crate::update::is_newer_version(saved, &bundled) {
             debug!(
@@ -397,12 +529,22 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 }
 
 /// Read the installed version of a Python package via `importlib.metadata`.
-/// Returns `None` if the package isn't installed or the call fails.
+///
+/// Returns:
+/// - `Ok(Some(v))` — installed at version `v`.
+/// - `Ok(None)` — confirmed not installed (`PackageNotFoundError`).
+/// - `Err(_)` — the probe itself failed (couldn't spawn the interpreter, or it
+///   exited non-zero on an unexpected exception). This is deliberately distinct
+///   from "not installed": callers that snapshot versions before a destructive
+///   refresh must not treat a flaky probe as "absent" — see
+///   [`snapshot_preserved_versions`].
 #[cfg(not(target_os = "windows"))]
-fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
+fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
     // Written as a single-line literal with explicit `\n` so each Python
     // statement starts at column zero — avoids any ambiguity about whether
-    // a Rust line-continuation strips the source-line indentation.
+    // a Rust line-continuation strips the source-line indentation. A clean
+    // exit with no output means PackageNotFoundError; any other exception
+    // propagates as a non-zero exit and is surfaced as an error below.
     let script = format!(
         "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
@@ -410,16 +552,38 @@ fn read_package_version(python_bin: &Path, package: &str) -> Option<String> {
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-c", &script]);
     configure_no_window_command(&mut cmd);
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to run version probe for {package} via {python_bin:?}"))?;
+    parse_probe_output(
+        package,
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )
+    .with_context(|| format!("version probe for {package} via {python_bin:?}"))
+}
+
+/// Pure parser for [`read_package_version`]'s subprocess result. A successful
+/// run with empty stdout means the package is absent (`Ok(None)`); a non-empty
+/// stdout yields the trimmed version; a failed run is an error carrying the
+/// (tail-truncated) stderr.
+#[cfg(not(target_os = "windows"))]
+fn parse_probe_output(
+    package: &str,
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Option<String>> {
+    if !success {
+        let stderr = String::from_utf8_lossy(stderr);
+        anyhow::bail!(
+            "version probe for {package} exited non-zero: {}",
+            tail_for_log(&stderr)
+        );
     }
-    let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    let v = String::from_utf8_lossy(stdout).trim().to_string();
+    Ok(if v.is_empty() { None } else { Some(v) })
 }
 
 /// Hard upper bound on a single `pip install` invocation during the
@@ -1110,11 +1274,25 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
+    fn parse_probe_output_reports_version() {
+        let v = parse_probe_output("esphome", true, b"2026.5.0\n", b"").unwrap();
+        assert_eq!(v, Some("2026.5.0".to_string()));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
         let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
         let out = tail_for_log(&s);
         assert_eq!(out, s, "input exactly at the limit must pass through");
         assert!(!out.contains("truncated"), "no marker at the boundary");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_probe_output_empty_means_absent() {
+        let v = parse_probe_output("esphome", true, b"", b"").unwrap();
+        assert_eq!(v, None, "clean exit with no output means not installed");
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1148,5 +1326,53 @@ mod tests {
             "tail stays within bound"
         );
         assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parse_probe_output_failure_is_error_not_absent() {
+        // A non-zero exit must NOT be conflated with "not installed" — that
+        // conflation would let a flaky probe silently discard a user-pinned
+        // version during the bundled-Python refresh.
+        let err = parse_probe_output("esphome", false, b"", b"Traceback: boom").unwrap_err();
+        assert!(
+            err.to_string().contains("esphome"),
+            "error names the package"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refresh_defer_count_missing_marker_is_zero() {
+        let base = unique_temp_dir("defer-missing");
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(
+            read_refresh_defer_count(&base.join(".refresh-defer-count")),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn refresh_defer_count_round_trips_and_bounds_defers() {
+        // A persistently failing probe must stop deferring after the bound,
+        // so the destructive self-heal wipe can run instead of looping forever.
+        let base = unique_temp_dir("defer-bound");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let marker = base.join(".refresh-defer-count");
+
+        let mut count = read_refresh_defer_count(&marker);
+        let mut defers = 0;
+        while count < MAX_REFRESH_DEFERS {
+            bump_refresh_defer_count(&marker, count + 1);
+            count = read_refresh_defer_count(&marker);
+            defers += 1;
+        }
+        assert_eq!(defers, MAX_REFRESH_DEFERS, "defers are bounded");
+        assert_eq!(count, MAX_REFRESH_DEFERS, "counter persists across reads");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
