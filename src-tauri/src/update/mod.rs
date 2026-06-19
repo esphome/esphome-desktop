@@ -708,8 +708,10 @@ fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Strin
 /// Get the installed `esphome-device-builder` package version.
 ///
 /// - `Ok(Some(v))` — package is installed, returns the version string.
-/// - `Ok(None)` — Python ran successfully but the package is not installed
-///   (importlib.metadata raised `PackageNotFoundError`).
+/// - `Ok(None)` — Python ran successfully but the version is not determinable:
+///   the package is not installed (importlib.metadata raised
+///   `PackageNotFoundError`), or the lookup returned an empty/`"None"` result
+///   because duplicate dist-info dirs confused it (#190).
 /// - `Err(e)` — detection itself failed (bundled Python missing, spawn
 ///   error, etc.); the caller should surface this rather than treat it as
 ///   "not installed".
@@ -727,8 +729,12 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 
     if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if version.is_empty() {
-            anyhow::bail!("esphome-device-builder version is empty");
+        // An empty result, or the literal "None" that `importlib.metadata` prints
+        // when duplicate dist-info dirs confuse the lookup, means we could not
+        // determine the version. Treat it as "not determinable" rather than a
+        // real version, so the updater does not offer an endless update (#190).
+        if version.is_empty() || version == "None" {
+            return Ok(None);
         }
         Ok(Some(version))
     } else {
@@ -989,6 +995,16 @@ pub(crate) fn is_newer_version(latest: &str, installed: &str) -> bool {
     let latest_parts = parse_version(latest);
     let installed_parts = parse_version(installed);
 
+    // An installed version we cannot parse (e.g. "None", "") must not be treated
+    // as infinitely old, or every check would offer an update forever (#190).
+    if installed_parts.is_empty() {
+        return false;
+    }
+    // Symmetric: an unparseable "latest" is never newer than a real installed one.
+    if latest_parts.is_empty() {
+        return false;
+    }
+
     latest_parts > installed_parts
 }
 
@@ -1026,6 +1042,20 @@ mod tests {
         assert!(!is_newer_version("2026.5.0-dev", "2026.5.0"));
         // A newer base version dev is still newer than an older stable
         assert!(is_newer_version("2026.5.0-dev", "2026.4.0"));
+    }
+
+    #[test]
+    fn test_unparseable_installed_version_is_not_offered_an_update() {
+        // Regression for #190: duplicate dist-info dirs make the version lookup
+        // return "None"/"", which must never be treated as infinitely old.
+        assert!(!is_newer_version("1.0.10", "None"));
+        assert!(!is_newer_version("1.0.10", ""));
+        assert!(!is_newer_version("2025.5.0", "None"));
+        // An unparseable "latest" is never newer than a real installed version.
+        assert!(!is_newer_version("None", "1.0.10"));
+        // Sanity: real comparisons still work.
+        assert!(is_newer_version("1.0.10", "1.0.9"));
+        assert!(!is_newer_version("1.0.10", "1.0.10"));
     }
 
     #[test]
