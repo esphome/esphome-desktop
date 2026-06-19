@@ -173,6 +173,19 @@ pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(resource_dir.join("git").join("cmd"))
 }
 
+/// Directory inside the bundled `git` resource that holds a GNU `patch.exe`.
+///
+/// MinGit ships no `patch`, but the esphome micro-opus ESP-IDF build needs one
+/// on `PATH` to patch the Opus source (issue #189). `prepare_bundle.sh` harvests
+/// `patch.exe` (and the MSYS DLLs it links) from PortableGit into `git/patch/`.
+/// We expose only this dir, not MinGit's full `usr/bin`, so the build doesn't
+/// pick up MSYS `sh`/`find`/`sort` that shadow Windows built-ins.
+#[cfg(target_os = "windows")]
+pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
+    Ok(resource_dir.join("git").join("patch"))
+}
+
 /// Build a `PATH` value with `dir` prepended to `existing`.
 ///
 /// Pure (no environment mutation) so the prepend ordering, separator
@@ -231,7 +244,19 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
         // Prepend the bundled git dir to PATH (see path_with_prepended for why
         // it goes through split/join).
         let existing = std::env::var_os("PATH").unwrap_or_default();
-        let new_path = path_with_prepended(&existing, &git_dir)?;
+        let mut new_path = path_with_prepended(&existing, &git_dir)?;
+
+        // Also expose the bundled GNU patch (issue #189) when present. Only this
+        // dedicated dir goes on PATH, not MinGit's full usr/bin, so the build
+        // doesn't pick up MSYS sh/find/sort that shadow Windows built-ins.
+        let patch_dir = get_bundled_patch_dir(app_handle)?;
+        if patch_dir.join("patch.exe").exists() {
+            new_path = path_with_prepended(&new_path, &patch_dir)?;
+            info!("Using bundled patch at {:?}", patch_dir);
+        } else {
+            warn!("Bundled patch.exe missing at {:?}; micro-opus and other components that need `patch` will fail to build", patch_dir);
+        }
+
         std::env::set_var("PATH", &new_path);
         info!("Using bundled MinGit at {:?}", git_exe);
     }
@@ -1128,6 +1153,24 @@ mod tests {
                 PathBuf::from("/bin"),
             ],
             "bundled git dir must come first so it shadows anything already on PATH"
+        );
+    }
+
+    #[test]
+    fn path_with_prepended_chains_two_bundled_dirs() {
+        // ensure_git_on_path prepends git/cmd then git/patch (#189). Both bundled
+        // dirs must end up ahead of the inherited PATH.
+        let existing = std::env::join_paths(["/usr/bin"]).unwrap();
+        let with_git = path_with_prepended(&existing, Path::new("/opt/git/cmd")).unwrap();
+        let with_patch = path_with_prepended(&with_git, Path::new("/opt/git/patch")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&with_patch).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/opt/git/patch"),
+                PathBuf::from("/opt/git/cmd"),
+                PathBuf::from("/usr/bin"),
+            ],
         );
     }
 

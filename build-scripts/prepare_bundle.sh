@@ -35,6 +35,16 @@ MINGIT_VERSION="2.54.0"
 MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
 MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
 
+# PortableGit is downloaded (Windows only) solely to harvest a GNU `patch.exe`:
+# MinGit doesn't ship one, but the esphome micro-opus component's ESP-IDF build
+# needs `patch` on PATH to patch the Opus source (issue #189). We extract only
+# patch.exe plus the MSYS runtime DLLs it links into a dedicated `git/patch/`
+# dir rather than bundling the ~300MB PortableGit tree. Pinned to the same
+# git-for-windows release as MinGit so patch.exe and msys-2.0.dll match, and
+# rewritten alongside MINGIT_* by the nightly `bump_bundle_versions.py` job.
+PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
+PORTABLEGIT_SHA256="bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
@@ -224,6 +234,81 @@ prepare_git_for_platform() {
         exit 1
     fi
     "$python_exe" -m zipfile -e "$temp_file" "$GIT_BUNDLE_DIR"
+
+    prepare_patch_for_windows
+}
+
+# Harvest a GNU `patch.exe` from PortableGit into a dedicated `git/patch/` dir
+# (issue #189). MinGit ships no patch, but the esphome micro-opus ESP-IDF build
+# needs `patch` on PATH. We extract only patch.exe and the MSYS DLLs it links —
+# co-located so Windows resolves them from the exe's own directory — instead of
+# shipping the ~300MB PortableGit tree or exposing all of MinGit's usr/bin
+# (whose sh/find/sort would shadow Windows built-ins in the build).
+prepare_patch_for_windows() {
+    local patch_dir="$GIT_BUNDLE_DIR/patch"
+    local temp_file="$BUILD_DIR/$(basename "$PORTABLEGIT_URL")"
+
+    # PortableGit is a 7-Zip self-extracting archive. 7z is preinstalled on the
+    # windows-latest CI runner; for a local Windows build, install 7-Zip and put
+    # `7z` on PATH. Fail with a clear message rather than a bare "command not
+    # found" from the extract step below.
+    if ! command -v 7z >/dev/null 2>&1; then
+        echo "ERROR: 7z (7-Zip) is required to extract patch.exe from PortableGit." >&2
+        echo "       Install 7-Zip and ensure '7z' is on PATH." >&2
+        exit 1
+    fi
+
+    echo ""
+    echo "=== Downloading PortableGit (for patch.exe) ==="
+    if [[ -f "$temp_file" ]]; then
+        echo "Using cached download: $temp_file"
+        verify_sha256 "$temp_file" "$PORTABLEGIT_SHA256"
+    else
+        curl -fL --retry 3 -o "${temp_file}.partial" "$PORTABLEGIT_URL"
+        verify_sha256 "${temp_file}.partial" "$PORTABLEGIT_SHA256"
+        mv -f "${temp_file}.partial" "$temp_file"
+    fi
+
+    echo ""
+    echo "=== Extracting patch.exe into ${patch_dir} ==="
+    # PortableGit is a 7-Zip self-extracting archive; `7z` is preinstalled on the
+    # windows-latest runner this path runs on. Pull only patch.exe and the MSYS
+    # runtime DLLs it depends on (msys-2.0.dll + gettext/iconv), flattened into
+    # patch_dir so they sit beside the exe.
+    mkdir -p "$patch_dir"
+    7z e "$temp_file" -o"$patch_dir" -y \
+        usr/bin/patch.exe \
+        usr/bin/msys-2.0.dll \
+        usr/bin/msys-intl-8.dll \
+        usr/bin/msys-iconv-2.dll
+
+    if [[ ! -f "$patch_dir/patch.exe" ]]; then
+        echo "ERROR: patch.exe not extracted from PortableGit" >&2
+        exit 1
+    fi
+
+    # We ship only the binaries (not PortableGit's license tree), so accompany
+    # them with the required attribution + corresponding-source pointer for these
+    # GPL/LGPL components.
+    cat > "$patch_dir/THIRD_PARTY_NOTICES.txt" <<EOF
+This directory contains unmodified binaries taken from Git for Windows
+(${PORTABLEGIT_URL}):
+
+  patch.exe         GNU patch          GPLv3
+  msys-2.0.dll      MSYS2 runtime      LGPLv3
+  msys-intl-8.dll   GNU gettext libintl  LGPLv2.1-or-later
+  msys-iconv-2.dll  GNU libiconv         LGPLv2.1-or-later
+
+They are redistributed under their respective licenses and are invoked as a
+separate process (GNU patch) by ESPHome's build. Corresponding source is
+available from the Git for Windows release above and its upstream projects.
+EOF
+
+    # Smoke-test: prove patch runs (and that no DLL dependency is missing). If a
+    # future MSYS patch needs more than the DLLs above, this fails the build here
+    # rather than shipping a patch.exe that won't launch on a user's machine.
+    echo "=== Verifying bundled patch.exe ==="
+    "$patch_dir/patch.exe" --version
 }
 
 # Rewrite pip-generated script shebangs so the bundle is relocatable.
