@@ -338,8 +338,9 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                         if interpreter_is_usable(&python_check) {
                             let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
                             let defers = read_refresh_defer_count(&defer_marker);
-                            if defers < MAX_REFRESH_DEFERS {
-                                bump_refresh_defer_count(&defer_marker, defers + 1);
+                            if defers < MAX_REFRESH_DEFERS
+                                && bump_refresh_defer_count(&defer_marker, defers + 1)
+                            {
                                 warn!(
                                     "Could not read existing Python package versions ({e:#}); \
                                      deferring the bundled-Python refresh to avoid downgrading a \
@@ -349,11 +350,15 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
                                 );
                                 return Ok(());
                             }
+                            // Either we hit the defer bound, or the counter is
+                            // unwritable so it can never advance to that bound.
+                            // Both mean "stop deferring and self-heal" — wiping
+                            // re-copies a clean bundle and resets the marker.
                             warn!(
-                                "Could not read existing Python package versions ({e:#}) after \
-                                 {MAX_REFRESH_DEFERS} consecutive defers; the package metadata \
-                                 appears persistently broken. Wiping and re-copying the bundled \
-                                 tree to recover."
+                                "Could not read existing Python package versions ({e:#}); the \
+                                 package metadata appears persistently broken (or the defer \
+                                 counter is unwritable). Wiping and re-copying the bundled tree \
+                                 to recover."
                             );
                             PreservedVersions::default()
                         } else {
@@ -452,12 +457,19 @@ fn read_refresh_defer_count(marker_path: &Path) -> u32 {
         .unwrap_or(0)
 }
 
-/// Persist the consecutive-defer counter. Best-effort: a write failure only
-/// risks one extra defer cycle, so log and carry on rather than fail startup.
+/// Persist the consecutive-defer counter. Returns `true` if the new count was
+/// durably written. A `false` (write failed) means the counter can't advance,
+/// so the caller must NOT defer again — otherwise a persistently unwritable
+/// marker would re-introduce the defer-forever shape this counter exists to
+/// bound, just triggered by a failed write instead of a failed read.
 #[cfg(not(target_os = "windows"))]
-fn bump_refresh_defer_count(marker_path: &Path, count: u32) {
-    if let Err(e) = crate::util::atomic_write(marker_path, count.to_string()) {
-        tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
+fn bump_refresh_defer_count(marker_path: &Path, count: u32) -> bool {
+    match crate::util::atomic_write(marker_path, count.to_string()) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
+            false
+        }
     }
 }
 
