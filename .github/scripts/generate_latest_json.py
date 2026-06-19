@@ -45,8 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 # (Tauri updater target, regex matching the .sig asset name)
+# fmt: off
 PLATFORM_SIG_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("windows-x86_64", re.compile(r".+-setup\.exe\.sig$")),
     ("linux-x86_64",   re.compile(r".+_amd64\.AppImage\.sig$")),
@@ -54,11 +54,13 @@ PLATFORM_SIG_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("darwin-aarch64", re.compile(r".+_aarch64\.app\.tar\.gz\.sig$")),
     ("darwin-x86_64",  re.compile(r".+_x64\.app\.tar\.gz\.sig$")),
 ]
+# fmt: on
 
 # (Tauri updater target, canonical installer kind, regex matching asset name)
 # The .app.tar.gz updater bundles are intentionally absent — they're only
 # useful to the Tauri updater (already covered by `platforms`); a human
 # downloading first-install on macOS wants the .dmg.
+# fmt: off
 DOWNLOAD_MATCHERS: list[tuple[str, str, re.Pattern[str]]] = [
     ("windows-x86_64", "nsis",     re.compile(r"-setup\.exe$")),
     ("linux-x86_64",   "appimage", re.compile(r"_amd64\.AppImage$")),
@@ -70,6 +72,7 @@ DOWNLOAD_MATCHERS: list[tuple[str, str, re.Pattern[str]]] = [
     ("darwin-aarch64", "dmg",      re.compile(r"_aarch64\.dmg$")),
     ("darwin-x86_64",  "dmg",      re.compile(r"_x64\.dmg$")),
 ]
+# fmt: on
 
 SCHEMA_URL = "https://desktop.esphome.io/latest.schema.json"
 
@@ -115,7 +118,7 @@ def build_platforms(
     artifacts_dir: Path,
     download_base: str,
 ) -> dict[str, dict[str, str]]:
-    """Build the Tauri updater `platforms` block from release assets + local .sig files."""
+    """Build the Tauri updater `platforms` block from assets + local .sig files."""
     # GitHub normalizes spaces to dots in release-asset names, but
     # actions/download-artifact preserves the original (spaced) filenames.
     # Match local sig files by regex so either naming works. Filter to
@@ -156,11 +159,13 @@ def build_downloads(
         name = asset["name"]
         for plat, kind, regex in DOWNLOAD_MATCHERS:
             if regex.search(name):
-                downloads.setdefault(plat, []).append({
-                    "kind": kind,
-                    "url": _asset_url(download_base, name),
-                    "size": asset["size"],
-                })
+                downloads.setdefault(plat, []).append(
+                    {
+                        "kind": kind,
+                        "url": _asset_url(download_base, name),
+                        "size": asset["size"],
+                    }
+                )
                 break
     # Stable ordering inside each platform so the manifest doesn't churn
     # between runs purely from asset-listing order.
@@ -214,14 +219,25 @@ def fetch_release(tag: str, repo: str) -> dict[str, Any]:
     """Call `gh` to fetch release info. Requires `gh` to be on PATH and authed."""
     return json.loads(
         subprocess.check_output(
-            ["gh", "release", "view", tag, "--repo", repo, "--json", "body,publishedAt,assets"],
+            [
+                "gh",
+                "release",
+                "view",
+                tag,
+                "--repo",
+                repo,
+                "--json",
+                "body,publishedAt,assets",
+            ],
             text=True,
         )
     )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--tag",
         default=os.environ.get("TAG"),
@@ -248,7 +264,7 @@ def main() -> int:
         "--release-fixture",
         type=Path,
         help="Load release JSON from a file instead of calling `gh`. "
-             "Useful for local testing without network or gh auth.",
+        "Useful for local testing without network or gh auth.",
     )
     args = parser.parse_args()
 

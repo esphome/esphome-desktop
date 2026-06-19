@@ -1,11 +1,12 @@
 name: Scripts Test
 
-# Unit tests for the Python release tooling under .github/scripts/. The
-# release manifest generator (generate_latest_json.py) drives in-app
-# self-updates and the download page; a bug there ships a broken latest.json
-# to every user. The main Build workflow only *runs* the generator during a
-# release — it never exercises it on the fixtures — so this job gates the
-# pure transform logic on every relevant PR.
+# Lint and unit tests for the repo's first-party Python: the release tooling
+# under .github/scripts/ and the runtime helpers under src-tauri/scripts/ that
+# the Rust binary embeds via include_str!. The release manifest generator drives
+# in-app self-updates, and device_builder_maintenance.py heals the bundled
+# install (#190); a bug in either ships to every user, and the main Build
+# workflow only *runs* them during a release, so this job gates the logic on
+# every relevant PR.
 
 on:
   pull_request:
@@ -13,7 +14,9 @@ on:
     paths:
       - ".github/scripts/**"
       - ".github/workflows/scripts-test.yml"
+      - "src-tauri/scripts/**"
       - "tests/**"
+      - "pyproject.toml"
   workflow_dispatch:
 
 concurrency:
@@ -23,8 +26,8 @@ concurrency:
 permissions: {}
 
 jobs:
-  scripts-test:
-    name: Python scripts test
+  lint:
+    name: Python lint (ruff)
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -32,19 +35,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Pin Python explicitly so the job actually backs the "3.11+ syntax"
-      # the tests use, instead of relying on whatever the runner ships.
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
-      # The suite is pytest (maintainer-requested test framework), so this
-      # job installs pytest — it is no longer pure stdlib. Pin to a major so a
-      # breaking/yanked pytest release can't fail this gate on unrelated PRs
+      # Pin ruff exactly: its lint rules and formatter output can change between
+      # releases, so an unpinned upgrade could fail this gate on an unrelated PR
       # (same reasoning the repo pins the Rust toolchain).
+      - name: Install ruff
+        run: python -m pip install 'ruff==0.15.13'
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+  test:
+    name: Python scripts test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The device-builder maintenance helper depends on importlib.metadata
+        # behavior and filesystem semantics that differ by OS (the #190 loop
+        # manifested on Windows), so exercise every platform we ship. We bundle
+        # CPython 3.13, so that is the only version worth testing.
+        os: [ubuntu-22.04, macos-15, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      # Pin to a major so a breaking/yanked pytest release can't fail this gate
+      # on unrelated PRs (same reasoning the repo pins the Rust toolchain).
       - name: Install pytest
-        run: python3 -m pip install 'pytest~=8.0'
+        run: python -m pip install 'pytest~=8.0'
 
       - name: Run script tests
-        run: python3 -m pytest tests/ -v
+        run: python -m pytest tests/ -v

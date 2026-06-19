@@ -1,0 +1,19 @@
+# Tooling config for the repo's first-party Python (release scripts under
+# .github/scripts, the runtime helpers under src-tauri/scripts, and their tests).
+# The bundled CPython and site-packages trees are vendored third-party code and
+# are excluded from linting.
+
+[tool.ruff]
+line-length = 88
+extend-exclude = [
+    "src-tauri/python",
+    "esphome-desktop",
+    "build",
+    "**/*.dist-info",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
