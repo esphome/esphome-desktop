@@ -250,7 +250,9 @@ impl DaemonManager {
             self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
             // Record the pid so a future relaunch (which loses this Child handle
             // across the exec) can wait for this backend to exit before spawning.
-            if let Err(e) = std::fs::write(&self.pid_file, pid.to_string()) {
+            // Atomic write so a crash mid-write can't leave an empty/partial pid
+            // file that a relaunch would misread.
+            if let Err(e) = crate::util::atomic_write(&self.pid_file, pid.to_string()) {
                 warn!(
                     "Failed to write backend pid file {:?}: {}",
                     self.pid_file, e
