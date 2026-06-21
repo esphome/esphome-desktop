@@ -1,6 +1,6 @@
 # ESPHome Device Builder
 
-A cross-platform desktop application that bundles ESPHome with Python and runs the dashboard as a background daemon with system tray integration.
+A cross-platform desktop application that bundles ESPHome with Python and runs the ESPHome Device Builder as a background daemon with system tray integration.
 
 ## Features
 
@@ -29,7 +29,7 @@ Download the latest release for your platform from [desktop.esphome.io](https://
 
 On first launch, ESPHome Device Builder will:
 1. Install ESPHome and its dependencies
-2. Start the dashboard
+2. Start the ESPHome Device Builder
 3. Open your browser to `http://localhost:6052`
 
 This initial setup may take a few minutes depending on your internet connection.
@@ -39,9 +39,9 @@ This initial setup may take a few minutes depending on your internet connection.
 ### Starting the App
 
 Simply launch ESPHome Device Builder. It will:
-- Start the ESPHome dashboard in the background
+- Start the ESPHome Device Builder in the background
 - Show a system tray icon
-- Open your browser to the dashboard
+- Open your browser to the Device Builder
 
 ### Tray Menu
 
