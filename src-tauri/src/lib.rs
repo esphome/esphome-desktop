@@ -49,9 +49,9 @@ pub struct Cli {
     #[arg(long = "no-open-dashboard")]
     pub no_open_dashboard: bool,
 
-    /// Switch to the ESPHome Device Builder backend instead of the classic
-    /// dashboard. Persists to settings — useful as a fallback when the tray
-    /// menu is unavailable.
+    /// Apply the `--builder-channel` selection (stable or beta) to the device
+    /// builder. Persists to settings — useful as a fallback when the tray menu
+    /// is unavailable.
     #[arg(long = "use-builder")]
     pub use_builder: bool,
 
@@ -231,9 +231,16 @@ pub fn run(cli: Cli) {
         .setup(move |app| {
             info!("Setting up ESPHome Device Builder");
 
+            // Users migrating off the removed classic dashboard backend should
+            // land on the fresh bundled device builder, not a stale pip-pinned
+            // copy. Detect the classic selection from the persisted settings
+            // before the bundled-Python refresh so the refresh can skip
+            // preserving an old `esphome-device-builder` version.
+            let force_device_builder = settings::persisted_backend_was_classic(app.handle());
+
             // Ensure user Python exists (copy from bundled on first run for non-Windows)
             // This must happen before AppState::new() so paths are correct
-            if let Err(e) = platform::ensure_user_python(app.handle()) {
+            if let Err(e) = platform::ensure_user_python(app.handle(), force_device_builder) {
                 error!("Failed to set up user Python: {}", e);
                 // Continue anyway - might work with bundled Python
             }
@@ -259,6 +266,16 @@ pub fn run(cli: Cli) {
             let state = Arc::new(AppState::new(app.handle())?);
             app.manage(state.clone());
 
+            // If we just migrated a classic-backend user, persist the migrated
+            // settings (loaded as the default device builder) so the legacy
+            // value is cleared from disk and a later app update won't re-force.
+            if force_device_builder {
+                let settings = async_runtime::block_on(state.settings.read());
+                if let Err(e) = settings.save(app.handle()) {
+                    warn!("Failed to persist backend migration: {}", e);
+                }
+            }
+
             // Apply CLI backend override (persists to settings).
             // This runs before the daemon starts so the new backend takes
             // effect immediately, and before the tray menu is built so the
@@ -274,10 +291,8 @@ pub fn run(cli: Cli) {
                     if let Err(e) = settings.save(app.handle()) {
                         warn!("Failed to save settings after CLI override: {}", e);
                     }
-                    state
-                        .daemon
-                        .set_use_device_builder(new_backend.is_builder());
-                    new_backend.is_builder()
+                    // Changing the channel needs a (re)install of the package.
+                    true
                 } else {
                     false
                 }
@@ -457,16 +472,14 @@ pub fn run(cli: Cli) {
                         .update_checker
                         .check_and_notify(&update_app, channel, update_tray_available)
                         .await;
-                    if backend.is_builder() {
-                        update_state
-                            .update_checker
-                            .check_and_notify_device_builder(
-                                &update_app,
-                                backend,
-                                update_tray_available,
-                            )
-                            .await;
-                    }
+                    update_state
+                        .update_checker
+                        .check_and_notify_device_builder(
+                            &update_app,
+                            backend,
+                            update_tray_available,
+                        )
+                        .await;
                 }
             });
 

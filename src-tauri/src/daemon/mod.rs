@@ -32,7 +32,10 @@ type PidInt = u32;
 #[cfg(unix)]
 type PidInt = i32;
 
-/// Manages the ESPHome dashboard process
+/// Human-readable name of the backend process, for log messages.
+const BACKEND_NAME: &str = "ESPHome device builder";
+
+/// Manages the ESPHome Device Builder process
 pub struct DaemonManager {
     /// The running process, if any
     process: Arc<Mutex<Option<Child>>>,
@@ -48,14 +51,12 @@ pub struct DaemonManager {
     port: u16,
     /// Whether the daemon is running
     running: Arc<AtomicBool>,
-    /// PID of the dashboard child, mirrored as an atomic so synchronous
+    /// PID of the device builder child, mirrored as an atomic so synchronous
     /// exit paths (e.g. macOS Dock-Quit, which fires `RunEvent::Exit`
     /// without going through `ExitRequested`) can SIGTERM the process
     /// group without locking the tokio mutex. Zero when no child is
     /// running.
     dashboard_pid: Arc<AtomicPid>,
-    /// Use `esphome-device-builder` instead of `esphome dashboard`
-    use_device_builder: Arc<AtomicBool>,
     /// AppHandle for emitting notifications / updating the tray when the
     /// child process exits independently of an explicit `stop()`. Also used
     /// to read the desktop app version (forwarded to the backend via
@@ -91,26 +92,11 @@ impl DaemonManager {
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
             dashboard_pid: Arc::new(AtomicPid::new(0)),
-            use_device_builder: Arc::new(AtomicBool::new(settings.backend.is_builder())),
             app_handle: app_handle.clone(),
         })
     }
 
-    /// Update the device-builder flag. Takes effect on the next daemon start.
-    pub fn set_use_device_builder(&self, value: bool) {
-        self.use_device_builder.store(value, Ordering::SeqCst);
-    }
-
-    /// Human-readable name of the current backend, for log messages.
-    fn backend_name(&self) -> &'static str {
-        if self.use_device_builder.load(Ordering::SeqCst) {
-            "ESPHome device builder"
-        } else {
-            "ESPHome dashboard"
-        }
-    }
-
-    /// Start the ESPHome dashboard
+    /// Start the ESPHome device builder
     pub async fn start(&self) -> Result<()> {
         // Hold the process lock for the entire start sequence (check ->
         // spawn -> store) so two concurrent start() calls can't both pass
@@ -133,8 +119,7 @@ impl DaemonManager {
             return Ok(());
         }
 
-        let use_device_builder = self.use_device_builder.load(Ordering::SeqCst);
-        let backend_name = self.backend_name();
+        let backend_name = BACKEND_NAME;
         info!("Starting {} on port {}", backend_name, self.port);
         debug!("Python path: {:?}", self.python_path);
         debug!("Python bin: {:?}", self.python_bin_dir);
@@ -160,28 +145,15 @@ impl DaemonManager {
 
         // Build the command
         let mut cmd = Command::new(&self.python_path);
-        if use_device_builder {
-            cmd.args([
-                "-m",
-                "esphome_device_builder",
-                config_arg,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &port_arg,
-            ]);
-        } else {
-            cmd.args([
-                "-m",
-                "esphome",
-                "dashboard",
-                config_arg,
-                "--address",
-                "127.0.0.1",
-                "--port",
-                &port_arg,
-            ]);
-        }
+        cmd.args([
+            "-m",
+            "esphome_device_builder",
+            config_arg,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port_arg,
+        ]);
         cmd
             // Set working directory to config dir (required for PlatformIO)
             .current_dir(&self.config_dir)
@@ -234,8 +206,7 @@ impl DaemonManager {
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
         // Surface the desktop app version to the backend so it can be shown
-        // in the frontend (e.g. an "About" page). Set unconditionally — both
-        // backends get it; classic dashboard can ignore it.
+        // in the frontend (e.g. an "About" page).
         cmd.env(
             "ESPHOME_DESKTOP_VERSION",
             self.app_handle.package_info().version.to_string(),
@@ -397,7 +368,7 @@ impl DaemonManager {
             return Ok(());
         }
 
-        let backend_name = self.backend_name();
+        let backend_name = BACKEND_NAME;
         info!("Stopping {}", backend_name);
 
         self.running.store(false, Ordering::SeqCst);
