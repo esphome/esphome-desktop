@@ -385,7 +385,7 @@ impl UpdateChecker {
         // resolved (PyPI unreachable), fall back to unpinned rather than fail.
         let pinned_version = if backend == Backend::BuilderStable {
             match self.check_device_builder(backend).await {
-                Ok(v) => v,
+                Ok(v) => Some(v),
                 Err(e) => {
                     warn!(
                         "Could not resolve latest stable device-builder version, \
