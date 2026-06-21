@@ -5,6 +5,7 @@
 
 mod app_update;
 mod daemon;
+mod dialog;
 mod git_check;
 mod platform;
 mod settings;
