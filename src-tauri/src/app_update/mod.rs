@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -157,8 +157,11 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
 
     let mut downloaded: u64 = 0;
     let mut last_logged = std::time::Instant::now();
-    let result = update
-        .download_and_install(
+    // Download first, with the backend still running. A failed download must
+    // not disrupt the running dashboard, so we only stop it once we have the
+    // bytes in hand and are about to write files.
+    let bytes = match update
+        .download(
             move |chunk, total| {
                 downloaded = downloaded.saturating_add(chunk as u64);
                 // Throttle progress logs to once per second.
@@ -171,12 +174,37 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                     last_logged = std::time::Instant::now();
                 }
             },
-            || info!("Desktop update download complete; installing…"),
+            || info!("Desktop update download complete"),
         )
-        .await;
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            error!("Desktop update download failed: {}", e);
+            show_error(app_handle, format!("Failed to download update: {}", e)).await;
+            return;
+        }
+    };
 
-    match result {
-        Ok(()) => {
+    // Stop the backend before installing: the install overwrites the bundled
+    // `python/` directory, and on Windows the live `python.exe` keeps those
+    // files open (WinError 5) and holds port 6052, so the write fails and the
+    // next launch can't bind. Reuses the same graceful `DaemonManager::stop()`
+    // the ESPHome package-update path uses; best-effort, so proceed on error.
+    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
+        info!("Stopping ESPHome backend before installing desktop update");
+        if let Err(e) = state.daemon.stop().await {
+            warn!("Error stopping backend before update: {}", e);
+        }
+    } else {
+        warn!("App state unavailable; installing update without stopping backend");
+    }
+
+    // `install` is synchronous and writes files, so run it off the async
+    // executor like the dialogs above.
+    info!("Installing desktop update…");
+    match tokio::task::spawn_blocking(move || update.install(bytes)).await {
+        Ok(Ok(())) => {
             info!("Desktop update {} installed", new_version);
             let msg = format!(
                 "ESPHome Device Builder {} has been installed.\n\nRestart now to use the new version?",
@@ -191,8 +219,12 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                 app_handle.restart();
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!("Desktop update install failed: {}", e);
+            show_error(app_handle, format!("Failed to install update: {}", e)).await;
+        }
+        Err(e) => {
+            error!("Desktop update install task failed: {}", e);
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
         }
     }
