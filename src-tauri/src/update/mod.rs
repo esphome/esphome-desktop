@@ -369,16 +369,12 @@ impl UpdateChecker {
 
     /// Install or upgrade the `esphome-device-builder` package from PyPI.
     /// Pass `Backend::BuilderBeta` to allow pre-releases (`pip install --pre`),
-    /// `Backend::BuilderStable` for stable-only. Calling with `Backend::Classic`
-    /// is a no-op.
+    /// `Backend::BuilderStable` for stable-only.
     pub async fn install_device_builder(
         &self,
         app_handle: &AppHandle,
         backend: Backend,
     ) -> Result<()> {
-        if !backend.is_builder() {
-            return Ok(());
-        }
         let python_path = platform::get_python_path(app_handle)?;
 
         info!("Installing/upgrading esphome-device-builder ({})", backend);
@@ -411,12 +407,8 @@ impl UpdateChecker {
 
     /// Query PyPI for the latest available `esphome-device-builder` version.
     /// `Backend::BuilderStable` returns the latest final release; `BuilderBeta`
-    /// returns the latest version including pre-releases. Returns `Ok(None)`
-    /// if the backend is not a builder variant.
-    pub async fn check_device_builder(&self, backend: Backend) -> Result<Option<String>> {
-        if !backend.is_builder() {
-            return Ok(None);
-        }
+    /// returns the latest version including pre-releases.
+    pub async fn check_device_builder(&self, backend: Backend) -> Result<String> {
         let response: PyPIResponse = self
             .client
             .get("https://pypi.org/pypi/esphome-device-builder/json")
@@ -437,22 +429,17 @@ impl UpdateChecker {
             "Latest esphome-device-builder version on PyPI ({}): {}",
             backend, latest
         );
-        Ok(Some(latest))
+        Ok(latest)
     }
 
     /// Background check for esphome-device-builder updates. Emits a
-    /// notification if a newer version is available. No-op for non-builder
-    /// backends.
+    /// notification if a newer version is available.
     pub async fn check_and_notify_device_builder(
         &self,
         app_handle: &AppHandle,
         backend: Backend,
         tray_available: bool,
     ) {
-        if !backend.is_builder() {
-            return;
-        }
-
         let installed = match detect_device_builder_version_with_heal(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
@@ -466,8 +453,7 @@ impl UpdateChecker {
         };
 
         let latest = match self.check_device_builder(backend).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return,
+            Ok(v) => v,
             Err(e) => {
                 warn!("Device-builder update check failed: {}", e);
                 return;
@@ -508,10 +494,6 @@ impl UpdateChecker {
         app_handle: &AppHandle,
         backend: Backend,
     ) -> Option<String> {
-        if !backend.is_builder() {
-            return None;
-        }
-
         let installed = match detect_device_builder_version_with_heal(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
@@ -528,8 +510,7 @@ impl UpdateChecker {
         };
 
         let latest = match self.check_device_builder(backend).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return None,
+            Ok(v) => v,
             Err(e) => {
                 warn!("Device-builder update check failed: {}", e);
                 return None;

@@ -50,7 +50,7 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Open Dashboard** - Open the dashboard in your browser
 - **Status** - Shows if the daemon is running
 - **Port** - Shows the configured port
-- **Backend** - Choose the classic ESPHome dashboard or the ESPHome Device Builder backend
+- **Backend** - Choose the ESPHome Device Builder channel (stable or beta)
 - **Release Channel** - Choose the update channel (Stable, Beta, Dev)
 - **Startup** - Choose whether the app launches automatically at login (on by default; see [Running as a remote builder](#running-as-a-remote-builder))
 - **Check for Updates** - Check for a new ESPHome Device Builder desktop release, then new ESPHome (Python) and device-builder versions

@@ -38,12 +38,12 @@ impl fmt::Display for ReleaseChannel {
     }
 }
 
-/// Which backend the daemon should run.
+/// Which device-builder channel the daemon should run. The classic ESPHome
+/// dashboard backend was removed in line with ESPHome 2026.6.0 retiring the
+/// legacy in-tree dashboard; the daemon now always launches the device builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
-    /// Classic ESPHome dashboard (`esphome dashboard`)
-    Classic,
     /// ESPHome device builder, stable release from PyPI
     BuilderStable,
     /// ESPHome device builder, beta/pre-release from PyPI
@@ -54,18 +54,47 @@ pub enum Backend {
 impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Classic => write!(f, "Classic ESPHome Dashboard"),
             Self::BuilderStable => write!(f, "ESPHome Device Builder (stable)"),
             Self::BuilderBeta => write!(f, "ESPHome Device Builder (beta)"),
         }
     }
 }
 
-impl Backend {
-    /// True for any of the device-builder variants.
-    pub fn is_builder(self) -> bool {
-        matches!(self, Self::BuilderStable | Self::BuilderBeta)
-    }
+/// Deserialize the backend, tolerating legacy or unknown values by falling back
+/// to the default. An old settings file selecting the removed classic dashboard
+/// (`"backend": "classic"`) must migrate to the default device builder rather
+/// than failing the whole parse, which would discard every other preference via
+/// the corrupt-file recovery path.
+fn deserialize_backend<'de, D>(deserializer: D) -> Result<Backend, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        "builder_stable" => Backend::BuilderStable,
+        "builder_beta" => Backend::BuilderBeta,
+        _ => Backend::default(),
+    })
+}
+
+/// Returns true if the persisted settings file selects the removed classic
+/// dashboard backend. Used at startup to force a fresh bundled device builder
+/// for users migrating off classic. Tolerant of a missing or unreadable file.
+pub fn persisted_backend_was_classic(app_handle: &AppHandle) -> bool {
+    let Ok(path) = Settings::settings_path(app_handle) else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|v| {
+            v.get("backend")
+                .and_then(|b| b.as_str())
+                .map(|b| b == "classic")
+        })
+        .unwrap_or(false)
 }
 
 /// Application settings
@@ -97,8 +126,8 @@ pub struct Settings {
     #[serde(default)]
     pub release_channel: ReleaseChannel,
 
-    /// Active backend (classic dashboard or device builder variant)
-    #[serde(default)]
+    /// Active device-builder channel (stable or beta)
+    #[serde(default, deserialize_with = "deserialize_backend")]
     pub backend: Backend,
 
     /// Installed ESPHome version (detected from venv)
@@ -323,7 +352,7 @@ mod tests {
             port: 1234,
             open_on_start: false,
             release_channel: ReleaseChannel::Beta,
-            backend: Backend::Classic,
+            backend: Backend::BuilderStable,
             ..Default::default()
         };
         let content = serde_json::to_string_pretty(&original).expect("serialize");
@@ -334,8 +363,27 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert!(!loaded.open_on_start);
         assert_eq!(loaded.release_channel, ReleaseChannel::Beta);
-        assert_eq!(loaded.backend, Backend::Classic);
+        assert_eq!(loaded.backend, Backend::BuilderStable);
         // A successful parse must not move the file aside.
+        assert!(path.exists());
+        assert!(!path.with_extension("json.corrupt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_classic_backend_migrates_to_default() {
+        // An old settings file selecting the removed classic dashboard backend
+        // must migrate to the default device builder, keep its other fields, and
+        // NOT be treated as corrupt (which would discard every other preference).
+        let dir = unique_temp_dir("classic");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"port":1234,"backend":"classic"}"#).expect("write settings");
+
+        let settings = load_settings_file(&path);
+
+        assert_eq!(settings.backend, Backend::default());
+        assert_eq!(settings.port, 1234);
         assert!(path.exists());
         assert!(!path.with_extension("json.corrupt").exists());
 

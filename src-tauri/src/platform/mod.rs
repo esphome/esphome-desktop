@@ -293,9 +293,10 @@ const MAX_REFRESH_DEFERS: u32 = 3;
 /// current desktop-app version, the directory is wiped and re-copied so that
 /// updated app releases ship a fresh Python tree (e.g. new ESPHome version,
 /// changed dependencies). Without this, the first-run copy persisted forever.
-pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
+pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
+        let _ = force_device_builder;
         let resource_dir = get_bundled_resource_dir(app_handle)?;
         let bundled_python = resource_dir.join("python").join("python.exe");
 
@@ -335,13 +336,18 @@ pub fn ensure_user_python(app_handle: &AppHandle) -> Result<()> {
             // Without this, a user who pip-bumped ESPHome past the bundled
             // version would silently get downgraded by every app self-update.
             //
+            // When `force_device_builder` is set (a user migrating off the
+            // removed classic dashboard), `esphome-device-builder` is left out
+            // of the snapshot so the freshly bundled copy always wins and the
+            // user lands on the current device builder.
+            //
             // If the probe FAILS (as opposed to the package being absent), we
             // cannot tell whether the user pinned a newer version, so wiping
             // the tree now would silently discard it — exactly the downgrade
             // this snapshot exists to prevent. In that case defer the refresh:
             // keep the working tree, log a warning, and retry next launch.
             let preserved = if python_check.exists() {
-                match snapshot_preserved_versions(&python_check) {
+                match snapshot_preserved_versions(&python_check, force_device_builder) {
                     Ok(p) => p,
                     Err(e) => {
                         // A probe error means we can't trust a snapshot — but
@@ -449,11 +455,23 @@ struct PreservedVersions {
 /// [`read_package_version`] means the package is genuinely absent, which is a
 /// successful snapshot). The caller must not wipe a tree it could not read, or
 /// it would silently downgrade a version the user deliberately pinned.
+///
+/// With `force_device_builder`, `esphome-device-builder` is excluded from the
+/// snapshot so the freshly bundled copy is kept as-is on restore (and a probe
+/// failure for it can't trigger a refresh defer either). Used to move a user
+/// off the removed classic dashboard onto the current device builder.
 #[cfg(not(target_os = "windows"))]
-fn snapshot_preserved_versions(python_bin: &Path) -> Result<PreservedVersions> {
+fn snapshot_preserved_versions(
+    python_bin: &Path,
+    force_device_builder: bool,
+) -> Result<PreservedVersions> {
     Ok(PreservedVersions {
         esphome: read_package_version(python_bin, "esphome")?,
-        esphome_device_builder: read_package_version(python_bin, "esphome-device-builder")?,
+        esphome_device_builder: if force_device_builder {
+            None
+        } else {
+            read_package_version(python_bin, "esphome-device-builder")?
+        },
     })
 }
 
