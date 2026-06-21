@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -36,11 +36,11 @@ type PidInt = i32;
 /// Human-readable name of the backend process, for log messages.
 const BACKEND_NAME: &str = "ESPHome device builder";
 
-/// How long `start()` waits for the previous backend to release the dashboard
-/// port before spawning anyway. Covers the documented worst-case SIGTERM drain
-/// of the Python backend (20-60s); a graceful relaunch frees the port at once
-/// and never waits.
-const PORT_FREE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `start()` waits for a previous backend process to exit before
+/// spawning anyway. Covers the documented worst-case SIGTERM drain of the
+/// Python backend (20-60s); a graceful relaunch finds the old process already
+/// gone and never waits.
+const PREVIOUS_BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Manages the ESPHome Device Builder process
 pub struct DaemonManager {
@@ -54,6 +54,10 @@ pub struct DaemonManager {
     config_dir: PathBuf,
     /// Path to logs directory
     logs_dir: PathBuf,
+    /// File holding the spawned backend's PID. A relaunched process (e.g. after
+    /// an app update) no longer holds the old `Child` handle, so it reads this
+    /// to wait for the previous backend to exit before binding the mDNS socket.
+    pid_file: PathBuf,
     /// Dashboard port
     port: u16,
     /// Whether the daemon is running
@@ -89,6 +93,7 @@ impl DaemonManager {
         // Create logs directory in app data
         let logs_dir = data_dir.join("logs");
         std::fs::create_dir_all(&logs_dir).context("Failed to create logs directory")?;
+        let pid_file = logs_dir.join("device-builder.pid");
 
         Ok(Self {
             process: Arc::new(Mutex::new(None)),
@@ -96,6 +101,7 @@ impl DaemonManager {
             python_bin_dir,
             config_dir,
             logs_dir,
+            pid_file,
             port: settings.port,
             running: Arc::new(AtomicBool::new(false)),
             dashboard_pid: Arc::new(AtomicPid::new(0)),
@@ -105,6 +111,16 @@ impl DaemonManager {
 
     /// Start the ESPHome device builder
     pub async fn start(&self) -> Result<()> {
+        // Wait for a previous backend to exit before spawning. On an app-update
+        // relaunch our stop() can return while the old backend is still draining
+        // its SIGTERM (its handler outlives the 30s stop wait), and that orphan
+        // keeps holding UDP 5353; a new backend would then co-bind 5353 via
+        // SO_REUSEPORT and split the mDNS replies, so devices show offline until
+        // it dies. The old `Child` handle is gone across the relaunch exec, so we
+        // wait on its pid from the pid file. Done BEFORE taking the process lock
+        // so a Stop / Restart can still be serviced while we wait.
+        Self::wait_for_previous_backend_exit(&self.pid_file, PREVIOUS_BACKEND_EXIT_TIMEOUT).await;
+
         // Hold the process lock for the entire start sequence (check ->
         // spawn -> store) so two concurrent start() calls can't both pass
         // the running check and each spawn a child. Without this, the
@@ -137,15 +153,6 @@ impl DaemonManager {
         if !self.python_path.exists() {
             anyhow::bail!("Python not found at {:?}", self.python_path);
         }
-
-        // Wait for a previous backend to release the dashboard port before
-        // spawning. On an app-update relaunch stop() can return while the old
-        // backend is still draining its SIGTERM (handler outlives the 30s stop
-        // wait); spawning now would co-bind UDP 5353 with the dying process via
-        // SO_REUSEPORT and split the mDNS replies, so devices show offline until
-        // it finally dies. A free TCP port is a reliable proxy for "old backend
-        // gone, 5353 released".
-        Self::wait_for_port_free(self.port, PORT_FREE_TIMEOUT).await;
 
         // Open log file for stdout and stderr combined
         let log_path = self.logs_dir.join("dashboard.log");
@@ -241,6 +248,14 @@ impl DaemonManager {
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
         if let Some(pid) = child.id() {
             self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
+            // Record the pid so a future relaunch (which loses this Child handle
+            // across the exec) can wait for this backend to exit before spawning.
+            if let Err(e) = std::fs::write(&self.pid_file, pid.to_string()) {
+                warn!(
+                    "Failed to write backend pid file {:?}: {}",
+                    self.pid_file, e
+                );
+            }
         }
 
         *process = Some(child);
@@ -300,6 +315,7 @@ impl DaemonManager {
         let app_handle = self.app_handle.clone();
         let log_path_for_watcher = log_path.clone();
         let backend_label = backend_name.to_string();
+        let pid_file = self.pid_file.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -343,6 +359,9 @@ impl DaemonManager {
                 drop(guard);
                 running.store(false, Ordering::SeqCst);
                 dashboard_pid.store(0, Ordering::SeqCst);
+                // The child is reaped; clear its pid file so a later start()
+                // doesn't wait on a dead (or recycled) pid.
+                DaemonManager::remove_pid_file(&pid_file);
 
                 crate::tray::update_status(&app_handle, false);
                 if let Err(e) = app_handle
@@ -366,48 +385,96 @@ impl DaemonManager {
         Ok(())
     }
 
-    /// Block until TCP `127.0.0.1:port` is bindable, or `max_wait` elapses.
+    /// Wait for a previous backend process to exit before spawning a new one.
     ///
-    /// A plain bind (no SO_REUSEPORT) fails with `AddrInUse` while the previous
-    /// backend still holds the dashboard port, so this gates the new spawn on
-    /// the old one having actually exited; best effort, never blocks forever.
-    async fn wait_for_port_free(port: u16, max_wait: Duration) {
+    /// Polls the pid recorded at the last spawn until that process is gone, or
+    /// `max_wait` elapses. We wait on the pid (not a port) because the backend
+    /// releases its TCP port before its mDNS socket during shutdown, so a free
+    /// port does not imply the old mDNS responder is gone. Best effort: a stuck
+    /// backend past the deadline is logged and we spawn anyway (better a briefly
+    /// degraded mDNS than no dashboard). No pid file, or an already-gone pid,
+    /// returns at once.
+    async fn wait_for_previous_backend_exit(pid_file: &Path, max_wait: Duration) {
+        let Some(pid) = Self::read_pid_file(pid_file) else {
+            return;
+        };
         let deadline = Instant::now() + max_wait;
         let mut warned = false;
         loop {
-            match std::net::TcpListener::bind(("127.0.0.1", port)) {
-                Ok(listener) => {
-                    drop(listener);
-                    return;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                    if !warned {
-                        warn!(
-                            "Port {} still held by the previous backend; \
-                             waiting up to {:?} for it to exit before spawning",
-                            port, max_wait
-                        );
-                        warned = true;
-                    }
-                    if Instant::now() >= deadline {
-                        warn!(
-                            "Port {} still in use after {:?}; spawning anyway",
-                            port, max_wait
-                        );
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                }
-                Err(e) => {
-                    // Not the bind race we guard against (e.g. permissions);
-                    // let the spawn proceed and surface the real failure.
-                    debug!(
-                        "Port {} probe bind failed ({}); proceeding to spawn",
-                        port, e
-                    );
-                    return;
-                }
+            if !Self::previous_backend_alive(pid) {
+                return;
             }
+            if !warned {
+                warn!(
+                    "Previous backend (pid {}) still draining; waiting up to {:?} \
+                     for it to exit before spawning",
+                    pid, max_wait
+                );
+                warned = true;
+            }
+            if Instant::now() >= deadline {
+                warn!(
+                    "Previous backend (pid {}) still alive after {:?}; spawning anyway",
+                    pid, max_wait
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Read the recorded backend pid, or `None` if absent / unparseable / zero.
+    fn read_pid_file(pid_file: &Path) -> Option<PidInt> {
+        let pid: PidInt = std::fs::read_to_string(pid_file)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        (pid != 0).then_some(pid)
+    }
+
+    /// Remove the pid file; a missing file is not an error.
+    fn remove_pid_file(pid_file: &Path) {
+        if let Err(e) = std::fs::remove_file(pid_file) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to remove backend pid file {:?}: {}", pid_file, e);
+            }
+        }
+    }
+
+    /// Whether the recorded pid is still our live backend.
+    ///
+    /// Unix: the backend is spawned `process_group(0)`, so a live one is its own
+    /// process-group leader; a recycled pid almost certainly is not, so
+    /// `getpgid(pid) != pid` reads as "gone" and we never wait on a stranger
+    /// (the same guard `terminate_blocking` uses).
+    #[cfg(unix)]
+    fn previous_backend_alive(pid: PidInt) -> bool {
+        use nix::unistd::{getpgid, Pid};
+        let pid_t = Pid::from_raw(pid);
+        matches!(getpgid(Some(pid_t)), Ok(pgid) if pgid == pid_t)
+    }
+
+    /// Whether the recorded pid is still alive.
+    ///
+    /// Windows: a still-running process reports exit code `STILL_ACTIVE` (259);
+    /// a pid that can't be opened is treated as gone.
+    #[cfg(windows)]
+    fn previous_backend_alive(pid: PidInt) -> bool {
+        use ::windows::Win32::Foundation::CloseHandle;
+        use ::windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: FFI into Win32; the handle never escapes and is closed before
+        // return.
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let mut code: u32 = 0;
+            let alive = GetExitCodeProcess(handle, &mut code).is_ok() && code == 259;
+            let _ = CloseHandle(handle);
+            alive
         }
     }
 
@@ -467,7 +534,13 @@ impl DaemonManager {
             let timeout = tokio::time::timeout(tokio::time::Duration::from_secs(30), child.wait());
 
             match timeout.await {
-                Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
+                Ok(Ok(status)) => {
+                    info!("{} exited with status: {}", backend_name, status);
+                    // Confirmed gone; clear the pid file so the next start()
+                    // doesn't wait on it. On timeout we deliberately leave it so
+                    // a relaunch waits for the still-draining orphan.
+                    Self::remove_pid_file(&self.pid_file);
+                }
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
                 Err(_) => {
                     // On Unix we do NOT escalate to SIGKILL — force-killing
@@ -660,7 +733,8 @@ async fn health_check(port: u16) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::health_check_url;
+    use super::{health_check_url, DaemonManager, PidInt};
+    use std::path::PathBuf;
 
     #[test]
     fn health_check_url_targets_ipv4_loopback() {
@@ -669,5 +743,51 @@ mod tests {
         // on IPv6-first hosts where the daemon isn't listening.
         assert_eq!(health_check_url(6052), "http://127.0.0.1:6052/");
         assert!(!health_check_url(6052).contains("localhost"));
+    }
+
+    fn unique_pid_file(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("esphome_pidfile_{}_{tag}", std::process::id()))
+    }
+
+    #[test]
+    fn read_pid_file_absent_is_none() {
+        let path = unique_pid_file("absent");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(DaemonManager::read_pid_file(&path), None);
+    }
+
+    #[test]
+    fn read_pid_file_parses_trimmed_pid() {
+        let path = unique_pid_file("valid");
+        std::fs::write(&path, "12345\n").unwrap();
+        assert_eq!(DaemonManager::read_pid_file(&path), Some(12345 as PidInt));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_pid_file_rejects_zero_and_garbage() {
+        let path = unique_pid_file("bad");
+        std::fs::write(&path, "0").unwrap();
+        assert_eq!(DaemonManager::read_pid_file(&path), None);
+        std::fs::write(&path, "not-a-pid").unwrap();
+        assert_eq!(DaemonManager::read_pid_file(&path), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn previous_backend_alive_false_for_dead_pid() {
+        // No process owns PidInt::MAX, so it must read as gone (not alive)
+        // and never make start() wait on a stranger.
+        assert!(!DaemonManager::previous_backend_alive(PidInt::MAX));
+    }
+
+    #[test]
+    fn remove_pid_file_is_idempotent() {
+        let path = unique_pid_file("remove");
+        std::fs::write(&path, "999").unwrap();
+        DaemonManager::remove_pid_file(&path);
+        assert!(!path.exists());
+        // Second removal of an already-missing file must not panic or warn-fail.
+        DaemonManager::remove_pid_file(&path);
     }
 }
