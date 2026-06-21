@@ -58,9 +58,14 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             let notes = update.body.clone().unwrap_or_default();
 
             let msg = format_update_prompt(&current_version, &new_version, &notes);
-            let confirmed =
-                crate::dialog::confirm(app_handle, "Desktop Update Available", msg, "Update Now", "Later")
-                    .await;
+            let confirmed = crate::dialog::confirm(
+                app_handle,
+                "Desktop Update Available",
+                msg,
+                "Update Now",
+                "Later",
+            )
+            .await;
 
             if !confirmed {
                 // User saw the dialog and declined — fall through to ESPHome check.
