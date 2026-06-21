@@ -474,7 +474,11 @@ pub fn run(cli: Cli) {
                         .await;
                     update_state
                         .update_checker
-                        .check_and_notify_device_builder(&update_app, backend, update_tray_available)
+                        .check_and_notify_device_builder(
+                            &update_app,
+                            backend,
+                            update_tray_available,
+                        )
                         .await;
                 }
             });
