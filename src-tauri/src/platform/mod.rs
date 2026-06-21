@@ -366,7 +366,13 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                         // MAX_REFRESH_DEFERS consecutive defers we proceed with
                         // the wipe to re-copy a clean bundle. The counter lives
                         // inside the tree, so it resets the moment we wipe.
-                        if interpreter_is_usable(&python_check) {
+                        //
+                        // Never defer while forcing the device builder (classic
+                        // migration): the daemon now always launches
+                        // `esphome_device_builder`, and an old classic tree may
+                        // not have it, so we must refresh to the bundle that
+                        // does rather than keep the old tree another launch.
+                        if !force_device_builder && interpreter_is_usable(&python_check) {
                             let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
                             let defers = read_refresh_defer_count(&defer_marker);
                             if defers < MAX_REFRESH_DEFERS
@@ -390,6 +396,12 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                                  package metadata appears persistently broken (or the defer \
                                  counter is unwritable). Wiping and re-copying the bundled tree \
                                  to recover."
+                            );
+                            PreservedVersions::default()
+                        } else if force_device_builder {
+                            warn!(
+                                "Could not read existing Python package versions ({e:#}) while \
+                                 migrating off the classic backend; refreshing to the bundled tree."
                             );
                             PreservedVersions::default()
                         } else {

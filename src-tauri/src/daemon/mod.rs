@@ -35,7 +35,7 @@ type PidInt = i32;
 /// Human-readable name of the backend process, for log messages.
 const BACKEND_NAME: &str = "ESPHome device builder";
 
-/// Manages the ESPHome dashboard process
+/// Manages the ESPHome Device Builder process
 pub struct DaemonManager {
     /// The running process, if any
     process: Arc<Mutex<Option<Child>>>,

@@ -69,10 +69,13 @@ fn deserialize_backend<'de, D>(deserializer: D) -> Result<Backend, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
+    // Deserialize into a generic value so a non-string `backend` (null, number,
+    // bool from a hand-edited or future file) falls back to the default too,
+    // rather than failing the whole parse and discarding every other preference.
+    let raw = serde_json::Value::deserialize(deserializer)?;
     Ok(match raw.as_str() {
-        "builder_stable" => Backend::BuilderStable,
-        "builder_beta" => Backend::BuilderBeta,
+        Some("builder_stable") => Backend::BuilderStable,
+        Some("builder_beta") => Backend::BuilderBeta,
         _ => Backend::default(),
     })
 }
@@ -374,15 +377,35 @@ mod tests {
     #[test]
     fn legacy_classic_backend_migrates_to_default() {
         // An old settings file selecting the removed classic dashboard backend
-        // must migrate to the default device builder, keep its other fields, and
-        // NOT be treated as corrupt (which would discard every other preference).
+        // must migrate to the default device builder (beta), keep its other
+        // fields, and NOT be treated as corrupt (which would discard every
+        // other preference).
         let dir = unique_temp_dir("classic");
         let path = dir.join("settings.json");
         fs::write(&path, r#"{"port":1234,"backend":"classic"}"#).expect("write settings");
 
         let settings = load_settings_file(&path);
 
-        assert_eq!(settings.backend, Backend::default());
+        assert_eq!(settings.backend, Backend::BuilderBeta);
+        assert_eq!(settings.port, 1234);
+        assert!(path.exists());
+        assert!(!path.with_extension("json.corrupt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_string_backend_value_falls_back_to_default() {
+        // A malformed (non-string) backend value must fall back to the default
+        // instead of failing the whole parse, which would discard every other
+        // preference via corrupt-file recovery.
+        let dir = unique_temp_dir("bad_backend");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"port":1234,"backend":null}"#).expect("write settings");
+
+        let settings = load_settings_file(&path);
+
+        assert_eq!(settings.backend, Backend::BuilderBeta);
         assert_eq!(settings.port, 1234);
         assert!(path.exists());
         assert!(!path.with_extension("json.corrupt").exists());
