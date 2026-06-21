@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
@@ -157,8 +157,11 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
 
     let mut downloaded: u64 = 0;
     let mut last_logged = std::time::Instant::now();
-    let result = update
-        .download_and_install(
+    // Download first, with the backend still running. A failed download must
+    // not disrupt the running dashboard, so we only stop it once we have the
+    // bytes in hand and are about to write files.
+    let bytes = match update
+        .download(
             move |chunk, total| {
                 downloaded = downloaded.saturating_add(chunk as u64);
                 // Throttle progress logs to once per second.
@@ -171,10 +174,44 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                     last_logged = std::time::Instant::now();
                 }
             },
-            || info!("Desktop update download complete; installing…"),
+            || info!("Desktop update download complete"),
         )
-        .await;
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            error!("Desktop update download failed: {}", e);
+            show_error(app_handle, format!("Failed to download update: {}", e)).await;
+            return;
+        }
+    };
 
+    // Stop the backend before installing: the install overwrites the bundled
+    // `python/` directory, and on Windows the live `python.exe` keeps those
+    // files open (WinError 5) and holds port 6052, so the write fails and the
+    // next launch can't bind. Reuses the same graceful `DaemonManager::stop()`
+    // the ESPHome package-update path uses; best-effort, so proceed on error.
+    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
+        info!("Stopping ESPHome backend before installing desktop update");
+        // Reflect the stop in the tray immediately; `stop()` only flips the
+        // daemon's internal flag, so the tray would otherwise stay on
+        // "Running" (matches the package-update path in `tray`).
+        crate::tray::update_status(app_handle, false);
+        if let Err(e) = state.daemon.stop().await {
+            warn!("Error stopping backend before update: {}", e);
+        }
+    } else {
+        warn!("App state unavailable; installing update without stopping backend");
+    }
+
+    // `install` is synchronous and writes files, so run it off the async
+    // executor like the dialogs above. Flatten the join error and the install
+    // error so success and failure each have a single arm.
+    info!("Installing desktop update…");
+    let result = match tokio::task::spawn_blocking(move || update.install(bytes)).await {
+        Ok(install) => install.map_err(|e| e.to_string()),
+        Err(join) => Err(format!("install task failed: {}", join)),
+    };
     match result {
         Ok(()) => {
             info!("Desktop update {} installed", new_version);
@@ -189,11 +226,30 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             if restart {
                 info!("Restarting to apply desktop update");
                 app_handle.restart();
+            } else {
+                // User deferred the restart; bring the backend back so the
+                // freshly installed dashboard is usable until they relaunch.
+                restore_backend(app_handle).await;
             }
         }
         Err(e) => {
             error!("Desktop update install failed: {}", e);
+            restore_backend(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
+        }
+    }
+}
+
+/// Bring the backend back up when we're not restarting the whole app. We stop
+/// it before installing, so without this a failed install (or a user who defers
+/// the post-install restart) would leave the running app with no dashboard.
+/// Best-effort: restart it and restore the tray status.
+async fn restore_backend(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
+        info!("Restarting ESPHome backend after desktop update");
+        match state.daemon.start().await {
+            Ok(()) => crate::tray::update_status(app_handle, true),
+            Err(e) => warn!("Failed to restart backend after update: {}", e),
         }
     }
 }
