@@ -205,10 +205,15 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     }
 
     // `install` is synchronous and writes files, so run it off the async
-    // executor like the dialogs above.
+    // executor like the dialogs above. Flatten the join error and the install
+    // error so success and failure each have a single arm.
     info!("Installing desktop update…");
-    match tokio::task::spawn_blocking(move || update.install(bytes)).await {
-        Ok(Ok(())) => {
+    let result = match tokio::task::spawn_blocking(move || update.install(bytes)).await {
+        Ok(install) => install.map_err(|e| e.to_string()),
+        Err(join) => Err(format!("install task panicked: {}", join)),
+    };
+    match result {
+        Ok(()) => {
             info!("Desktop update {} installed", new_version);
             let msg = format!(
                 "ESPHome Device Builder {} has been installed.\n\nRestart now to use the new version?",
@@ -227,13 +232,8 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                 restore_backend(app_handle).await;
             }
         }
-        Ok(Err(e)) => {
-            error!("Desktop update install failed: {}", e);
-            restore_backend(app_handle).await;
-            show_error(app_handle, format!("Failed to install update: {}", e)).await;
-        }
         Err(e) => {
-            error!("Desktop update install task failed: {}", e);
+            error!("Desktop update install failed: {}", e);
             restore_backend(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
         }
