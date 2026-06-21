@@ -221,30 +221,35 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             if restart {
                 info!("Restarting to apply desktop update");
                 app_handle.restart();
+            } else {
+                // User deferred the restart; bring the backend back so the
+                // freshly installed dashboard is usable until they relaunch.
+                restore_backend(app_handle).await;
             }
         }
         Ok(Err(e)) => {
             error!("Desktop update install failed: {}", e);
-            restart_backend_after_failed_install(app_handle).await;
+            restore_backend(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
         }
         Err(e) => {
             error!("Desktop update install task failed: {}", e);
-            restart_backend_after_failed_install(app_handle).await;
+            restore_backend(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
         }
     }
 }
 
-/// Bring the backend back up after a failed self-update install. We stop it
-/// before installing, so a failed install would otherwise leave the running
-/// app with no dashboard; restart it best-effort and restore the tray status.
-async fn restart_backend_after_failed_install(app_handle: &AppHandle) {
+/// Bring the backend back up when we're not restarting the whole app. We stop
+/// it before installing, so without this a failed install (or a user who defers
+/// the post-install restart) would leave the running app with no dashboard.
+/// Best-effort: restart it and restore the tray status.
+async fn restore_backend(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
-        info!("Restarting ESPHome backend after failed desktop update");
+        info!("Restarting ESPHome backend after desktop update");
         match state.daemon.start().await {
             Ok(()) => crate::tray::update_status(app_handle, true),
-            Err(e) => warn!("Failed to restart backend after failed update: {}", e),
+            Err(e) => warn!("Failed to restart backend after update: {}", e),
         }
     }
 }
