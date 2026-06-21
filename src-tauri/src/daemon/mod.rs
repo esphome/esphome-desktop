@@ -51,7 +51,7 @@ pub struct DaemonManager {
     port: u16,
     /// Whether the daemon is running
     running: Arc<AtomicBool>,
-    /// PID of the dashboard child, mirrored as an atomic so synchronous
+    /// PID of the device builder child, mirrored as an atomic so synchronous
     /// exit paths (e.g. macOS Dock-Quit, which fires `RunEvent::Exit`
     /// without going through `ExitRequested`) can SIGTERM the process
     /// group without locking the tokio mutex. Zero when no child is
