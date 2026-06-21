@@ -193,6 +193,10 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     // the ESPHome package-update path uses; best-effort, so proceed on error.
     if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
         info!("Stopping ESPHome backend before installing desktop update");
+        // Reflect the stop in the tray immediately; `stop()` only flips the
+        // daemon's internal flag, so the tray would otherwise stay on
+        // "Running" (matches the package-update path in `tray`).
+        crate::tray::update_status(app_handle, false);
         if let Err(e) = state.daemon.stop().await {
             warn!("Error stopping backend before update: {}", e);
         }
@@ -221,11 +225,26 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
         }
         Ok(Err(e)) => {
             error!("Desktop update install failed: {}", e);
+            restart_backend_after_failed_install(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
         }
         Err(e) => {
             error!("Desktop update install task failed: {}", e);
+            restart_backend_after_failed_install(app_handle).await;
             show_error(app_handle, format!("Failed to install update: {}", e)).await;
+        }
+    }
+}
+
+/// Bring the backend back up after a failed self-update install. We stop it
+/// before installing, so a failed install would otherwise leave the running
+/// app with no dashboard; restart it best-effort and restore the tray status.
+async fn restart_backend_after_failed_install(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
+        info!("Restarting ESPHome backend after failed desktop update");
+        match state.daemon.start().await {
+            Ok(()) => crate::tray::update_status(app_handle, true),
+            Err(e) => warn!("Failed to restart backend after failed update: {}", e),
         }
     }
 }
