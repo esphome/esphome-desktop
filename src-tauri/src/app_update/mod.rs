@@ -210,7 +210,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     info!("Installing desktop update…");
     let result = match tokio::task::spawn_blocking(move || update.install(bytes)).await {
         Ok(install) => install.map_err(|e| e.to_string()),
-        Err(join) => Err(format!("install task panicked: {}", join)),
+        Err(join) => Err(format!("install task failed: {}", join)),
     };
     match result {
         Ok(()) => {
