@@ -377,6 +377,28 @@ impl UpdateChecker {
     ) -> Result<()> {
         let python_path = platform::get_python_path(app_handle)?;
 
+        // For the stable channel, resolve the latest stable version and pin the
+        // install to it. A bare `--upgrade` will not downgrade an already-
+        // installed newer pre-release, so without a pin a beta→stable switch is
+        // a silent no-op (issue #200). Beta stays unpinned (`--pre --upgrade`)
+        // so it always tracks the newest pre-release. If the version can't be
+        // resolved (PyPI unreachable), fall back to unpinned rather than fail.
+        let pinned_version = if backend == Backend::BuilderStable {
+            match self.check_device_builder(backend).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Could not resolve latest stable device-builder version, \
+                         installing unpinned: {}",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         info!("Installing/upgrading esphome-device-builder ({})", backend);
 
         // Try a clean upgrade first (attempts a normal uninstall of the old
@@ -387,7 +409,10 @@ impl UpdateChecker {
         let result = install_with_record_retry(
             move |ignore| {
                 let pp = pp.clone();
-                async move { run_device_builder_install(&pp, backend, ignore).await }
+                let pin = pinned_version.clone();
+                async move {
+                    run_device_builder_install(&pp, backend, ignore, pin.as_deref()).await
+                }
             },
             "esphome-device-builder installed/upgraded successfully",
             "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed",
@@ -837,15 +862,34 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
 /// version but removed/renamed in the new one orphaned in site-packages. That
 /// is why this is a fallback, not the default — it limits the orphaned-files
 /// trade-off to the genuinely-broken RECORD case instead of every upgrade.
-fn device_builder_install_args(backend: Backend, ignore_installed: bool) -> Vec<&'static str> {
-    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--upgrade"];
+///
+/// `pinned_version`: when `Some`, the requirement is pinned to
+/// `esphome-device-builder==<version>` instead of the bare package name. A bare
+/// `--upgrade` (without `--pre`) will not *downgrade* an already-installed newer
+/// pre-release to an older stable, so a beta→stable channel switch silently
+/// stays on the beta (issue #200). Pinning to the resolved stable version
+/// forces pip to land on exactly that release, downgrading when needed.
+fn device_builder_install_args(
+    backend: Backend,
+    ignore_installed: bool,
+    pinned_version: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-m".into(),
+        "pip".into(),
+        "install".into(),
+        "--upgrade".into(),
+    ];
     if ignore_installed {
-        args.push("--ignore-installed");
+        args.push("--ignore-installed".into());
     }
     if backend == Backend::BuilderBeta {
-        args.push("--pre");
+        args.push("--pre".into());
     }
-    args.push("esphome-device-builder");
+    match pinned_version {
+        Some(v) => args.push(format!("esphome-device-builder=={v}")),
+        None => args.push("esphome-device-builder".into()),
+    }
     args
 }
 
@@ -854,8 +898,9 @@ async fn run_device_builder_install(
     python_path: &std::path::Path,
     backend: Backend,
     ignore_installed: bool,
+    pinned_version: Option<&str>,
 ) -> Result<std::process::Output> {
-    let args = device_builder_install_args(backend, ignore_installed);
+    let args = device_builder_install_args(backend, ignore_installed, pinned_version);
     let mut cmd = tokio::process::Command::new(python_path);
     cmd.args(&args);
     platform::configure_no_window_tokio_command(&mut cmd);
@@ -1193,15 +1238,22 @@ mod tests {
         assert!(is_newer_version("2025.6.0.dev1", "2025.5.0"));
     }
 
+    fn has_arg(args: &[String], needle: &str) -> bool {
+        args.iter().any(|a| a == needle)
+    }
+
     #[test]
     fn test_device_builder_install_args_default_no_ignore_installed() {
         // The default (first-attempt) upgrade must NOT pass --ignore-installed,
         // so normal installs still get a clean uninstall of the old copy.
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
-            let args = device_builder_install_args(backend, false);
-            assert!(!args.contains(&"--ignore-installed"), "backend {backend:?}");
-            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
-            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+            let args = device_builder_install_args(backend, false, None);
+            assert!(!has_arg(&args, "--ignore-installed"), "backend {backend:?}");
+            assert!(has_arg(&args, "--upgrade"), "backend {backend:?}");
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("esphome-device-builder")
+            );
         }
     }
 
@@ -1210,25 +1262,61 @@ mod tests {
         // The fallback path adds --ignore-installed so a missing RECORD file in
         // the bundled install can't abort the retry (issue #155).
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
-            let args = device_builder_install_args(backend, true);
-            assert!(args.contains(&"--ignore-installed"), "backend {backend:?}");
-            assert!(args.contains(&"--upgrade"), "backend {backend:?}");
-            assert_eq!(args.last(), Some(&"esphome-device-builder"));
+            let args = device_builder_install_args(backend, true, None);
+            assert!(has_arg(&args, "--ignore-installed"), "backend {backend:?}");
+            assert!(has_arg(&args, "--upgrade"), "backend {backend:?}");
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("esphome-device-builder")
+            );
         }
     }
 
     #[test]
     fn test_device_builder_install_args_pre_only_for_beta() {
         for ignore_installed in [false, true] {
-            assert!(
-                device_builder_install_args(Backend::BuilderBeta, ignore_installed)
-                    .contains(&"--pre")
-            );
-            assert!(
-                !device_builder_install_args(Backend::BuilderStable, ignore_installed)
-                    .contains(&"--pre")
-            );
+            assert!(has_arg(
+                &device_builder_install_args(Backend::BuilderBeta, ignore_installed, None),
+                "--pre"
+            ));
+            assert!(!has_arg(
+                &device_builder_install_args(Backend::BuilderStable, ignore_installed, None),
+                "--pre"
+            ));
         }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_pins_stable_version() {
+        // A resolved stable version must be pinned as `pkg==<version>` so pip
+        // downgrades off a newer installed pre-release instead of no-opping the
+        // beta→stable switch (issue #200). The pin replaces the bare package
+        // name and `--pre` is never added for stable.
+        for ignore_installed in [false, true] {
+            let args = device_builder_install_args(
+                Backend::BuilderStable,
+                ignore_installed,
+                Some("1.2.3"),
+            );
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some("esphome-device-builder==1.2.3")
+            );
+            assert!(!has_arg(&args, "esphome-device-builder"));
+            assert!(!has_arg(&args, "--pre"));
+            assert!(has_arg(&args, "--upgrade"));
+        }
+    }
+
+    #[test]
+    fn test_device_builder_install_args_unpinned_when_version_none() {
+        // No resolved version → fall back to the bare package name (current
+        // behavior) rather than failing the install.
+        let args = device_builder_install_args(Backend::BuilderStable, false, None);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("esphome-device-builder")
+        );
     }
 
     #[test]
