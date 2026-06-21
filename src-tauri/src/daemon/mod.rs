@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::process::{Child, Command};
@@ -34,6 +35,12 @@ type PidInt = i32;
 
 /// Human-readable name of the backend process, for log messages.
 const BACKEND_NAME: &str = "ESPHome device builder";
+
+/// How long `start()` waits for the previous backend to release the dashboard
+/// port before spawning anyway. Covers the documented worst-case SIGTERM drain
+/// of the Python backend (20-60s); a graceful relaunch frees the port at once
+/// and never waits.
+const PORT_FREE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Manages the ESPHome Device Builder process
 pub struct DaemonManager {
@@ -130,6 +137,15 @@ impl DaemonManager {
         if !self.python_path.exists() {
             anyhow::bail!("Python not found at {:?}", self.python_path);
         }
+
+        // Wait for a previous backend to release the dashboard port before
+        // spawning. On an app-update relaunch stop() can return while the old
+        // backend is still draining its SIGTERM (handler outlives the 30s stop
+        // wait); spawning now would co-bind UDP 5353 with the dying process via
+        // SO_REUSEPORT and split the mDNS replies, so devices show offline until
+        // it finally dies. A free TCP port is a reliable proxy for "old backend
+        // gone, 5353 released".
+        Self::wait_for_port_free(self.port, PORT_FREE_TIMEOUT).await;
 
         // Open log file for stdout and stderr combined
         let log_path = self.logs_dir.join("dashboard.log");
@@ -348,6 +364,51 @@ impl DaemonManager {
 
         info!("{} started", backend_name);
         Ok(())
+    }
+
+    /// Block until TCP `127.0.0.1:port` is bindable, or `max_wait` elapses.
+    ///
+    /// A plain bind (no SO_REUSEPORT) fails with `AddrInUse` while the previous
+    /// backend still holds the dashboard port, so this gates the new spawn on
+    /// the old one having actually exited; best effort, never blocks forever.
+    async fn wait_for_port_free(port: u16, max_wait: Duration) {
+        let deadline = Instant::now() + max_wait;
+        let mut warned = false;
+        loop {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if !warned {
+                        warn!(
+                            "Port {} still held by the previous backend; \
+                             waiting up to {:?} for it to exit before spawning",
+                            port, max_wait
+                        );
+                        warned = true;
+                    }
+                    if Instant::now() >= deadline {
+                        warn!(
+                            "Port {} still in use after {:?}; spawning anyway",
+                            port, max_wait
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                Err(e) => {
+                    // Not the bind race we guard against (e.g. permissions);
+                    // let the spawn proceed and surface the real failure.
+                    debug!(
+                        "Port {} probe bind failed ({}); proceeding to spawn",
+                        port, e
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     /// Stop the ESPHome dashboard
