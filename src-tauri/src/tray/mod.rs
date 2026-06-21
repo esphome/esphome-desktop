@@ -735,24 +735,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     ""
                 };
 
-                let dialog_app = app.clone();
                 let msg = format!(
                     "{}Switch ESPHome from {} to {} channel?\n\nThis will stop the dashboard, install the appropriate version, and restart.",
                     warning, old_channel, new_channel
                 );
-                let confirmed = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .title("Switch Release Channel")
-                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                            "Switch".to_string(),
-                            "Cancel".to_string(),
-                        ))
-                        .blocking_show()
-                })
-                .await
-                .unwrap_or(false);
+                let confirmed =
+                    crate::dialog::confirm(&app, "Switch Release Channel", msg, "Switch", "Cancel")
+                        .await;
 
                 if !confirmed {
                     // Revert the check marks
@@ -887,7 +876,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 }
 
                 // Confirm the switch with the user.
-                let dialog_app = app.clone();
                 let msg = if new_backend.is_builder() {
                     format!(
                         "Switch to {}?\n\n\
@@ -900,19 +888,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                      This will stop the device builder and restart with the dashboard."
                         .to_string()
                 };
-                let confirmed = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .title("Switch Backend")
-                        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                            "Switch".to_string(),
-                            "Cancel".to_string(),
-                        ))
-                        .blocking_show()
-                })
-                .await
-                .unwrap_or(false);
+                let confirmed =
+                    crate::dialog::confirm(&app, "Switch Backend", msg, "Switch", "Cancel").await;
 
                 if !confirmed {
                     update_backend_checks(old_backend);

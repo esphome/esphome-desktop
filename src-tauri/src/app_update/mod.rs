@@ -57,21 +57,15 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             let current_version = update.current_version.clone();
             let notes = update.body.clone().unwrap_or_default();
 
-            let dialog_app = app_handle.clone();
             let msg = format_update_prompt(&current_version, &new_version, &notes);
-            let confirmed = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .title("Desktop Update Available")
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        "Update Now".to_string(),
-                        "Later".to_string(),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+            let confirmed = crate::dialog::confirm(
+                app_handle,
+                "Desktop Update Available",
+                msg,
+                "Update Now",
+                "Later",
+            )
+            .await;
 
             if !confirmed {
                 // User saw the dialog and declined — fall through to ESPHome check.
@@ -184,24 +178,13 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     match result {
         Ok(()) => {
             info!("Desktop update {} installed", new_version);
-            let dialog_app = app_handle.clone();
             let msg = format!(
                 "ESPHome Device Builder {} has been installed.\n\nRestart now to use the new version?",
                 new_version
             );
-            let restart = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .title("Update Installed")
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        "Restart Now".to_string(),
-                        "Later".to_string(),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+            let restart =
+                crate::dialog::confirm(app_handle, "Update Installed", msg, "Restart Now", "Later")
+                    .await;
 
             if restart {
                 info!("Restarting to apply desktop update");
