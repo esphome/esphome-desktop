@@ -111,6 +111,15 @@ impl DaemonManager {
 
     /// Start the ESPHome device builder
     pub async fn start(&self) -> Result<()> {
+        // Fast-path a redundant start() on an already-running daemon before the
+        // pid wait below: the pid file names our own live backend, so without
+        // this the wait would block for the full timeout and then no-op. The
+        // lock + re-check below is still the authoritative guard against races.
+        if self.running.load(Ordering::SeqCst) {
+            info!("Daemon already running");
+            return Ok(());
+        }
+
         // Wait for a previous backend to exit before spawning. On an app-update
         // relaunch our stop() can return while the old backend is still draining
         // its SIGTERM (its handler outlives the 30s stop wait), and that orphan
@@ -404,6 +413,9 @@ impl DaemonManager {
         let mut warned = false;
         loop {
             if !Self::previous_backend_alive(pid) {
+                // Confirmed gone; drop the stale pid file so a later launch can't
+                // wait on a recycled pid.
+                Self::remove_pid_file(pid_file);
                 return;
             }
             if !warned {
@@ -459,11 +471,11 @@ impl DaemonManager {
 
     /// Whether the recorded pid is still alive.
     ///
-    /// Windows: a still-running process reports exit code `STILL_ACTIVE` (259);
+    /// Windows: a still-running process reports `STILL_ACTIVE` as its exit code;
     /// a pid that can't be opened is treated as gone.
     #[cfg(windows)]
     fn previous_backend_alive(pid: PidInt) -> bool {
-        use ::windows::Win32::Foundation::CloseHandle;
+        use ::windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
         use ::windows::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
@@ -474,7 +486,8 @@ impl DaemonManager {
                 return false;
             };
             let mut code: u32 = 0;
-            let alive = GetExitCodeProcess(handle, &mut code).is_ok() && code == 259;
+            let alive =
+                GetExitCodeProcess(handle, &mut code).is_ok() && code == STILL_ACTIVE.0 as u32;
             let _ = CloseHandle(handle);
             alive
         }
