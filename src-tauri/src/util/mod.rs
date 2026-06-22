@@ -84,6 +84,19 @@ fn numbered(path: &Path, n: usize) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Rename `from` → `to`, replacing `to` if it already exists.
+///
+/// `std::fs::rename` overwrites the destination on Unix but **fails** on Windows
+/// when it exists, which would abort rotation on the second run and let the
+/// caller truncate the live log again; remove the destination first so the move
+/// succeeds on every platform.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.exists() {
+        let _ = std::fs::remove_file(to);
+    }
+    std::fs::rename(from, to)
+}
+
 /// Rotate `path` before a fresh run, keeping up to `keep` previous copies.
 ///
 /// The launcher redirects the dashboard child's stdout/stderr into a single
@@ -104,17 +117,17 @@ pub fn rotate_log(path: impl AsRef<Path>, keep: usize) -> Result<()> {
     }
 
     // Shift the existing numbered copies up by one, oldest first, so nothing is
-    // clobbered before it has been moved. `path.{keep}` is dropped by being
-    // overwritten when `path.{keep-1}` renames onto it.
+    // clobbered before it has been moved. `path.{keep}` is dropped when
+    // `path.{keep-1}` replaces it.
     for i in (1..keep).rev() {
         let from = numbered(path, i);
         if from.exists() {
-            let _ = std::fs::rename(&from, numbered(path, i + 1));
+            let _ = rename_replacing(&from, &numbered(path, i + 1));
         }
     }
 
     let first = numbered(path, 1);
-    std::fs::rename(path, &first)
+    rename_replacing(path, &first)
         .with_context(|| format!("failed rotating log {path:?} -> {first:?}"))
 }
 
