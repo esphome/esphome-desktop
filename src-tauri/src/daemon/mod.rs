@@ -366,13 +366,17 @@ impl DaemonManager {
                     "{} exited unexpectedly with status: {}. See log at {:?}.",
                     backend_label, status, log_path_for_watcher
                 );
+                // Clear running/pid state and the pid file while still holding
+                // the lock so a concurrent start() can't spawn a new child in
+                // between and have this teardown clobber its pid / delete its
+                // pid file.
                 *guard = None;
-                drop(guard);
                 running.store(false, Ordering::SeqCst);
                 dashboard_pid.store(0, Ordering::SeqCst);
                 // The child is reaped; clear its pid file so a later start()
                 // doesn't wait on a dead (or recycled) pid.
                 DaemonManager::remove_pid_file(&pid_file);
+                drop(guard);
 
                 crate::tray::update_status(&app_handle, false);
                 if let Err(e) = app_handle
