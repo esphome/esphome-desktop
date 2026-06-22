@@ -169,34 +169,42 @@ pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bo
     false
 }
 
-/// Open the rolling app-level log file in append mode.
+/// Number of rotated app-log files to retain (one per day of activity).
+const APP_LOG_HISTORY: usize = 7;
+
+/// Build the rolling app-level log appender (`<data>/logs/app.<date>.log`).
 ///
-/// Resolved without an `AppHandle` (logging is initialised before Tauri
-/// builds one) using the same bundle identifier Tauri's `app_data_dir()`
-/// uses, so this sits next to the dashboard logs (`<data>/logs/app.log`).
-/// Append (not truncate) so a self-update or startup failure stays
-/// inspectable across restarts — issue #203. Best-effort: returns None if
-/// the data dir or file can't be resolved/opened, leaving stderr logging.
-fn app_log_file() -> Option<std::fs::File> {
-    let dir = dirs::data_dir()?.join("io.esphome.builder").join("logs");
+/// Resolved without an `AppHandle` (logging is initialised before Tauri builds
+/// one) using the same bundle identifier Tauri's `app_data_dir()` uses, so this
+/// sits next to the dashboard logs and stays inspectable across a self-update
+/// restart — issue #203. Daily rotation with [`APP_LOG_HISTORY`] retained keeps
+/// it bounded even when the filter is raised to `debug` to chase a failure.
+/// Best-effort: returns None if the dir or appender can't be built, leaving
+/// stderr logging.
+fn app_log_appender() -> Option<tracing_appender::rolling::RollingFileAppender> {
+    let dir = dirs::data_dir()?
+        .join(platform::BUNDLE_IDENTIFIER)
+        .join("logs");
     std::fs::create_dir_all(&dir).ok()?;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("app.log"))
+    tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("app")
+        .filename_suffix("log")
+        .max_log_files(APP_LOG_HISTORY)
+        .build(dir)
         .ok()
 }
 
 /// Initialize logging
 fn init_logging() {
-    // Optional file layer: a no-op when the log file can't be opened, so a
-    // path failure never blocks startup. App-level logs are sparse at the
-    // default `info` filter (health-check success is `debug`), so plain
-    // append-mode growth is negligible — no rotation needed here.
-    let file_layer = app_log_file().map(|file| {
+    // Optional rolling file layer beside stderr: a no-op when the appender can't
+    // be built, so a path failure never blocks startup. The appender is its own
+    // `MakeWriter`, so there's no per-event handle clone and no panic path in
+    // the logging hot loop.
+    let file_layer = app_log_appender().map(|appender| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .with_writer(move || file.try_clone().expect("clone app.log handle"))
+            .with_writer(appender)
     });
 
     tracing_subscriber::registry()

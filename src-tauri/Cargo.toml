@@ -40,6 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Error handling
 thiserror = "2.0"
