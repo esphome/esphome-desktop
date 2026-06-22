@@ -16,6 +16,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
+/// Application bundle identifier. Must match the `identifier` field in
+/// `tauri.conf.json`; Tauri derives `app_data_dir()` from it, and code that
+/// resolves the data dir before an `AppHandle` exists joins it manually.
+pub const BUNDLE_IDENTIFIER: &str = "io.esphome.builder";
+
 /// Get the application data directory
 ///
 /// - macOS: `~/Library/Application Support/io.esphome.builder/`
