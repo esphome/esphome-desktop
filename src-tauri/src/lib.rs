@@ -169,14 +169,43 @@ pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bo
     false
 }
 
+/// Open the rolling app-level log file in append mode.
+///
+/// Resolved without an `AppHandle` (logging is initialised before Tauri
+/// builds one) using the same bundle identifier Tauri's `app_data_dir()`
+/// uses, so this sits next to the dashboard logs (`<data>/logs/app.log`).
+/// Append (not truncate) so a self-update or startup failure stays
+/// inspectable across restarts — issue #203. Best-effort: returns None if
+/// the data dir or file can't be resolved/opened, leaving stderr logging.
+fn app_log_file() -> Option<std::fs::File> {
+    let dir = dirs::data_dir()?.join("io.esphome.builder").join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("app.log"))
+        .ok()
+}
+
 /// Initialize logging
 fn init_logging() {
+    // Optional file layer: a no-op when the log file can't be opened, so a
+    // path failure never blocks startup. App-level logs are sparse at the
+    // default `info` filter (health-check success is `debug`), so plain
+    // append-mode growth is negligible — no rotation needed here.
+    let file_layer = app_log_file().map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || file.try_clone().expect("clone app.log handle"))
+    });
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "esphome_desktop=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
+        .with(file_layer)
         .init();
 }
 
