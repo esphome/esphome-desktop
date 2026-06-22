@@ -35,6 +35,11 @@ type PidInt = i32;
 /// Human-readable name of the backend process, for log messages.
 const BACKEND_NAME: &str = "ESPHome device builder";
 
+/// Number of previous `dashboard.log` runs to retain when rotating on start
+/// (`dashboard.log.1` … `dashboard.log.3`). Enough to inspect the run that
+/// preceded a failed restart without unbounded disk growth.
+const LOG_HISTORY: usize = 3;
+
 /// Manages the ESPHome Device Builder process
 pub struct DaemonManager {
     /// The running process, if any
@@ -131,8 +136,17 @@ impl DaemonManager {
             anyhow::bail!("Python not found at {:?}", self.python_path);
         }
 
-        // Open log file for stdout and stderr combined
+        // Open log file for stdout and stderr combined.
+        //
+        // `File::create` truncates, so without rotating first every start wipes
+        // the previous run's logs — leaving nothing to inspect after a failed
+        // restart (issue #203). Rotate the prior `dashboard.log` to a numbered
+        // backup first; best-effort, since losing old logs must never block the
+        // backend from starting.
         let log_path = self.logs_dir.join("dashboard.log");
+        if let Err(e) = crate::util::rotate_log(&log_path, LOG_HISTORY) {
+            warn!("Failed to rotate {:?}: {}", log_path, e);
+        }
         let log_file = File::create(&log_path).context("Failed to create log file")?;
         let log_file_clone = log_file
             .try_clone()

@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic counter to keep temp file names unique within a process even when
@@ -73,6 +73,49 @@ pub fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Resul
     }
 
     Ok(())
+}
+
+/// Append `.{n}` to a path's file name, e.g. `dashboard.log` -> `dashboard.log.1`.
+/// Keeps the original extension so rotated files stay grouped next to the live
+/// log (unlike `with_extension`, which would replace `.log`).
+fn numbered(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{n}"));
+    path.with_file_name(name)
+}
+
+/// Rotate `path` before a fresh run, keeping up to `keep` previous copies.
+///
+/// The launcher redirects the dashboard child's stdout/stderr into a single
+/// log file opened with [`std::fs::File::create`], which **truncates** on every
+/// start — so each app launch or backend restart wiped the previous run's logs,
+/// leaving nothing to inspect after a failed restart (issue #203). Calling this
+/// first shifts `path` → `path.1`, `path.1` → `path.2`, … up to `path.{keep}`
+/// (the oldest is discarded), so the caller can then create a fresh `path`
+/// without losing history.
+///
+/// No-op when `keep` is 0 or `path` doesn't exist yet (first ever run). The
+/// shift renames are best-effort — a single failure is skipped so one stuck
+/// file can't block the rotation of the live log, which is the one that matters.
+pub fn rotate_log(path: impl AsRef<Path>, keep: usize) -> Result<()> {
+    let path = path.as_ref();
+    if keep == 0 || !path.exists() {
+        return Ok(());
+    }
+
+    // Shift the existing numbered copies up by one, oldest first, so nothing is
+    // clobbered before it has been moved. `path.{keep}` is dropped by being
+    // overwritten when `path.{keep-1}` renames onto it.
+    for i in (1..keep).rev() {
+        let from = numbered(path, i);
+        if from.exists() {
+            let _ = std::fs::rename(&from, numbered(path, i + 1));
+        }
+    }
+
+    let first = numbered(path, 1);
+    std::fs::rename(path, &first)
+        .with_context(|| format!("failed rotating log {path:?} -> {first:?}"))
 }
 
 #[cfg(test)]
@@ -147,6 +190,66 @@ mod tests {
         // The filesystem root has no parent — there is nowhere to stage a temp.
         let err = atomic_write(Path::new("/"), b"x");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn rotate_log_is_noop_on_first_run() {
+        let dir = TmpDir::new("rotate-first");
+        let log = dir.path().join("dashboard.log");
+
+        // Nothing to rotate yet — must not error or create stray files.
+        rotate_log(&log, 3).unwrap();
+
+        assert!(!log.exists());
+        assert!(!dir.path().join("dashboard.log.1").exists());
+    }
+
+    #[test]
+    fn rotate_log_shifts_existing_to_dot_one() {
+        let dir = TmpDir::new("rotate-one");
+        let log = dir.path().join("dashboard.log");
+        std::fs::write(&log, "run-a").unwrap();
+
+        rotate_log(&log, 3).unwrap();
+
+        // The live log moved aside; the caller will create a fresh one.
+        assert!(!log.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dashboard.log.1")).unwrap(),
+            "run-a"
+        );
+    }
+
+    #[test]
+    fn rotate_log_keeps_history_in_order_and_discards_oldest() {
+        let dir = TmpDir::new("rotate-history");
+        let log = dir.path().join("dashboard.log");
+
+        // Simulate four starts, newest content written to the live log each time.
+        for run in ["run1", "run2", "run3", "run4"] {
+            std::fs::write(&log, run).unwrap();
+            rotate_log(&log, 3).unwrap();
+        }
+
+        // keep=3 retains the three most recent rotated runs; run1 is discarded.
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+        assert_eq!(read("dashboard.log.1"), "run4");
+        assert_eq!(read("dashboard.log.2"), "run3");
+        assert_eq!(read("dashboard.log.3"), "run2");
+        assert!(!dir.path().join("dashboard.log.4").exists());
+    }
+
+    #[test]
+    fn rotate_log_keep_zero_is_noop() {
+        let dir = TmpDir::new("rotate-zero");
+        let log = dir.path().join("dashboard.log");
+        std::fs::write(&log, "x").unwrap();
+
+        rotate_log(&log, 0).unwrap();
+
+        // With no history requested the live log is left untouched.
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "x");
+        assert!(!dir.path().join("dashboard.log.1").exists());
     }
 
     #[test]
