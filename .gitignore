@@ -21,6 +21,8 @@ pnpm-debug.log*
 src-tauri/python/
 # Bundled MinGit on Windows (downloaded by build scripts)
 src-tauri/git/
+# Bundled ccache on Windows (downloaded by build scripts)
+src-tauri/ccache/
 resources/
 
 # Python

@@ -191,6 +191,17 @@ pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(resource_dir.join("git").join("patch"))
 }
 
+/// Directory inside the bundled `ccache` resource that holds `ccache.exe`.
+///
+/// `prepare_bundle.sh` extracts a single static `ccache.exe` into `ccache/`.
+/// Putting this dir on `PATH` lets ESPHome's ESP-IDF build discover ccache and
+/// enable compiler caching automatically.
+#[cfg(target_os = "windows")]
+pub fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
+    Ok(resource_dir.join("ccache"))
+}
+
 /// Build a `PATH` value with `dir` prepended to `existing`.
 ///
 /// Pure (no environment mutation) so the prepend ordering, separator
@@ -362,6 +373,51 @@ pub fn ensure_homebrew_on_path(app_handle: &AppHandle) -> Result<()> {
     }
 
     #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_handle;
+    }
+
+    Ok(())
+}
+
+/// Ensure the bundled `ccache` is on `PATH` for the ESPHome backend we spawn.
+///
+/// ESPHome's ESP-IDF build turns on compiler caching automatically when a
+/// `ccache` binary is found on `PATH`, roughly halving repeat-build times.
+/// Windows ships no ccache and users rarely install one, so we bundle the
+/// official static build (`prepare_bundle.sh`) and prepend its directory here.
+/// The spawned daemon inherits this process's environment (it never sets `PATH`
+/// itself), so this single mutation is enough for the build to see ccache.
+///
+/// No-op on macOS (a brew-installed ccache is reached via the Homebrew dirs
+/// appended in `ensure_homebrew_on_path`) and Linux (ccache is a distro
+/// package). Log-and-continue if the bundled exe is missing: builds just run
+/// without caching, exactly as before.
+pub fn ensure_ccache_on_path(app_handle: &AppHandle) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use tracing::{info, warn};
+
+        let ccache_dir = get_bundled_ccache_dir(app_handle)?;
+        let ccache_exe = ccache_dir.join("ccache.exe");
+        if !ccache_exe.exists() {
+            warn!(
+                "Bundled ccache missing at {:?}; ESP-IDF builds will run without \
+                 compiler caching",
+                ccache_exe
+            );
+            return Ok(());
+        }
+
+        // Prepend the bundled ccache dir so it wins over anything already on
+        // PATH. There is no system ccache on Windows to shadow, so prepend vs
+        // append is immaterial; prepend keeps it consistent with the bundled
+        // git/patch handling above.
+        insert_dir_into_path(&ccache_dir, PathInsert::Front)?;
+        info!("Using bundled ccache at {:?}", ccache_exe);
+    }
+
+    #[cfg(not(target_os = "windows"))]
     {
         let _ = app_handle;
     }
