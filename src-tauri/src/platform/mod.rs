@@ -211,6 +211,59 @@ fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
     std::env::join_paths(entries).context("Failed to build PATH with bundled git prepended")
 }
 
+/// Build a `PATH` value with `dir` appended after `existing`.
+///
+/// The append counterpart of [`path_with_prepended`], pure for the same reason
+/// (split/join keeps the platform separator correct and round-trips a
+/// non-Unicode `PATH`). Used to expose Homebrew at the *end* of `PATH` so a
+/// brew-installed tool (e.g. `ccache`) is discoverable without ever shadowing a
+/// system or bundled binary that resolves earlier (see [`ensure_homebrew_on_path`]).
+fn path_with_appended(existing: &OsStr, dir: &Path) -> Result<OsString> {
+    // An empty `existing` (PATH unset) would split into a single empty entry,
+    // leaving a leading "" in the result — which Windows search semantics treat
+    // as the current directory. Return just `dir` in that case.
+    if existing.is_empty() {
+        return Ok(dir.as_os_str().to_os_string());
+    }
+    let mut entries: Vec<PathBuf> = std::env::split_paths(existing).collect();
+    entries.push(dir.to_path_buf());
+    std::env::join_paths(entries).context("Failed to build PATH with Homebrew appended")
+}
+
+/// Where to insert a directory into `PATH`.
+#[derive(Clone, Copy)]
+enum PathInsert {
+    /// Prepend, so the dir shadows anything already on `PATH`. For bundled tools
+    /// we always want to win (MinGit, the bundled ccache).
+    Front,
+    /// Append, so the dir is only a fallback and never shadows an earlier entry.
+    /// For the Homebrew dirs on macOS.
+    Back,
+}
+
+/// Insert `dir` into this process's `PATH` — the single place that mutates the
+/// environment, so the spawned daemon (which inherits our environment) and any
+/// later `PATH` probe both observe it. Returns `true` if `PATH` changed.
+///
+/// Idempotent for both positions: a `dir` already on `PATH` is left in place and
+/// returns `false`. This keeps the mutation safe to call more than once in a
+/// process (re-init flows, tests) without growing `PATH` unboundedly toward the
+/// Windows environment-size limit. Routed through
+/// [`path_with_prepended`]/[`path_with_appended`] so the platform separator and
+/// a non-Unicode `PATH` are handled correctly.
+fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    if std::env::split_paths(&existing).any(|p| p == dir) {
+        return Ok(false);
+    }
+    let new_path = match position {
+        PathInsert::Front => path_with_prepended(&existing, dir)?,
+        PathInsert::Back => path_with_appended(&existing, dir)?,
+    };
+    std::env::set_var("PATH", &new_path);
+    Ok(true)
+}
+
 /// Ensure a usable `git` is on `PATH` for the ESPHome backend we spawn.
 ///
 /// ESPHome / PlatformIO / esphome-device-builder shell out to `git` for
@@ -246,27 +299,69 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
             return Ok(());
         }
 
-        // Prepend the bundled git dir to PATH (see path_with_prepended for why
-        // it goes through split/join).
-        let existing = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = path_with_prepended(&existing, &git_dir)?;
+        // Prepend the bundled git dir so it wins over anything already on PATH.
+        insert_dir_into_path(&git_dir, PathInsert::Front)?;
 
-        // Also expose the bundled GNU patch (issue #189) when present. Only this
+        // Also expose the bundled GNU patch (issue #189) when present. Prepended
+        // after git so it too sits ahead of the inherited PATH; only this
         // dedicated dir goes on PATH, not MinGit's full usr/bin, so the build
         // doesn't pick up MSYS sh/find/sort that shadow Windows built-ins.
         let patch_dir = get_bundled_patch_dir(app_handle)?;
         if patch_dir.join("patch.exe").exists() {
-            new_path = path_with_prepended(&new_path, &patch_dir)?;
+            insert_dir_into_path(&patch_dir, PathInsert::Front)?;
             info!("Using bundled patch at {:?}", patch_dir);
         } else {
             warn!("Bundled patch.exe missing at {:?}; micro-opus and other components that need `patch` will fail to build", patch_dir);
         }
 
-        std::env::set_var("PATH", &new_path);
         info!("Using bundled MinGit at {:?}", git_exe);
     }
 
     #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app_handle;
+    }
+
+    Ok(())
+}
+
+/// Append Homebrew's bin directories to this process's `PATH` (macOS only).
+///
+/// The ESPHome backend we spawn inherits this process's environment verbatim
+/// (it never sets `PATH` itself), and the app normally launches as a login item,
+/// so it gets the sparse GUI session `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`
+/// plus whatever `path_helper` adds) — which excludes Homebrew. ESP-IDF builds
+/// pick up `ccache` automatically when it's on `PATH`, so making a
+/// `brew install ccache` discoverable here lets those builds use it.
+///
+/// We append (not prepend) `/opt/homebrew/bin` (Apple Silicon) and
+/// `/usr/local/bin` (Intel) so a system or bundled binary that resolves earlier
+/// is never shadowed by a Homebrew copy — Homebrew is only a fallback for tools
+/// the base `PATH` doesn't provide. Each dir is added only if it exists and is
+/// not already on `PATH`, keeping the value clean (`path_helper` may already
+/// list `/usr/local/bin`).
+///
+/// No-op on non-macOS. `app_handle` is accepted for signature symmetry with
+/// [`ensure_git_on_path`] (and so the call site reads the same).
+pub fn ensure_homebrew_on_path(app_handle: &AppHandle) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use tracing::info;
+
+        let _ = app_handle;
+
+        // Apple Silicon first, then Intel; both are appended when present so a
+        // single build artifact works on either architecture. `insert_dir_into_path`
+        // skips a dir already on PATH (path_helper may list `/usr/local/bin`).
+        for brew_bin in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let brew_dir = Path::new(brew_bin);
+            if brew_dir.is_dir() && insert_dir_into_path(brew_dir, PathInsert::Back)? {
+                info!("Appended Homebrew dir {:?} to PATH", brew_dir);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = app_handle;
     }
@@ -1411,6 +1506,64 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(entries[0], PathBuf::from("/opt/git/cmd"));
         assert_eq!(entries[1].as_os_str().as_bytes(), b"/weird\xffdir");
+    }
+
+    #[test]
+    fn path_with_appended_puts_dir_last() {
+        let existing = std::env::join_paths(["/usr/bin", "/bin"]).unwrap();
+        let joined = path_with_appended(&existing, Path::new("/opt/homebrew/bin")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+            ],
+            "Homebrew dir must come last so it never shadows anything already on PATH"
+        );
+    }
+
+    #[test]
+    fn path_with_appended_chains_two_dirs_in_order() {
+        // ensure_homebrew_on_path appends /opt/homebrew/bin then /usr/local/bin.
+        // Both must land after the inherited PATH, in append order.
+        let existing = std::env::join_paths(["/usr/bin"]).unwrap();
+        let with_arm = path_with_appended(&existing, Path::new("/opt/homebrew/bin")).unwrap();
+        let with_intel = path_with_appended(&with_arm, Path::new("/usr/local/bin")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&with_intel).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/local/bin"),
+            ],
+        );
+    }
+
+    #[test]
+    fn path_with_appended_onto_empty_yields_just_dir() {
+        // var_os("PATH") missing degrades to an empty value; the result must be
+        // exactly the appended dir with no leading empty entry (an empty PATH
+        // entry means the current directory under Windows search rules).
+        let joined = path_with_appended(OsStr::new(""), Path::new("/opt/homebrew/bin")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(entries, vec![PathBuf::from("/opt/homebrew/bin")]);
+    }
+
+    /// A non-Unicode `PATH` is legal on Unix; the append must round-trip its
+    /// bytes verbatim, exactly like the prepend counterpart.
+    #[cfg(unix)]
+    #[test]
+    fn path_with_appended_preserves_non_unicode_existing() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let existing = OsString::from_vec(b"/weird\xffdir".to_vec());
+        let joined = path_with_appended(&existing, Path::new("/opt/homebrew/bin")).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(entries[0].as_os_str().as_bytes(), b"/weird\xffdir");
+        assert_eq!(entries[1], PathBuf::from("/opt/homebrew/bin"));
     }
 
     /// Unique temp dir per call. Combines the process id with a monotonic

@@ -292,6 +292,15 @@ pub fn run(cli: Cli) {
                 error!("Failed to set up bundled git: {}", e);
             }
 
+            // Append Homebrew's bin dirs to PATH on macOS so ESP-IDF builds can
+            // find a brew-installed `ccache` (the GUI/login-item session PATH
+            // excludes Homebrew). Appended, so it never shadows system/bundled
+            // tools. No-op elsewhere; must run before the daemon task spawns so
+            // the child inherits the augmented PATH. Log-and-continue.
+            if let Err(e) = platform::ensure_homebrew_on_path(app.handle()) {
+                error!("Failed to add Homebrew to PATH: {}", e);
+            }
+
             // One-shot prompt to remove the pre-rename `/Applications/ESPHome Builder.app`.
             // No-op on non-macOS and after the user has answered once.
             platform::cleanup_legacy_macos_app(app.handle());
