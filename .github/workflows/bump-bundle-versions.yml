@@ -3,9 +3,9 @@ name: Bump bundle versions
 # Nightly check for newer pinned bundled dependencies in
 # build-scripts/prepare_bundle.sh, one PR per target when an update is
 # available. Python (python-build-standalone) stays on its current minor and
-# only takes newer patches; MinGit (Git for Windows) tracks the latest release.
-# The PR (not a direct push) runs the full Build + lint/test CI so a human
-# merges only after the platforms are green.
+# only takes newer patches; MinGit (Git for Windows) and ccache track the latest
+# release. The PR (not a direct push) runs the full Build + lint/test CI so a
+# human merges only after the platforms are green.
 
 on:
   schedule:
@@ -38,7 +38,7 @@ jobs:
       # cancel the other's bump.
       fail-fast: false
       matrix:
-        target: [python, mingit]
+        target: [python, mingit, ccache]
 
     steps:
       - name: Generate a token

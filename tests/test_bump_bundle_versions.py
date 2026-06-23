@@ -39,6 +39,10 @@ MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.53.0.win
 MINGIT_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
 PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.53.0.windows.1/PortableGit-2.53.0-64-bit.7z.exe"
 PORTABLEGIT_SHA256="1111111111111111111111111111111111111111111111111111111111111111"
+
+CCACHE_VERSION="4.13.5"
+CCACHE_URL="https://github.com/ccache/ccache/releases/download/v4.13.5/ccache-4.13.5-windows-x86_64.zip"
+CCACHE_SHA256="2222222222222222222222222222222222222222222222222222222222222222"
 """
 
 
@@ -305,6 +309,55 @@ def test_resolve_latest_mingit_raises_when_portablegit_missing(
         bump.resolve_latest_mingit()
 
 
+def _ccache_release(tag: str, ver: str) -> dict[str, Any]:
+    """A ccache release shaped like the real API payload.
+
+    The x86_64 Windows zip must be chosen over the aarch64 sibling and the
+    `.zip.minisig` signature (whose names the digits/dots version token and the
+    `.zip` anchor both exclude).
+    """
+    base = f"https://github.com/ccache/ccache/releases/download/{tag}"
+    names = [
+        f"ccache-{ver}-windows-aarch64.zip",
+        f"ccache-{ver}-windows-x86_64.zip.minisig",
+        f"ccache-{ver}-windows-x86_64.zip",
+        f"ccache-{ver}-linux-x86_64.tar.xz",
+    ]
+    return {
+        "tag_name": tag,
+        "assets": [
+            {
+                "name": n,
+                "browser_download_url": f"{base}/{n}",
+                "digest": f"sha256:{'ab' * 32}",
+            }
+            for n in names
+        ],
+    }
+
+
+def test_resolve_latest_ccache_picks_x86_64_zip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bump, "_api_get", lambda url: _ccache_release("v4.13.6", "4.13.6")
+    )
+    version, url, sha = bump.resolve_latest_ccache()
+    assert version == "4.13.6"
+    assert url.endswith("/v4.13.6/ccache-4.13.6-windows-x86_64.zip")
+    assert sha == "ab" * 32
+
+
+def test_resolve_latest_ccache_raises_when_no_asset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        bump, "_api_get", lambda url: {"tag_name": "v4.13.6", "assets": []}
+    )
+    with pytest.raises(bump.ResolutionError, match="ccache"):
+        bump.resolve_latest_ccache()
+
+
 def test_asset_sha256_prefers_digest_without_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -562,5 +615,94 @@ def test_main_mingit_fails_when_variables_absent(
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
 
     rc = bump.main(["--target", "mingit", "--file", str(script)])
+    assert rc == 1
+    assert not out.exists() or "changed=true" not in out.read_text()
+
+
+def test_main_ccache_writes_file_and_outputs_on_bump(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    new_url = (
+        "https://github.com/ccache/ccache/releases/download/"
+        "v4.13.6/ccache-4.13.6-windows-x86_64.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_ccache", lambda: ("4.13.6", new_url, "ff" * 32)
+    )
+
+    rc = bump.main(["--target", "ccache", "--file", str(script)])
+    assert rc == 0
+    text = script.read_text()
+    assert 'CCACHE_VERSION="4.13.6"' in text
+    assert f'CCACHE_URL="{new_url}"' in text
+    assert f'CCACHE_SHA256="{"ff" * 32}"' in text
+    # A ccache bump leaves the Python and MinGit pins untouched.
+    assert 'PYTHON_VERSION="3.13.12"' in text
+    assert 'MINGIT_VERSION="2.53.0"' in text
+
+    output = out.read_text()
+    assert "changed=true" in output
+    assert "Bump bundled ccache to 4.13.6" in output
+
+
+def test_main_ccache_no_op_when_already_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    current_url = (
+        "https://github.com/ccache/ccache/releases/download/"
+        "v4.13.5/ccache-4.13.5-windows-x86_64.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_ccache", lambda: ("4.13.5", current_url, "2" * 64)
+    )
+
+    rc = bump.main(["--target", "ccache", "--file", str(script)])
+    assert rc == 0
+    assert script.read_text() == SAMPLE_SCRIPT
+    assert "changed=false" in out.read_text()
+
+
+def test_main_ccache_refuses_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Current pin is 4.13.5; a resolved older release (upstream republished an
+    # old tag as latest) must fail loudly rather than open a backwards PR.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    old_url = (
+        "https://github.com/ccache/ccache/releases/download/"
+        "v4.13.4/ccache-4.13.4-windows-x86_64.zip"
+    )
+    monkeypatch.setattr(
+        bump, "resolve_latest_ccache", lambda: ("4.13.4", old_url, "aa" * 32)
+    )
+
+    rc = bump.main(["--target", "ccache", "--file", str(script)])
+    assert rc == 1
+    assert script.read_text() == SAMPLE_SCRIPT
+    assert not out.exists() or "changed=true" not in out.read_text()
+
+
+def test_main_ccache_fails_when_variables_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No ccache pins present: a real breakage that must fail the job rather than
+    # silently no-op and let the bundled ccache drift.
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text('PYTHON_VERSION="3.13.12"\nPBS_VERSION="20260203"\n')
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    rc = bump.main(["--target", "ccache", "--file", str(script)])
     assert rc == 1
     assert not out.exists() or "changed=true" not in out.read_text()

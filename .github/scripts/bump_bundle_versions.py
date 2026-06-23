@@ -2,9 +2,9 @@
 """Bump pinned bundled dependencies in build-scripts/prepare_bundle.sh.
 
 Run nightly by .github/workflows/bump-bundle-versions.yml, once per target
-(`--target python` and `--target mingit`). Each resolves the latest upstream
-release, rewrites the pinned values in prepare_bundle.sh, and emits GitHub
-Actions outputs that the workflow turns into its own pull request.
+(`--target python`, `--target mingit` and `--target ccache`). Each resolves the
+latest upstream release, rewrites the pinned values in prepare_bundle.sh, and
+emits GitHub Actions outputs that the workflow turns into its own pull request.
 
 Python policy: PBS_VERSION (the build-date tag) always moves to the latest
 release; PYTHON_VERSION only takes a newer *patch* within the currently pinned
@@ -14,6 +14,10 @@ ESPHome/PlatformIO. A deliberate minor bump stays a manual change.
 MinGit policy: always track the latest git-for-windows release. Git is invoked
 as a subprocess, so a new minor or major won't break ESPHome/PlatformIO the way
 a Python minor could, and Git for Windows only maintains the newest line.
+
+ccache policy: always track the latest ccache release. Like git it's invoked as
+a subprocess (a compiler cache), so a new version can't break ESPHome the way a
+Python minor could.
 
 The script fails loudly (non-zero exit) if the expected variables aren't found
 in prepare_bundle.sh, or if the latest upstream release can't be resolved —
@@ -30,6 +34,7 @@ Usage (GITHUB_TOKEN keeps the API calls off the anonymous rate limit):
 
     GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py --target python
     GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py --target mingit
+    GITHUB_TOKEN=... python3 .github/scripts/bump_bundle_versions.py --target ccache
 """
 
 from __future__ import annotations
@@ -64,6 +69,12 @@ MINGIT_ASSET_RE = re.compile(r"MinGit-(?P<ver>[\d.]+)-64-bit\.zip")
 # a GNU patch.exe from it (issue #189); pinning it to the same release as MinGit
 # keeps patch.exe ABI-matched to MinGit's msys-2.0.dll.
 PORTABLEGIT_ASSET_RE = re.compile(r"PortableGit-(?P<ver>[\d.]+)-64-bit\.7z\.exe")
+
+CCACHE_REPO = "ccache/ccache"
+
+# The x86_64 Windows ccache zip. The version token is digits/dots only, so the
+# aarch64 sibling and the `.zip.minisig` signature can't match.
+CCACHE_ASSET_RE = re.compile(r"ccache-(?P<ver>[\d.]+)-windows-x86_64\.zip")
 
 # Per-request network timeout. A stalled connection otherwise blocks the nightly
 # job until the workflow's multi-hour default timeout fires; failing fast lets
@@ -302,7 +313,10 @@ def _asset_sha256(asset: dict[str, Any]) -> str:
 
 
 def _find_asset(
-    release: dict[str, Any], pattern: re.Pattern[str], label: str
+    release: dict[str, Any],
+    pattern: re.Pattern[str],
+    label: str,
+    repo: str = GFW_REPO,
 ) -> tuple[str, str, str]:
     """Return `(version, url, sha256)` for the asset matching `pattern`."""
     for asset in release.get("assets", []):
@@ -310,7 +324,7 @@ def _find_asset(
         if m is not None:
             return m.group("ver"), asset["browser_download_url"], _asset_sha256(asset)
     raise ResolutionError(
-        f"no {label} asset in {GFW_REPO} release {release.get('tag_name')!r}"
+        f"no {label} asset in {repo} release {release.get('tag_name')!r}"
     )
 
 
@@ -327,6 +341,18 @@ def resolve_latest_mingit() -> tuple[str, str, str, str, str]:
     version, mingit_url, mingit_sha = _find_asset(release, MINGIT_ASSET_RE, "MinGit")
     _, pg_url, pg_sha = _find_asset(release, PORTABLEGIT_ASSET_RE, "PortableGit")
     return version, mingit_url, mingit_sha, pg_url, pg_sha
+
+
+def resolve_latest_ccache() -> tuple[str, str, str]:
+    """Resolve the x86_64 Windows ccache asset from the latest ccache release.
+
+    Returns `(version, url, sha256)`. ccache publishes no SHA256SUMS file (only
+    a per-asset `.minisig`), so the digest comes from the asset metadata when
+    GitHub reports it and is otherwise computed by streaming the zip — either
+    way prepare_bundle.sh re-verifies it at build time.
+    """
+    release = _api_get(f"https://api.github.com/repos/{CCACHE_REPO}/releases/latest")
+    return _find_asset(release, CCACHE_ASSET_RE, "ccache", repo=CCACHE_REPO)
 
 
 # --------------------------------------------------------------------------- #
@@ -434,6 +460,30 @@ def resolve_mingit_bump(text: str) -> tuple[BumpResult, str]:
     return result, f"Bump bundled MinGit to {version}"
 
 
+def resolve_ccache_bump(text: str) -> tuple[BumpResult, str]:
+    """Resolve the latest ccache and compute the bump over `text`."""
+    current = read_assignment(text, "CCACHE_VERSION")
+    version, url, sha256 = resolve_latest_ccache()
+    # ccache releases move forward, so a resolved version older than the current
+    # pin means upstream republished an old tag as `latest` or unpublished a
+    # release. Fail loudly rather than open a PR moving bundled ccache backwards
+    # (the sha would verify fine against a genuine older release).
+    if _version_tuple(version) < _version_tuple(current):
+        raise ResolutionError(
+            f"latest ccache {version} is older than the pinned {current}; "
+            "refusing to downgrade"
+        )
+    result = apply_bumps(
+        text,
+        {
+            "CCACHE_VERSION": version,
+            "CCACHE_URL": url,
+            "CCACHE_SHA256": sha256,
+        },
+    )
+    return result, f"Bump bundled ccache to {version}"
+
+
 # Resolves the latest upstream release and computes the bump over the file text.
 _Resolver = Callable[[str], tuple[BumpResult, str]]
 
@@ -456,6 +506,11 @@ TARGETS: dict[str, tuple[tuple[str, ...], _Resolver, str]] = {
         ),
         resolve_mingit_bump,
         "MinGit (Git for Windows)",
+    ),
+    "ccache": (
+        ("CCACHE_VERSION", "CCACHE_URL", "CCACHE_SHA256"),
+        resolve_ccache_bump,
+        "ccache",
     ),
 }
 
