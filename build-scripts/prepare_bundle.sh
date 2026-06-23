@@ -54,8 +54,8 @@ PORTABLEGIT_SHA256="bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897
 # `ccache.exe` (no DLLs) under a versioned dir; we extract just that exe.
 # CCACHE_VERSION is display-only; CCACHE_URL is the literal asset URL. There is
 # no upstream checksum file (only minisig), so CCACHE_SHA256 is computed from the
-# pinned asset. Bump all three together when adopting a newer ccache (unlike
-# MINGIT_*, these are not yet wired into the nightly bump_bundle_versions.py job).
+# pinned asset. All three are rewritten by the nightly
+# `bump_bundle_versions.py --target ccache` job.
 CCACHE_VERSION="4.13.6"
 CCACHE_URL="https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-windows-x86_64.zip"
 CCACHE_SHA256="3d7cebb05850ad704e197b3f1d3f0f924ab6c9fdfc561578e146184fe9d89380"
