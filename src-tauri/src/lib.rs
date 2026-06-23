@@ -301,6 +301,15 @@ pub fn run(cli: Cli) {
                 error!("Failed to add Homebrew to PATH: {}", e);
             }
 
+            // Make the bundled ccache discoverable to the ESPHome backend on
+            // Windows so ESP-IDF builds enable compiler caching automatically.
+            // Prepends to PATH like the git setup above; no-op elsewhere. Runs
+            // before the daemon task spawns so the child inherits it.
+            // Log-and-continue: builds just run without caching on failure.
+            if let Err(e) = platform::ensure_ccache_on_path(app.handle()) {
+                error!("Failed to set up bundled ccache: {}", e);
+            }
+
             // One-shot prompt to remove the pre-rename `/Applications/ESPHome Builder.app`.
             // No-op on non-macOS and after the user has answered once.
             platform::cleanup_legacy_macos_app(app.handle());

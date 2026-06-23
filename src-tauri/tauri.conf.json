@@ -45,7 +45,8 @@
     },
     "resources": [
       "python",
-      "git"
+      "git",
+      "ccache"
     ]
   },
   "plugins": {

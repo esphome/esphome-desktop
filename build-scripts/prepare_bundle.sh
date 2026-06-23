@@ -45,11 +45,27 @@ MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
 PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
 PORTABLEGIT_SHA256="bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
+# ccache is bundled on Windows only. ESPHome's ESP-IDF builds auto-enable ccache
+# when the `ccache` binary is on PATH, which roughly halves repeat-build times;
+# Windows ships no ccache and users rarely install one, so we bundle the official
+# static Windows build and put it on PATH at runtime. macOS finds a brew-installed
+# ccache via the appended Homebrew PATH, and Linux users install it from their
+# distro, so neither bundles it. The Windows release zip nests a single static
+# `ccache.exe` (no DLLs) under a versioned dir; we extract just that exe.
+# CCACHE_VERSION is display-only; CCACHE_URL is the literal asset URL. There is
+# no upstream checksum file (only minisig), so CCACHE_SHA256 is computed from the
+# pinned asset. Bump all three together when adopting a newer ccache (unlike
+# MINGIT_*, these are not yet wired into the nightly bump_bundle_versions.py job).
+CCACHE_VERSION="4.13.6"
+CCACHE_URL="https://github.com/ccache/ccache/releases/download/v4.13.6/ccache-4.13.6-windows-x86_64.zip"
+CCACHE_SHA256="3d7cebb05850ad704e197b3f1d3f0f924ab6c9fdfc561578e146184fe9d89380"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 BUNDLE_DIR="$PROJECT_DIR/src-tauri/python"
 GIT_BUNDLE_DIR="$PROJECT_DIR/src-tauri/git"
+CCACHE_BUNDLE_DIR="$PROJECT_DIR/src-tauri/ccache"
 
 detect_platform() {
     local os=$(uname -s)
@@ -311,6 +327,104 @@ EOF
     "$patch_dir/patch.exe" --version
 }
 
+# Stage ccache into $CCACHE_BUNDLE_DIR (src-tauri/ccache), bundled as a Tauri
+# resource. At runtime the app prepends this dir to PATH so ESPHome's ESP-IDF
+# builds discover ccache and turn caching on automatically.
+#
+# Windows: download the pinned ccache zip, verify its SHA-256, and extract just
+# the single static ccache.exe (the zip also carries docs/license we don't ship).
+#
+# Other platforms: leave an empty directory so the "ccache" resource path in
+# tauri.conf.json resolves; ccache is never bundled there (macOS finds a brew
+# ccache via the appended Homebrew PATH, Linux installs it from the distro).
+prepare_ccache_for_platform() {
+    local platform="$1"
+
+    rm -rf "$CCACHE_BUNDLE_DIR"
+    mkdir -p "$CCACHE_BUNDLE_DIR"
+
+    if [[ "$platform" != "windows-x64" ]]; then
+        echo ""
+        echo "=== Skipping ccache bundle (${platform}); empty ccache/ placeholder created ==="
+        return
+    fi
+
+    # Cache under $BUILD_DIR (which we own) rather than world-writable /tmp, same
+    # as the MinGit download.
+    local temp_file="$BUILD_DIR/$(basename "$CCACHE_URL")"
+
+    echo ""
+    echo "=== Downloading ccache ${CCACHE_VERSION} ==="
+    if [[ -f "$temp_file" ]]; then
+        echo "Using cached download: $temp_file"
+        verify_sha256 "$temp_file" "$CCACHE_SHA256"
+    else
+        # `--fail`/`--retry` and the .partial->rename dance mirror the MinGit
+        # download so an interrupted or corrupt fetch never becomes a sticky,
+        # always-failing cache entry.
+        curl -fL --retry 3 -o "${temp_file}.partial" "$CCACHE_URL"
+        verify_sha256 "${temp_file}.partial" "$CCACHE_SHA256"
+        mv -f "${temp_file}.partial" "$temp_file"
+    fi
+
+    echo ""
+    echo "=== Extracting ccache.exe into ${CCACHE_BUNDLE_DIR} ==="
+    # Extract with the standalone Python we just unpacked rather than `unzip`,
+    # which isn't shipped on the Windows runner (same reasoning as MinGit). The
+    # zip nests ccache.exe (plus docs and the license) under a versioned dir, so
+    # extract to a temp dir then copy just the exe and the license into the flat
+    # bundle dir.
+    local python_exe="$BUILD_DIR/python-${platform}/python.exe"
+    if [[ ! -f "$python_exe" ]]; then
+        echo "Bundled Python not found at $python_exe; cannot extract ccache"
+        exit 1
+    fi
+    local extract_dir="$BUILD_DIR/ccache-extract"
+    rm -rf "$extract_dir"
+    "$python_exe" -m zipfile -e "$temp_file" "$extract_dir"
+
+    # Require exactly one ccache.exe so a future zip layout change (extra arch,
+    # helper exe) fails loudly here rather than silently bundling whichever copy
+    # `find` happened to list first.
+    local -a exe_matches=()
+    while IFS= read -r match; do
+        exe_matches+=("$match")
+    done < <(find "$extract_dir" -type f -name ccache.exe)
+    if [[ ${#exe_matches[@]} -ne 1 ]]; then
+        echo "ERROR: expected exactly one ccache.exe in $CCACHE_URL, found ${#exe_matches[@]}" >&2
+        exit 1
+    fi
+    local ccache_src_dir
+    ccache_src_dir=$(dirname "${exe_matches[0]}")
+    cp "${exe_matches[0]}" "$CCACHE_BUNDLE_DIR/ccache.exe"
+
+    # ccache is GPLv3, so ship its full license text (carried in the release zip)
+    # next to the binary, not just a pointer, to satisfy the redistribution
+    # terms. Fail if it's missing rather than ship an unlicensed binary.
+    if [[ ! -f "$ccache_src_dir/LICENSE.md" ]]; then
+        echo "ERROR: LICENSE.md not found beside ccache.exe in $CCACHE_URL" >&2
+        exit 1
+    fi
+    cp "$ccache_src_dir/LICENSE.md" "$CCACHE_BUNDLE_DIR/LICENSE.md"
+
+    cat > "$CCACHE_BUNDLE_DIR/THIRD_PARTY_NOTICES.txt" <<EOF
+This directory contains an unmodified ccache.exe taken from the official ccache
+release (${CCACHE_URL}):
+
+  ccache.exe        ccache             GPLv3
+
+It is redistributed under its license (see the bundled LICENSE.md) and is
+invoked as a separate process (compiler cache) by ESPHome's build. Corresponding
+source is available from the ccache release above and
+https://github.com/ccache/ccache.
+EOF
+
+    # Smoke-test: prove ccache runs, so a broken extract fails the build here
+    # rather than shipping a ccache.exe that won't launch on a user's machine.
+    echo "=== Verifying bundled ccache.exe ==="
+    "$CCACHE_BUNDLE_DIR/ccache.exe" --version
+}
+
 # Rewrite pip-generated script shebangs so the bundle is relocatable.
 # pip bakes the build-time python path into every console-script shebang
 # (`#!$python_dir/bin/python3`), so when the bundle ships to a user's
@@ -454,6 +568,7 @@ mkdir -p "$BUILD_DIR"
 
 prepare_python_for_platform "$PLATFORM"
 prepare_git_for_platform "$PLATFORM"
+prepare_ccache_for_platform "$PLATFORM"
 
 PYTHON_DIR="$BUILD_DIR/python-${PLATFORM}"
 
@@ -473,6 +588,8 @@ echo "Size: $BUNDLE_SIZE"
 if [[ "$PLATFORM" == "windows-x64" ]]; then
     GIT_BUNDLE_SIZE=$(du -sh "$GIT_BUNDLE_DIR" | cut -f1)
     echo "Bundled git: $GIT_BUNDLE_DIR ($GIT_BUNDLE_SIZE)"
+    CCACHE_BUNDLE_SIZE=$(du -sh "$CCACHE_BUNDLE_DIR" | cut -f1)
+    echo "Bundled ccache: $CCACHE_BUNDLE_DIR ($CCACHE_BUNDLE_SIZE)"
 fi
 echo ""
 echo "You can now run 'cargo tauri build' to create the app bundle."
