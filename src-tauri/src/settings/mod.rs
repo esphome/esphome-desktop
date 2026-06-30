@@ -438,7 +438,11 @@ mod tests {
         // A port above u16::MAX or a non-numeric value must fall back to the
         // default instead of failing the whole parse and discarding every other
         // preference via corrupt-file recovery.
-        for body in [r#"{"port":70000}"#, r#"{"port":"6052"}"#, r#"{"port":null}"#] {
+        for body in [
+            r#"{"port":70000}"#,
+            r#"{"port":"6052"}"#,
+            r#"{"port":null}"#,
+        ] {
             let dir = unique_temp_dir("bad_port");
             let path = dir.join("settings.json");
             fs::write(&path, body).expect("write settings");
@@ -446,7 +450,10 @@ mod tests {
             let settings = load_settings_file(&path);
 
             assert_eq!(settings.port, DEFAULT_PORT, "body: {body}");
-            assert!(!path.with_extension("json.corrupt").exists(), "body: {body}");
+            assert!(
+                !path.with_extension("json.corrupt").exists(),
+                "body: {body}"
+            );
 
             let _ = fs::remove_dir_all(&dir);
         }
