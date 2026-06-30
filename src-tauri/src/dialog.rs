@@ -1,7 +1,7 @@
 //! Small helpers around `tauri-plugin-dialog`.
 
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// Show a modal two-button confirmation dialog and wait for the user's choice.
 ///
@@ -31,4 +31,27 @@ pub(crate) async fn confirm(
     })
     .await
     .unwrap_or(false)
+}
+
+/// Show a modal single-button notice (informational or error) and wait for the
+/// user to dismiss it. Like [`confirm`], `blocking_show` is synchronous so it
+/// runs on a blocking thread; the result is discarded since a notice has nothing
+/// to report back. A join error just means the dialog never showed, which is
+/// fine for a best-effort notice.
+pub(crate) async fn notice(
+    app_handle: &AppHandle,
+    title: &str,
+    message: String,
+    kind: MessageDialogKind,
+) {
+    let app = app_handle.clone();
+    let title = title.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .message(message)
+            .title(title)
+            .kind(kind)
+            .blocking_show()
+    })
+    .await;
 }

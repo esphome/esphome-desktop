@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{debug, error, info, warn};
@@ -83,16 +83,13 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             let current = app_handle.package_info().version.to_string();
             info!("Desktop app is up to date ({})", current);
             if show_no_update_dialog {
-                let dialog_app = app_handle.clone();
                 let msg = format!("ESPHome Device Builder {} is the latest version.", current);
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .kind(MessageDialogKind::Info)
-                        .title("No Updates Available")
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    "No Updates Available",
+                    msg,
+                    MessageDialogKind::Info,
+                )
                 .await;
             }
             NextStep::Continue
@@ -228,16 +225,8 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
                 "ESPHome Device Builder {} has been installed.\n\nESPHome Builder will now restart to apply the update.",
                 new_version
             );
-            let notice_app = app_handle.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                notice_app
-                    .dialog()
-                    .message(msg)
-                    .kind(MessageDialogKind::Info)
-                    .title("Update Installed")
-                    .blocking_show()
-            })
-            .await;
+            crate::dialog::notice(app_handle, "Update Installed", msg, MessageDialogKind::Info)
+                .await;
 
             info!("Restarting to apply desktop update");
             app_handle.restart();
@@ -267,15 +256,12 @@ async fn restore_backend(app_handle: &AppHandle) {
 }
 
 async fn show_error(app_handle: &AppHandle, msg: String) {
-    let dialog_app = app_handle.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        dialog_app
-            .dialog()
-            .message(msg)
-            .kind(MessageDialogKind::Error)
-            .title("Update Check Failed")
-            .blocking_show();
-    })
+    crate::dialog::notice(
+        app_handle,
+        "Update Check Failed",
+        msg,
+        MessageDialogKind::Error,
+    )
     .await;
 }
 
