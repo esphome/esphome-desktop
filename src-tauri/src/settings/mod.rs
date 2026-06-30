@@ -80,6 +80,26 @@ where
     })
 }
 
+/// Deserialize the dashboard port, falling back to the default for a zero,
+/// out-of-range, or non-numeric value.
+///
+/// Port `0` is the dangerous case: a server reads it as "pick any free
+/// ephemeral port," but this app uses the configured value verbatim for the
+/// health check (`health_check_url`) and the dashboard URL it opens, never the
+/// port the backend actually bound. A persisted `{"port": 0}` (hand-edited
+/// file) would therefore leave the dashboard permanently unreachable with no
+/// visible error. A non-number (null, string, bool from a hand-edited or future
+/// file) likewise falls back here rather than failing the whole parse and
+/// discarding every other preference via the corrupt-file recovery path.
+fn deserialize_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    let port = raw.as_u64().and_then(|n| u16::try_from(n).ok()).unwrap_or(0);
+    Ok(if port == 0 { DEFAULT_PORT } else { port })
+}
+
 /// Returns true if the persisted settings file selects the removed classic
 /// dashboard backend. Used at startup to force a fresh bundled device builder
 /// for users migrating off classic. Tolerant of a missing or unreadable file.
@@ -104,7 +124,7 @@ pub fn persisted_backend_was_classic(app_handle: &AppHandle) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Dashboard port
-    #[serde(default = "default_port")]
+    #[serde(default = "default_port", deserialize_with = "deserialize_port")]
     pub port: u16,
 
     /// Custom config directory (None = use default)
@@ -392,6 +412,44 @@ mod tests {
         assert!(!path.with_extension("json.corrupt").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zero_port_falls_back_to_default() {
+        // A persisted port of 0 would leave the dashboard unreachable: the app
+        // uses the configured value for the health check and dashboard URL, not
+        // the ephemeral port the backend would actually bind. Normalize it to
+        // the default while keeping every other preference.
+        let dir = unique_temp_dir("zero_port");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"port":0,"backend":"builder_stable"}"#).expect("write settings");
+
+        let settings = load_settings_file(&path);
+
+        assert_eq!(settings.port, DEFAULT_PORT);
+        assert_eq!(settings.backend, Backend::BuilderStable);
+        assert!(!path.with_extension("json.corrupt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn out_of_range_or_non_numeric_port_falls_back_to_default() {
+        // A port above u16::MAX or a non-numeric value must fall back to the
+        // default instead of failing the whole parse and discarding every other
+        // preference via corrupt-file recovery.
+        for body in [r#"{"port":70000}"#, r#"{"port":"6052"}"#, r#"{"port":null}"#] {
+            let dir = unique_temp_dir("bad_port");
+            let path = dir.join("settings.json");
+            fs::write(&path, body).expect("write settings");
+
+            let settings = load_settings_file(&path);
+
+            assert_eq!(settings.port, DEFAULT_PORT, "body: {body}");
+            assert!(!path.with_extension("json.corrupt").exists(), "body: {body}");
+
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
