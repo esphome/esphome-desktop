@@ -74,6 +74,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
+    # The slowest job (macOS) runs ~13 min; cap well above that so a hung step
+    # fails fast instead of running out the 360 minute default.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
