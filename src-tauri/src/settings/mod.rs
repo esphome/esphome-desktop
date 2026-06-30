@@ -96,7 +96,10 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = serde_json::Value::deserialize(deserializer)?;
-    let port = raw.as_u64().and_then(|n| u16::try_from(n).ok()).unwrap_or(0);
+    let port = raw
+        .as_u64()
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
     Ok(if port == 0 { DEFAULT_PORT } else { port })
 }
 
