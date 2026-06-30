@@ -74,6 +74,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
+    # The slowest job (macOS) runs ~13 min; cap well above that so a hung step
+    # fails fast instead of running out the 360 minute default.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -203,6 +206,18 @@ jobs:
         run: ./build-scripts/sign_python_bundle.sh
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      # The Tauri AppImage fork downloads quick-sharun.sh from upstream main and
+      # runs it during the build. Its strace step backgrounds each traced binary
+      # and kills it via `set -m` job control, which silently no-ops on tty-less
+      # CI runners, so webkit2gtk's MiniBrowser never dies and the build hangs
+      # until timeout (pkgforge-dev/Anylinux-AppImages regression, late June).
+      # Pre-stage a copy pinned to a known commit, patched to bound each trace
+      # with `timeout` instead, so the bundler reuses ours (it only downloads
+      # when the file is absent).
+      - name: Stage patched quick-sharun (AppImage strace hang fix)
+        if: contains(matrix.bundles, 'appimage')
+        run: ./build-scripts/stage_quick_sharun.sh
 
       # Build step - Linux with special env var
       - name: Build (Linux CI)
