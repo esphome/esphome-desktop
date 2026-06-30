@@ -215,22 +215,32 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     match result {
         Ok(()) => {
             info!("Desktop update {} installed", new_version);
+            // Always relaunch after a successful install rather than offering to
+            // defer. The install replaced the .app bundle under the still-running
+            // process; on macOS that orphans the app's Local Network (mDNS) grant,
+            // and since the bundled backend's multicast discovery is attributed to
+            // this parent process, merely restarting the backend can't recover it
+            // (see Info.plist `NSLocalNetworkUsageDescription`). A full relaunch is
+            // the only way to put the user on a process that matches the freshly
+            // installed bundle, so we make it unconditional. The dialog is now
+            // informational (single OK) just to explain the restart.
             let msg = format!(
-                "ESPHome Device Builder {} has been installed.\n\nRestart now to use the new version?",
+                "ESPHome Device Builder {} has been installed.\n\nESPHome Builder will now restart to apply the update.",
                 new_version
             );
-            let restart =
-                crate::dialog::confirm(app_handle, "Update Installed", msg, "Restart Now", "Later")
-                    .await;
+            let notice_app = app_handle.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                notice_app
+                    .dialog()
+                    .message(msg)
+                    .kind(MessageDialogKind::Info)
+                    .title("Update Installed")
+                    .blocking_show()
+            })
+            .await;
 
-            if restart {
-                info!("Restarting to apply desktop update");
-                app_handle.restart();
-            } else {
-                // User deferred the restart; bring the backend back so the
-                // freshly installed dashboard is usable until they relaunch.
-                restore_backend(app_handle).await;
-            }
+            info!("Restarting to apply desktop update");
+            app_handle.restart();
         }
         Err(e) => {
             error!("Desktop update install failed: {}", e);
@@ -241,9 +251,11 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
 }
 
 /// Bring the backend back up when we're not restarting the whole app. We stop
-/// it before installing, so without this a failed install (or a user who defers
-/// the post-install restart) would leave the running app with no dashboard.
-/// Best-effort: restart it and restore the tray status.
+/// it before installing, so on a failed install — where the bundle was not
+/// replaced and the running process is still valid — without this the running
+/// app would be left with no dashboard. (A successful install always relaunches,
+/// so it never takes this path.) Best-effort: restart it and restore the tray
+/// status.
 async fn restore_backend(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
         info!("Restarting ESPHome backend after desktop update");
