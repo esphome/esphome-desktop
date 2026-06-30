@@ -31,9 +31,9 @@ BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download
 # encode their build number differently in the tag and the filename (e.g. tag
 # v2.53.0.windows.3 ships MinGit-2.53.0.3-64-bit.zip). All three are rewritten
 # by the nightly `bump_bundle_versions.py --target mingit` job.
-MINGIT_VERSION="2.54.0"
-MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/MinGit-2.54.0-64-bit.zip"
-MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
+MINGIT_VERSION="2.55.0"
+MINGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.1/MinGit-2.55.0-64-bit.zip"
+MINGIT_SHA256="31497e7968196332263459ee319d2524e3ebc5786ab895e2abad34ffdd4f4ebf"
 
 # PortableGit is downloaded (Windows only) solely to harvest a GNU `patch.exe`:
 # MinGit doesn't ship one, but the esphome micro-opus component's ESP-IDF build
@@ -42,8 +42,8 @@ MINGIT_SHA256="04f937e1f0918b17b9be6f2294cb2bb66e96e1d9832d1c298e2de088a1d0e668"
 # dir rather than bundling the ~300MB PortableGit tree. Pinned to the same
 # git-for-windows release as MinGit so patch.exe and msys-2.0.dll match, and
 # rewritten alongside MINGIT_* by the nightly `bump_bundle_versions.py` job.
-PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe"
-PORTABLEGIT_SHA256="bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
+PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.1/PortableGit-2.55.0-64-bit.7z.exe"
+PORTABLEGIT_SHA256="dfa8cad3ce7e685b9bfbbb2125afcf7c68d4f53490426702ffac367dac62e928"
 
 # ccache is bundled on Windows only. ESPHome's ESP-IDF builds auto-enable ccache
 # when the `ccache` binary is on PATH, which roughly halves repeat-build times;
