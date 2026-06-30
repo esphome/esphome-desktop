@@ -445,6 +445,8 @@ mod tests {
             r#"{"port":70000}"#,
             r#"{"port":"6052"}"#,
             r#"{"port":null}"#,
+            r#"{"port":true}"#,
+            r#"{"port":-1}"#,
         ] {
             let dir = unique_temp_dir("bad_port");
             let path = dir.join("settings.json");
