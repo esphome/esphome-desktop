@@ -4,5 +4,27 @@
 <dict>
     <key>LSUIElement</key>
     <true/>
+    <!--
+      Local Network privacy (macOS 15+, enforced for all apps on macOS 26):
+      the bundled Python backend uses mDNS/zeroconf (raw multicast on UDP 5353).
+      That child process's Local Network access is attributed to this app bundle,
+      so the usage string must live here. Declaring it binds a durable grant to
+      the app identity; without it the implicit grant is lost when the updater
+      replaces the .app in place, breaking discovery until a full relaunch.
+
+      NSBonjourServices lists every service type the backend browses or
+      advertises: _esphomelib._tcp (ESPHome devices it discovers and the device
+      state monitor), _esphomebuilder._tcp (the dashboard's own advertised
+      service, also browsed for cross-subnet remote-build pairing), and
+      _http._tcp (browsed alongside _esphomelib by the device state monitor).
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ESPHome Device Builder discovers ESPHome devices on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_esphomelib._tcp</string>
+        <string>_esphomebuilder._tcp</string>
+        <string>_http._tcp</string>
+    </array>
 </dict>
 </plist>
