@@ -1232,21 +1232,20 @@ mod macos {
             tracing::warn!("Could not resolve .app bundle path; falling back to direct restart");
             return false;
         };
-        let Some(bundle_str) = bundle.to_str() else {
-            tracing::warn!("Bundle path is not valid UTF-8; falling back to direct restart");
-            return false;
-        };
         let pid = std::process::id();
         // Poll our PID; once it's gone, LaunchServices-launch a fresh instance so
-        // it (and its backend child) is the TCC-responsible process again.
-        let script = format!(
-            "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open \"{bundle_str}\""
-        );
-        // Own process group so it outlives us cleanly and isn't caught by any
-        // signal aimed at our group during shutdown.
+        // it (and its backend child) is the TCC-responsible process again. Pass
+        // the PID and bundle path as argv positionals ($1/$2) rather than
+        // interpolating them into the script, so the shell never parses the path
+        // — a `.app` path with spaces or shell metacharacters can't break the
+        // relaunch or inject a command. Own process group so the watcher outlives
+        // us cleanly and isn't caught by any signal aimed at our group.
         match Command::new("/bin/sh")
             .arg("-c")
-            .arg(script)
+            .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#)
+            .arg("sh") // $0
+            .arg(pid.to_string()) // $1
+            .arg(&bundle) // $2, passed as an OsStr — no UTF-8 requirement
             .process_group(0)
             .spawn()
         {
