@@ -222,7 +222,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             // installed bundle, so we make it unconditional. The dialog is now
             // informational (single OK) just to explain the restart.
             let msg = format!(
-                "ESPHome Device Builder {} has been installed.\n\nESPHome Builder will now restart to apply the update.",
+                "ESPHome Device Builder {} has been installed.\n\nIt will now restart to apply the update.",
                 new_version
             );
             crate::dialog::notice(app_handle, "Update Installed", msg, MessageDialogKind::Info)

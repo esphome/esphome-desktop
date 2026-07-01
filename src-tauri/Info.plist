@@ -19,7 +19,7 @@
       _http._tcp (browsed alongside _esphomelib by the device state monitor).
     -->
     <key>NSLocalNetworkUsageDescription</key>
-    <string>ESPHome Builder discovers ESPHome devices on your local network.</string>
+    <string>ESPHome Device Builder discovers ESPHome devices on your local network.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_esphomelib._tcp</string>
