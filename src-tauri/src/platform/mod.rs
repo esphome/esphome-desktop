@@ -1195,7 +1195,6 @@ pub fn relaunch_for_update(app_handle: &AppHandle) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::os::fd::IntoRawFd;
     use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
@@ -1245,7 +1244,7 @@ mod macos {
             .arg("-c")
             .arg(r#"cat >/dev/null; exec /usr/bin/open "$1""#)
             .arg("sh") // $0
-            .arg(&bundle) // $1, passed as an OsStr — no UTF-8 requirement
+            .arg(&bundle) // $1, a positional the shell never parses (also fine if non-UTF-8)
             .stdin(Stdio::piped())
             .process_group(0)
             .spawn()
@@ -1261,7 +1260,7 @@ mod macos {
         // dropped it here the watcher would fire immediately, racing our own
         // still-running instance against single-instance.
         if let Some(stdin) = child.stdin.take() {
-            let _ = stdin.into_raw_fd();
+            std::mem::forget(stdin);
         }
         true
     }
