@@ -1170,8 +1170,34 @@ pub fn init(app_handle: &AppHandle) {
     linux::init();
 }
 
+/// Relaunch the app after a desktop update.
+///
+/// On macOS this goes through LaunchServices (`open`) instead of Tauri's
+/// [`tauri::AppHandle::restart`], which respawns the inner Mach-O directly. A
+/// directly respawned instance is not the LaunchServices-launched, TCC
+/// "responsible" process, so the bundled Python backend it spawns is not covered
+/// by the app's Local Network grant: its mDNS multicast then fails with
+/// `EHOSTUNREACH` ("No route to host") until the user manually relaunches.
+/// Reopening via LaunchServices gives the new instance the correct
+/// responsibility, so device discovery works immediately after an update. Other
+/// platforms keep `restart()` (Local Network privacy is macOS-only).
+pub fn relaunch_for_update(app_handle: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    if macos::spawn_launchservices_relaunch() {
+        // The watcher reopens us once we're gone; exit cleanly so it can.
+        app_handle.exit(0);
+        return;
+    }
+    // Non-macOS, or the LaunchServices path couldn't be set up: fall back to
+    // Tauri's direct relaunch (diverges).
+    app_handle.restart();
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::os::unix::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
     use tauri::{ActivationPolicy, AppHandle};
 
     pub fn init(app_handle: &AppHandle) {
@@ -1180,6 +1206,63 @@ mod macos {
         if let Err(e) = app_handle.set_activation_policy(ActivationPolicy::Accessory) {
             tracing::warn!("Failed to set macOS activation policy to Accessory: {e}");
         }
+    }
+
+    /// Resolve the `.app` bundle directory from the running executable
+    /// (`<name>.app/Contents/MacOS/<bin>` -> `<name>.app`).
+    fn app_bundle_path() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // ancestors(): <bin>, MacOS, Contents, <name>.app
+        let bundle = exe.ancestors().nth(3)?;
+        if bundle.extension().and_then(|e| e.to_str()) == Some("app") {
+            Some(bundle.to_path_buf())
+        } else {
+            None
+        }
+    }
+
+    /// Spawn a detached watcher that waits for this process to exit, then
+    /// relaunches the app through LaunchServices (`open`). We wait first because
+    /// `tauri-plugin-single-instance` would make a second instance started while
+    /// we're still quitting forward-and-exit instead of taking over. Returns
+    /// `false` (so the caller falls back to `restart()`) when the bundle path
+    /// can't be resolved or the watcher can't be spawned.
+    pub fn spawn_launchservices_relaunch() -> bool {
+        let Some(bundle) = app_bundle_path() else {
+            tracing::warn!("Could not resolve .app bundle path; falling back to direct restart");
+            return false;
+        };
+        // The watcher blocks reading its stdin, which is the read end of a pipe
+        // whose write end this process holds. When we exit, the kernel closes
+        // that write end, `cat` sees EOF, and the watcher relaunches — so it
+        // unblocks exactly when we terminate, with no PID-reuse race and no poll
+        // latency. The bundle path is an argv positional ($1) so the shell never
+        // parses it (spaces/metacharacters can't break the relaunch or inject a
+        // command). Own process group so the watcher outlives us cleanly and
+        // isn't caught by any signal aimed at our group.
+        let mut child = match Command::new("/bin/sh")
+            .arg("-c")
+            .arg(r#"cat >/dev/null; exec /usr/bin/open "$1""#)
+            .arg("sh") // $0
+            .arg(&bundle) // $1, a positional the shell never parses (also fine if non-UTF-8)
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                tracing::warn!("Failed to spawn LaunchServices relaunch watcher: {e}");
+                return false;
+            }
+        };
+        // Intentionally leak the pipe's write end so it stays open until this
+        // process actually exits; that EOF is what releases the watcher. If we
+        // dropped it here the watcher would fire immediately, racing our own
+        // still-running instance against single-instance.
+        if let Some(stdin) = child.stdin.take() {
+            std::mem::forget(stdin);
+        }
+        true
     }
 }
 
