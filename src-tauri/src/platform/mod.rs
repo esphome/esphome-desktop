@@ -1195,9 +1195,10 @@ pub fn relaunch_for_update(app_handle: &AppHandle) {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::os::fd::IntoRawFd;
     use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use tauri::{ActivationPolicy, AppHandle};
 
     pub fn init(app_handle: &AppHandle) {
@@ -1232,29 +1233,37 @@ mod macos {
             tracing::warn!("Could not resolve .app bundle path; falling back to direct restart");
             return false;
         };
-        let pid = std::process::id();
-        // Poll our PID; once it's gone, LaunchServices-launch a fresh instance so
-        // it (and its backend child) is the TCC-responsible process again. Pass
-        // the PID and bundle path as argv positionals ($1/$2) rather than
-        // interpolating them into the script, so the shell never parses the path
-        // — a `.app` path with spaces or shell metacharacters can't break the
-        // relaunch or inject a command. Own process group so the watcher outlives
-        // us cleanly and isn't caught by any signal aimed at our group.
-        match Command::new("/bin/sh")
+        // The watcher blocks reading its stdin, which is the read end of a pipe
+        // whose write end this process holds. When we exit, the kernel closes
+        // that write end, `cat` sees EOF, and the watcher relaunches — so it
+        // unblocks exactly when we terminate, with no PID-reuse race and no poll
+        // latency. The bundle path is an argv positional ($1) so the shell never
+        // parses it (spaces/metacharacters can't break the relaunch or inject a
+        // command). Own process group so the watcher outlives us cleanly and
+        // isn't caught by any signal aimed at our group.
+        let mut child = match Command::new("/bin/sh")
             .arg("-c")
-            .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#)
+            .arg(r#"cat >/dev/null; exec /usr/bin/open "$1""#)
             .arg("sh") // $0
-            .arg(pid.to_string()) // $1
-            .arg(&bundle) // $2, passed as an OsStr — no UTF-8 requirement
+            .arg(&bundle) // $1, passed as an OsStr — no UTF-8 requirement
+            .stdin(Stdio::piped())
             .process_group(0)
             .spawn()
         {
-            Ok(_) => true,
+            Ok(child) => child,
             Err(e) => {
                 tracing::warn!("Failed to spawn LaunchServices relaunch watcher: {e}");
-                false
+                return false;
             }
+        };
+        // Intentionally leak the pipe's write end so it stays open until this
+        // process actually exits; that EOF is what releases the watcher. If we
+        // dropped it here the watcher would fire immediately, racing our own
+        // still-running instance against single-instance.
+        if let Some(stdin) = child.stdin.take() {
+            let _ = stdin.into_raw_fd();
         }
+        true
     }
 }
 
