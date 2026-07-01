@@ -213,13 +213,11 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
         Ok(()) => {
             info!("Desktop update {} installed", new_version);
             // Always relaunch after a successful install rather than offering to
-            // defer. The install replaced the .app bundle under the still-running
-            // process; on macOS that orphans the app's Local Network (mDNS) grant,
-            // and since the bundled backend's multicast discovery is attributed to
-            // this parent process, merely restarting the backend can't recover it
-            // (see Info.plist `NSLocalNetworkUsageDescription`). A full relaunch is
-            // the only way to put the user on a process that matches the freshly
-            // installed bundle, so we make it unconditional. The dialog is now
+            // defer: the install replaced the .app bundle, and the running
+            // process must be replaced by a fresh instance of it. On macOS the
+            // relaunch must go through LaunchServices so the new process (and the
+            // backend child it spawns) keeps the Local Network grant mDNS
+            // discovery needs — see `platform::relaunch_for_update`. The dialog is
             // informational (single OK) just to explain the restart.
             let msg = format!(
                 "ESPHome Device Builder {} has been installed.\n\nIt will now restart to apply the update.",
@@ -228,8 +226,8 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             crate::dialog::notice(app_handle, "Update Installed", msg, MessageDialogKind::Info)
                 .await;
 
-            info!("Restarting to apply desktop update");
-            app_handle.restart();
+            info!("Relaunching to apply desktop update");
+            crate::platform::relaunch_for_update(app_handle);
         }
         Err(e) => {
             error!("Desktop update install failed: {}", e);

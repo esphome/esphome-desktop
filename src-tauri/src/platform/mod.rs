@@ -1170,8 +1170,34 @@ pub fn init(app_handle: &AppHandle) {
     linux::init();
 }
 
+/// Relaunch the app after a desktop update.
+///
+/// On macOS this goes through LaunchServices (`open`) instead of Tauri's
+/// [`tauri::AppHandle::restart`], which respawns the inner Mach-O directly. A
+/// directly respawned instance is not the LaunchServices-launched, TCC
+/// "responsible" process, so the bundled Python backend it spawns is not covered
+/// by the app's Local Network grant: its mDNS multicast then fails with
+/// `EHOSTUNREACH` ("No route to host") until the user manually relaunches.
+/// Reopening via LaunchServices gives the new instance the correct
+/// responsibility, so device discovery works immediately after an update. Other
+/// platforms keep `restart()` (Local Network privacy is macOS-only).
+pub fn relaunch_for_update(app_handle: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    if macos::spawn_launchservices_relaunch() {
+        // The watcher reopens us once we're gone; exit cleanly so it can.
+        app_handle.exit(0);
+        return;
+    }
+    // Non-macOS, or the LaunchServices path couldn't be set up: fall back to
+    // Tauri's direct relaunch (diverges).
+    app_handle.restart();
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::os::unix::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::Command;
     use tauri::{ActivationPolicy, AppHandle};
 
     pub fn init(app_handle: &AppHandle) {
@@ -1179,6 +1205,56 @@ mod macos {
         // doesn't appear in the Dock or the Cmd+Tab switcher.
         if let Err(e) = app_handle.set_activation_policy(ActivationPolicy::Accessory) {
             tracing::warn!("Failed to set macOS activation policy to Accessory: {e}");
+        }
+    }
+
+    /// Resolve the `.app` bundle directory from the running executable
+    /// (`<name>.app/Contents/MacOS/<bin>` -> `<name>.app`).
+    fn app_bundle_path() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        // ancestors(): <bin>, MacOS, Contents, <name>.app
+        let bundle = exe.ancestors().nth(3)?;
+        if bundle.extension().and_then(|e| e.to_str()) == Some("app") {
+            Some(bundle.to_path_buf())
+        } else {
+            None
+        }
+    }
+
+    /// Spawn a detached watcher that waits for this process to exit, then
+    /// relaunches the app through LaunchServices (`open`). We wait first because
+    /// `tauri-plugin-single-instance` would make a second instance started while
+    /// we're still quitting forward-and-exit instead of taking over. Returns
+    /// `false` (so the caller falls back to `restart()`) when the bundle path
+    /// can't be resolved or the watcher can't be spawned.
+    pub fn spawn_launchservices_relaunch() -> bool {
+        let Some(bundle) = app_bundle_path() else {
+            tracing::warn!("Could not resolve .app bundle path; falling back to direct restart");
+            return false;
+        };
+        let Some(bundle_str) = bundle.to_str() else {
+            tracing::warn!("Bundle path is not valid UTF-8; falling back to direct restart");
+            return false;
+        };
+        let pid = std::process::id();
+        // Poll our PID; once it's gone, LaunchServices-launch a fresh instance so
+        // it (and its backend child) is the TCC-responsible process again.
+        let script = format!(
+            "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open \"{bundle_str}\""
+        );
+        // Own process group so it outlives us cleanly and isn't caught by any
+        // signal aimed at our group during shutdown.
+        match Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .spawn()
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("Failed to spawn LaunchServices relaunch watcher: {e}");
+                false
+            }
         }
     }
 }
