@@ -1627,7 +1627,10 @@ mod macos {
             ));
             // The wrapper landed, and the planted symlink's target was never
             // written through nor chmod'd.
-            assert_eq!(fs::read_to_string(bin.join(CLI_NAME)).expect("read"), script);
+            assert_eq!(
+                fs::read_to_string(bin.join(CLI_NAME)).expect("read"),
+                script
+            );
             assert_eq!(
                 fs::read_to_string(&victim).expect("victim"),
                 "untouched",
