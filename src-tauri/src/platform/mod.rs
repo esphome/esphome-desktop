@@ -1355,10 +1355,31 @@ mod macos {
             Err(e) => return Err(e),
         }
         // Write-then-rename so a shell exec'ing the command mid-refresh never
-        // sees a truncated script.
-        let tmp = dir.join(format!(".{CLI_NAME}.tmp"));
-        let write = std::fs::write(&tmp, script)
-            .and_then(|()| std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)))
+        // sees a truncated script. Unlike the final `path`, these dirs can be
+        // group-writable (Homebrew's /usr/local/bin, /opt/homebrew/bin — see
+        // the note on CLI_COMMAND_DIRS), so a *fixed* staging name would let a
+        // co-admin pre-plant it as a symlink that a plain `write` +
+        // path-`set_permissions` would follow to clobber or chmod an arbitrary
+        // file the app can reach. Defeat that with an unpredictable per-process
+        // name plus `create_new` (O_CREAT|O_EXCL), which refuses to open
+        // anything already at the name — a symlink included — and by chmod'ing
+        // the file descriptor rather than the path.
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{CLI_NAME}.{}.{seq}.tmp", std::process::id()));
+        let write = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(script.as_bytes())?;
+                // fchmod on the fd (no symlink follow), widen to the intended
+                // 0o755 only after the content is in place.
+                f.set_permissions(std::fs::Permissions::from_mode(0o755))
+            })
             .and_then(|()| std::fs::rename(&tmp, &path));
         match write {
             Ok(()) => Ok(CommandOutcome::Installed),
@@ -1576,6 +1597,49 @@ mod macos {
             assert_eq!(
                 fs::read_to_string(bin.join(CLI_NAME)).expect("read"),
                 script
+            );
+
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn staging_file_does_not_follow_a_planted_symlink() {
+            // These PATH dirs can be group-writable, so a co-admin could try to
+            // hijack the staging file: pre-plant the old fixed staging name as a
+            // symlink to a file they want the app to clobber/chmod. The install
+            // must not follow it — it stages under an unpredictable name.
+            use std::os::unix::fs::PermissionsExt;
+            let dir = unique_temp_dir("staging_symlink");
+            let bin = bin_dir(&dir);
+            let victim = dir.join("victim");
+            fs::write(&victim, "untouched").expect("victim");
+            let victim_mode_before = fs::metadata(&victim).expect("meta").permissions().mode();
+            // The name a fixed-staging implementation would use.
+            std::os::unix::fs::symlink(&victim, bin.join(format!(".{CLI_NAME}.tmp")))
+                .expect("plant");
+            let script = wrapper_script(Path::new(
+                "/Applications/A.app/Contents/MacOS/esphome-desktop",
+            ));
+
+            assert!(matches!(
+                try_install_command_in(&bin, &script),
+                Ok(CommandOutcome::Installed)
+            ));
+            // The wrapper landed, and the planted symlink's target was never
+            // written through nor chmod'd.
+            assert_eq!(
+                fs::read_to_string(bin.join(CLI_NAME)).expect("read"),
+                script
+            );
+            assert_eq!(
+                fs::read_to_string(&victim).expect("victim"),
+                "untouched",
+                "the staging write must not follow the planted symlink"
+            );
+            assert_eq!(
+                fs::metadata(&victim).expect("meta").permissions().mode(),
+                victim_mode_before,
+                "the staging chmod must not follow the planted symlink"
             );
 
             let _ = fs::remove_dir_all(&dir);
