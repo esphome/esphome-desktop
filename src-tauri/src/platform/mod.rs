@@ -654,16 +654,20 @@ fn snapshot_preserved_versions(
     })
 }
 
-/// Returns `true` if the interpreter can run a trivial script with a clean
-/// exit. A `false` result means the tree is broken badly enough (interpreter
-/// can't spawn or can't execute at all) that the destructive bundled-Python
-/// refresh is the right recovery, rather than deferring forever and leaving a
-/// corrupt tree with no automatic repair path. Used to split a transient probe
-/// error (defer) from a genuinely unusable interpreter (wipe & recover).
+/// Returns `true` if the interpreter can import the metadata machinery the
+/// version probe depends on ([`read_package_version`]'s script starts with
+/// `importlib.metadata`, whose import chain pulls in `re`, `enum`, `types`,
+/// ...). A `false` result means the tree is broken badly enough (interpreter
+/// can't spawn, or its stdlib is corrupt so no probe can ever succeed) that
+/// the destructive bundled-Python refresh is the right recovery, rather than
+/// deferring forever and leaving a corrupt tree with no automatic repair path.
+/// Used to split a transient probe error (defer) from a genuinely unusable
+/// interpreter (wipe & recover). A bare `-c "pass"` is NOT enough here: a
+/// gutted stdlib still executes it cleanly while every import fails.
 #[cfg(not(target_os = "windows"))]
 fn interpreter_is_usable(python_bin: &Path) -> bool {
     let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-c", "pass"]);
+    cmd.args(["-c", "import importlib.metadata"]);
     configure_no_window_command(&mut cmd);
     matches!(cmd.output(), Ok(o) if o.status.success())
 }
@@ -1897,6 +1901,56 @@ mod tests {
             err.to_string().contains("esphome"),
             "error names the package"
         );
+    }
+
+    #[cfg(unix)]
+    fn write_stub_interpreter(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("python3");
+        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_is_usable_false_for_missing_binary() {
+        let base = unique_temp_dir("interp-missing");
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(!interpreter_is_usable(&base.join("python3")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_is_usable_true_for_healthy_interpreter() {
+        let base = unique_temp_dir("interp-healthy");
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = write_stub_interpreter(&base, "exit 0");
+        assert!(interpreter_is_usable(&bin));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_is_usable_false_when_imports_fail() {
+        // Regression test for the corrupt-stdlib shape: an interpreter
+        // whose stdlib is gutted still runs `-c "pass"` cleanly but fails any
+        // import with ModuleNotFoundError. The stub mimics that: clean exit
+        // for trivial scripts, failure the moment the script imports anything.
+        // Such a tree must be judged unusable so the refresh wipes and
+        // re-copies immediately instead of deferring launch after launch.
+        let base = unique_temp_dir("interp-broken-stdlib");
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = write_stub_interpreter(
+            &base,
+            "case \"$2\" in *import*) echo \"ModuleNotFoundError: No module named 'types'\" >&2; exit 1;; esac; exit 0",
+        );
+        assert!(
+            !interpreter_is_usable(&bin),
+            "an interpreter that cannot import its stdlib must not count as usable"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(not(target_os = "windows"))]
