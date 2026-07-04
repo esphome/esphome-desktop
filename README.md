@@ -59,6 +59,28 @@ Right-click (or left-click on some platforms) the tray icon to access:
 - **Restart Dashboard** - Restart the ESPHome process
 - **Quit ESPHome** - Stop the daemon and exit
 
+### Command Line
+
+The tray menu's actions are also available as `esphome-desktop` subcommands,
+which control the running app (useful over SSH, in scripts, or on Linux
+desktops without a tray):
+
+```bash
+esphome-desktop open             # open the dashboard (starts the app if needed)
+esphome-desktop status           # app/backend state, versions, ports, paths (--json for scripts)
+esphome-desktop update           # update the desktop app, ESPHome, and the device builder
+esphome-desktop restart          # restart the dashboard backend
+esphome-desktop logs             # show recent dashboard log output (-f to follow)
+esphome-desktop release-channel  # show the ESPHome channel; pass stable|beta|dev to switch
+esphome-desktop backend          # show the device-builder channel; pass stable|beta to switch
+esphome-desktop startup          # show launch-at-login; pass on|off to change
+esphome-desktop quit             # quit the running app
+```
+
+Unlike the tray's confirmation dialogs, the CLI applies changes immediately;
+running the command is the consent. `logs` and `status` also work when the app
+is not running, and `status` prints the config and log directory paths.
+
 ### Running as a remote builder
 
 To keep a machine acting as an always-on builder, leave **Startup → Launch at Login** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
@@ -213,6 +235,10 @@ SNI (including KDE Plasma). If your desktop has no StatusNotifier host at all
 (some minimal/GNOME setups), the app detects this and falls back to opening the
 dashboard in your browser, and update notifications say so instead of pointing at
 a tray menu that isn't there.
+
+Without a tray you can still control the app from a terminal — see
+[Command Line](#command-line): `esphome-desktop update`, `restart`, `status`,
+`logs`, and the rest cover the tray menu's actions.
 
 If the tray still doesn't appear, install the **deb/rpm/AUR** package for your
 distribution — it depends on the system `libayatana-appindicator3` package, so

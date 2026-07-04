@@ -4,6 +4,7 @@
 //! with system tray integration.
 
 mod app_update;
+mod control;
 mod daemon;
 mod dialog;
 mod git_check;
@@ -40,11 +41,101 @@ pub enum BuilderChannelArg {
     Beta,
 }
 
+impl From<BuilderChannelArg> for Backend {
+    fn from(arg: BuilderChannelArg) -> Self {
+        match arg {
+            BuilderChannelArg::Stable => Backend::BuilderStable,
+            BuilderChannelArg::Beta => Backend::BuilderBeta,
+        }
+    }
+}
+
+/// CLI selector for the ESPHome release channel.
+/// Maps onto [`settings::ReleaseChannel`].
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[value(rename_all = "lowercase")]
+pub enum ReleaseChannelArg {
+    Stable,
+    Beta,
+    Dev,
+}
+
+impl From<ReleaseChannelArg> for settings::ReleaseChannel {
+    fn from(arg: ReleaseChannelArg) -> Self {
+        match arg {
+            ReleaseChannelArg::Stable => Self::Stable,
+            ReleaseChannelArg::Beta => Self::Beta,
+            ReleaseChannelArg::Dev => Self::Dev,
+        }
+    }
+}
+
+/// CLI selector for a boolean setting (`startup on` / `startup off`).
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+#[value(rename_all = "lowercase")]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+/// Subcommands that control an already-running app over the local control
+/// channel instead of launching a new instance. They mirror the tray menu so
+/// systems without a working tray (some Linux desktops) can still drive the
+/// app. See [`control`].
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum CliCommand {
+    /// Open the dashboard in the default browser (starts the app if needed)
+    Open,
+    /// Show or switch the device-builder backend channel
+    Backend {
+        /// New backend channel; omit to show the current one
+        #[arg(value_enum)]
+        channel: Option<BuilderChannelArg>,
+    },
+    /// Show or switch the ESPHome release channel
+    ReleaseChannel {
+        /// New release channel; omit to show the current one
+        #[arg(value_enum)]
+        channel: Option<ReleaseChannelArg>,
+    },
+    /// Show or set whether the app launches at login
+    Startup {
+        /// New state; omit to show the current one
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+    },
+    /// Update the desktop app, ESPHome, and the device builder
+    Update,
+    /// Show recent dashboard log output
+    Logs {
+        /// Keep streaming new log lines
+        #[arg(short, long)]
+        follow: bool,
+        /// Open the logs folder in the file manager instead
+        #[arg(long)]
+        open: bool,
+    },
+    /// Restart the dashboard backend
+    Restart,
+    /// Quit the running app
+    Quit,
+    /// Show app and backend status
+    Status {
+        /// Print the status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// ESPHome Device Builder - System tray application for ESPHome
 #[derive(Parser, Debug, Clone)]
 #[command(name = "esphome-desktop")]
 #[command(about = "ESPHome Device Builder", long_about = None)]
 pub struct Cli {
+    /// Control an already-running app instead of launching one.
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     /// Don't open the dashboard in browser on startup
     #[arg(long = "no-open-dashboard")]
     pub no_open_dashboard: bool,
@@ -61,18 +152,38 @@ pub struct Cli {
     pub builder_channel: BuilderChannelArg,
 }
 
+/// Run a control subcommand as a short-lived CLI client and return its exit
+/// code. No Tauri, no logging init — this path must stay quiet and quick.
+pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
+    control::client::run(command)
+}
+
+/// Attach to the parent process's console so terminal output is visible:
+/// release builds use `windows_subsystem = "windows"`, which starts the
+/// process with no console. Must run before clap parses so `--help` and
+/// usage errors are visible too. A no-op when there is no parent console
+/// (normal double-click launches).
+#[cfg(windows)]
+pub fn attach_parent_console() {
+    use ::windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 /// Application state shared across the app
 pub struct AppState {
     pub daemon: DaemonManager,
     pub settings: RwLock<Settings>,
     pub update_checker: UpdateChecker,
-    /// Guards the tray's multi-step stop→install→start sequences
-    /// (Check for Updates / Switch Channel / Switch Backend) so only one
-    /// runs at a time. Each of those menu arms spawns an independent async
-    /// task; while `daemon.start()`/`stop()` are individually mutex-serialized,
-    /// the *sequences* are not, so concurrent menu clicks could interleave at
-    /// `await` points (e.g. one switch's `start()` racing another's mid-install)
-    /// and stack confirmation dialogs. See `tray::UpdateGuard`.
+    /// Guards the multi-step stop→install→start sequences — the tray's
+    /// Check for Updates / Switch Channel / Switch Backend arms, their CLI
+    /// counterparts, and the initial daemon start — so only one runs at a
+    /// time. Each runs as an independent async task; while
+    /// `daemon.start()`/`stop()` are individually mutex-serialized, the
+    /// *sequences* are not, so concurrent triggers could interleave at
+    /// `await` points (e.g. one switch's `start()` racing another's
+    /// mid-install). See `control::ops::UpdateGuard`.
     pub update_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -94,35 +205,27 @@ impl AppState {
 /// Build the "how to update" hint appended to background update notifications.
 ///
 /// The in-app updater (for the desktop app, ESPHome, and the device builder)
-/// is only reachable through the system tray menu. On Linux AppImage builds
+/// is normally reached through the system tray menu. On Linux AppImage builds
 /// running under desktops without a StatusNotifier host (e.g. some KDE Plasma
 /// and GNOME setups) the tray icon never appears, so telling the user to
-/// "open the tray menu" is misleading — there is no menu. In that case point
-/// them at a path that actually works. See GitHub issue #87.
-///
-/// Today the no-tray branch is only reachable on Linux AppImage builds without
-/// a StatusNotifier host, so the alternative wording is gated behind
-/// `target_os = "linux"`. If a future code path ever sets `tray_available =
-/// false` on macOS or Windows (e.g. a tray-init failure), those platforms get a
-/// generic "reinstall the latest release" message instead of misleading
-/// deb/rpm/AUR instructions.
+/// "open the tray menu" is misleading — there is no menu. Point them at the
+/// CLI instead, which drives the same update flow over the control channel.
+/// See GitHub issue #87.
 pub(crate) fn updates_menu_hint(tray_available: bool) -> &'static str {
     if tray_available {
         "Open the tray menu and choose \"Check for Updates...\" to update."
-    } else if cfg!(target_os = "linux") {
-        "No system tray was detected, so the in-app updater is unavailable. \
-         Install the deb/rpm/AUR package (which has a working tray) or reinstall \
-         the latest release to update."
     } else {
-        "No system tray was detected, so the in-app updater is unavailable. \
-         Reinstall the latest release to update."
+        "No system tray was detected. Run `esphome-desktop update` from a \
+         terminal to update."
     }
 }
 
-/// Open the ESPHome dashboard in the default browser
-fn open_dashboard(port: u16) {
+/// Open the ESPHome dashboard in the default browser. Detached: `open::that`
+/// waits for the opener process to exit, which can block the calling thread
+/// (including a tokio worker when invoked from the control server).
+pub(crate) fn open_dashboard(port: u16) {
     let url = format!("http://localhost:{}", port);
-    if let Err(e) = open::that(&url) {
+    if let Err(e) = open::that_detached(&url) {
         error!("Failed to open browser: {}", e);
     }
 }
@@ -182,9 +285,7 @@ const APP_LOG_HISTORY: usize = 7;
 /// Best-effort: returns None if the dir or appender can't be built, leaving
 /// stderr logging.
 fn app_log_appender() -> Option<tracing_appender::rolling::RollingFileAppender> {
-    let dir = dirs::data_dir()?
-        .join(platform::BUNDLE_IDENTIFIER)
-        .join("logs");
+    let dir = platform::data_dir_no_handle()?.join("logs");
     std::fs::create_dir_all(&dir).ok()?;
     tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -232,10 +333,7 @@ pub fn run(cli: Cli) {
     // Capture CLI flags before closure
     let no_open_dashboard = cli.no_open_dashboard;
     let cli_backend_override = if cli.use_builder {
-        Some(match cli.builder_channel {
-            BuilderChannelArg::Stable => Backend::BuilderStable,
-            BuilderChannelArg::Beta => Backend::BuilderBeta,
-        })
+        Some(Backend::from(cli.builder_channel))
     } else {
         None
     };
@@ -320,6 +418,11 @@ pub fn run(cli: Cli) {
             // Initialize app state
             let state = Arc::new(AppState::new(app.handle())?);
             app.manage(state.clone());
+
+            // Start the local control server so `esphome-desktop <subcommand>`
+            // can drive this instance — the only control surface on systems
+            // where the tray is unavailable.
+            control::server::spawn(app.handle().clone());
 
             // If we just migrated a classic-backend user, persist the migrated
             // settings (loaded as the default device builder) so the legacy
@@ -447,6 +550,17 @@ pub fn run(cli: Cli) {
             let daemon_state = state.clone();
             let daemon_app = app.handle().clone();
             async_runtime::spawn(async move {
+                // The control server is already accepting requests, so an
+                // early CLI `update`/`release-channel` could otherwise
+                // interleave its stop→install→start with this initial
+                // install/start (e.g. its stop() no-ops before our start()
+                // spawns the old backend mid-install). Hold the same guard
+                // the update/switch sequences use; at startup it is almost
+                // always free, so this settles immediately.
+                let startup_guard =
+                    control::ops::UpdateGuard::acquire_wait(daemon_state.update_in_flight.clone())
+                        .await;
+
                 // If a CLI override switched us into a builder backend, ensure
                 // the package is installed/upgraded before starting the daemon.
                 if cli_override_needs_install {
@@ -461,7 +575,9 @@ pub fn run(cli: Cli) {
                     }
                 }
 
-                match daemon_state.daemon.start().await {
+                let start_result = daemon_state.daemon.start().await;
+                drop(startup_guard);
+                match start_result {
                     Ok(()) => {
                         // Update tray status to show running
                         tray::update_status(&daemon_app, true);
@@ -614,6 +730,13 @@ pub fn run(cli: Cli) {
                 }
             }
 
+            // The process is going away; remove the control socket file so the
+            // next launch binds cleanly (best-effort — a SIGKILL skips this,
+            // which the server's stale-socket check covers).
+            if matches!(event, RunEvent::Exit) {
+                control::server::cleanup();
+            }
+
             if let RunEvent::ExitRequested { api, .. } = event {
                 // Running daemon.stop() via async_runtime::block_on from
                 // inside the run() callback orphans the dashboard child:
@@ -670,7 +793,7 @@ mod tests {
         let hint = updates_menu_hint(false);
         // Must not tell the user to use a tray menu that isn't there (issue #87).
         assert!(!hint.contains("tray menu"));
-        // Must offer a concrete alternative.
-        assert!(hint.contains("deb/rpm/AUR") || hint.contains("reinstall"));
+        // Must offer a concrete alternative: the CLI update command.
+        assert!(hint.contains("esphome-desktop update"));
     }
 }

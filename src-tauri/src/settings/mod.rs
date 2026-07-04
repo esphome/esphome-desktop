@@ -15,6 +15,15 @@ use crate::platform;
 /// Default dashboard port
 const DEFAULT_PORT: u16 = 6052;
 
+/// Default config directory used when `Settings.config_dir` is unset:
+/// `~/esphome`. Shared by the daemon and the CLI's offline `status` so the
+/// two can never drift.
+pub(crate) fn default_config_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|home| home.join("esphome"))
+        .unwrap_or_else(|| PathBuf::from("esphome"))
+}
+
 /// ESPHome release channel
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -277,6 +286,16 @@ fn load_settings_file(path: &Path) -> Settings {
             Settings::default()
         }
     }
+}
+
+/// Read-only settings peek for out-of-process readers (the CLI client's
+/// offline `status`). Unlike [`load_settings_file`] this never touches disk
+/// beyond the read: backing a corrupt file aside is the running app's recovery
+/// decision to make, not a bystander's, so a missing or unparseable file is
+/// simply `None`.
+pub(crate) fn peek_settings_file(path: &Path) -> Option<Settings> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 /// Move a corrupt settings file aside to `<name>.corrupt` so it isn't silently

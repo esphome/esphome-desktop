@@ -10,50 +10,13 @@ use tauri::{
     AppHandle,
 };
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
+use crate::control::ops::{self, SwitchOutcome, UpdateGuard};
 use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
-
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// RAII guard ensuring only one tray-driven update/switch sequence runs at a
-/// time.
-///
-/// The "Check for Updates", "Switch Channel", and "Switch Backend" menu arms
-/// each spawn an independent async task that performs a multi-step
-/// stop→install/update→start sequence. `DaemonManager::start()`/`stop()` are
-/// individually mutex-serialized, but those *sequences* are not mutually
-/// exclusive, so a fast double-click (or clicking a second item while a dialog
-/// is open) could interleave the steps at `await` points and stack dialogs.
-///
-/// Acquiring this guard at the top of each task makes the three arms mutually
-/// exclusive: a second click while a sequence is in flight is ignored. The flag
-/// is released on drop, so every early `return`/`?` path frees it automatically.
-struct UpdateGuard(Arc<AtomicBool>);
-
-impl UpdateGuard {
-    /// Try to begin an update/switch sequence. Returns `None` if one is already
-    /// in flight (i.e. the flag was already `true`).
-    fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
-        if flag
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            Some(Self(flag))
-        } else {
-            None
-        }
-    }
-}
-
-impl Drop for UpdateGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
 
 /// Menu item IDs
 mod ids {
@@ -256,9 +219,8 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Set up menu event handler
     let state_clone = state.clone();
-    let app = app_handle.clone();
     app_handle.on_menu_event(move |app_handle, event| {
-        handle_menu_event(app_handle, event.id().as_ref(), &state_clone, &app);
+        handle_menu_event(app_handle, event.id().as_ref(), &state_clone);
     });
 
     Ok(menu)
@@ -325,7 +287,7 @@ fn radio_label(name: &str, selected: bool) -> String {
 }
 
 /// Update the channel menu item labels to reflect the given channel
-fn update_channel_checks(channel: ReleaseChannel) {
+pub(crate) fn update_channel_checks(channel: ReleaseChannel) {
     if let Some(item) = CHANNEL_STABLE_ITEM.get() {
         let _ = item.set_text(radio_label("Stable", channel == ReleaseChannel::Stable));
     }
@@ -338,7 +300,7 @@ fn update_channel_checks(channel: ReleaseChannel) {
 }
 
 /// Update the backend menu item labels to reflect the given backend.
-fn update_backend_checks(backend: Backend) {
+pub(crate) fn update_backend_checks(backend: Backend) {
     if let Some(item) = BACKEND_BUILDER_STABLE_ITEM.get() {
         let _ = item.set_text(radio_label(
             "ESPHome Device Builder (stable)",
@@ -354,7 +316,7 @@ fn update_backend_checks(backend: Backend) {
 }
 
 /// Update the startup menu item labels to reflect whether autostart is enabled.
-fn update_startup_checks(enabled: bool) {
+pub(crate) fn update_startup_checks(enabled: bool) {
     if let Some(item) = STARTUP_ENABLE_ITEM.get() {
         let _ = item.set_text(radio_label("Launch at Login", enabled));
     }
@@ -363,47 +325,8 @@ fn update_startup_checks(enabled: bool) {
     }
 }
 
-/// Persist the autostart preference, reconcile the OS login item, and refresh
-/// the tray radio labels. Runs inline: registering the login item is a quick OS
-/// operation with no daemon work, unlike the channel/backend switch sequences.
-fn set_launch_at_startup(app_handle: &AppHandle, state: &Arc<AppState>, enable: bool) {
-    {
-        let mut settings = async_runtime::block_on(state.settings.write());
-        if settings.launch_at_startup != enable {
-            settings.launch_at_startup = enable;
-            if let Err(e) = settings.save(app_handle) {
-                warn!("Failed to save settings: {}", e);
-            }
-        }
-    }
-
-    // Always (re)apply the OS call, even when the persisted value already
-    // matches, so clicking an already-selected item retries a registration that
-    // failed earlier (e.g. the startup reconcile) instead of no-opping.
-    let manager = app_handle.autolaunch();
-    let result = if enable {
-        manager.enable()
-    } else {
-        manager.disable()
-    };
-    if let Err(e) = result {
-        error!(
-            "Failed to {} autostart: {}",
-            if enable { "enable" } else { "disable" },
-            e
-        );
-    }
-    // Reflect the actual OS state rather than the requested one: enable/disable
-    // can fail (permissions, policy, platform limits), and showing the requested
-    // state would mislead. Fall back to the requested value only if the query
-    // itself fails. The persisted setting keeps the user's intent, so the
-    // launch-time reconcile retries.
-    let actual = manager.is_enabled().unwrap_or(enable);
-    update_startup_checks(actual);
-}
-
 /// Re-detect the installed version and update the tray version display.
-fn refresh_version_display(app_handle: &AppHandle) {
+pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
     let version =
         crate::update::get_installed_version(app_handle).unwrap_or_else(|_| "unknown".to_string());
     update_version(&version);
@@ -413,7 +336,7 @@ fn refresh_version_display(app_handle: &AppHandle) {
 /// update the tray display. Runs the blocking Python call off the caller's
 /// thread, and distinguishes "package not installed" from "detection
 /// failed" so the latter doesn't get silently misreported.
-async fn refresh_builder_version_display(app_handle: &AppHandle) {
+pub(crate) async fn refresh_builder_version_display(app_handle: &AppHandle) {
     let app = app_handle.clone();
     let label = tokio::task::spawn_blocking(move || {
         match crate::update::get_installed_device_builder_version(&app) {
@@ -434,7 +357,7 @@ async fn refresh_builder_version_display(app_handle: &AppHandle) {
 }
 
 /// Handle menu item clicks
-fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _app: &AppHandle) {
+fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
     /// Acquire the `UpdateGuard` or log and `return` from the spawned task.
     /// Collapses the acquire-or-bail boilerplate shared by the three multi-step
     /// menu arms while preserving the `return`-in-closure control flow.
@@ -453,13 +376,16 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
     match id {
         ids::OPEN_DASHBOARD => {
             let settings = async_runtime::block_on(state.settings.read());
-            let url = format!("http://localhost:{}", settings.port);
-            if let Err(e) = open::that(&url) {
-                error!("Failed to open browser: {}", e);
-            }
+            crate::open_dashboard(settings.port);
         }
-        ids::STARTUP_ENABLE => set_launch_at_startup(app_handle, state, true),
-        ids::STARTUP_DISABLE => set_launch_at_startup(app_handle, state, false),
+        ids::STARTUP_ENABLE | ids::STARTUP_DISABLE => {
+            let enable = id == ids::STARTUP_ENABLE;
+            let state = state.clone();
+            let app = app_handle.clone();
+            async_runtime::spawn(async move {
+                ops::set_launch_at_startup(&app, &state, enable).await;
+            });
+        }
         ids::CHECK_UPDATES => {
             let state = state.clone();
             let app = app_handle.clone();
@@ -489,16 +415,12 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     update_status(&app, false);
                     if let Err(e) = state.daemon.stop().await {
                         error!("Failed to stop backend for update: {}", e);
-                        let dialog_app = app.clone();
-                        let msg = format!("Failed to stop dashboard: {}", e);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            dialog_app
-                                .dialog()
-                                .message(msg)
-                                .kind(MessageDialogKind::Error)
-                                .title("Update Failed")
-                                .blocking_show();
-                        })
+                        crate::dialog::notice(
+                            &app,
+                            "Update Failed",
+                            format!("Failed to stop dashboard: {}", e),
+                            MessageDialogKind::Error,
+                        )
                         .await;
                         return;
                     }
@@ -518,52 +440,41 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                             // Restart the dashboard
                             if let Err(e) = state.daemon.start().await {
                                 error!("Failed to restart backend after update: {}", e);
-                                let dialog_app = app.clone();
-                                let msg = format!(
-                                    "ESPHome updated to {}, but failed to restart dashboard: {}",
-                                    version, e
-                                );
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    dialog_app
-                                        .dialog()
-                                        .message(msg)
-                                        .kind(MessageDialogKind::Warning)
-                                        .title("Update Partially Complete")
-                                        .blocking_show();
-                                })
+                                crate::dialog::notice(
+                                    &app,
+                                    "Update Partially Complete",
+                                    format!(
+                                        "ESPHome updated to {}, but failed to restart dashboard: {}",
+                                        version, e
+                                    ),
+                                    MessageDialogKind::Warning,
+                                )
                                 .await;
                             } else {
                                 update_status(&app, true);
-                                let dialog_app = app.clone();
                                 let msg = if channel == ReleaseChannel::Dev {
                                     "ESPHome has been updated to the latest dev version."
                                         .to_string()
                                 } else {
                                     format!("ESPHome has been updated to version {}.", version)
                                 };
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    dialog_app
-                                        .dialog()
-                                        .message(msg)
-                                        .kind(MessageDialogKind::Info)
-                                        .title("Update Complete")
-                                        .blocking_show();
-                                })
+                                crate::dialog::notice(
+                                    &app,
+                                    "Update Complete",
+                                    msg,
+                                    MessageDialogKind::Info,
+                                )
                                 .await;
                             }
                         }
                         Err(e) => {
                             error!("Update failed: {}", e);
-                            let dialog_app = app.clone();
-                            let msg = format!("Failed to update ESPHome: {}", e);
-                            let _ = tokio::task::spawn_blocking(move || {
-                                dialog_app
-                                    .dialog()
-                                    .message(msg)
-                                    .kind(MessageDialogKind::Error)
-                                    .title("Update Failed")
-                                    .blocking_show();
-                            })
+                            crate::dialog::notice(
+                                &app,
+                                "Update Failed",
+                                format!("Failed to update ESPHome: {}", e),
+                                MessageDialogKind::Error,
+                            )
                             .await;
 
                             // Try to restart dashboard anyway
@@ -596,16 +507,12 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 update_status(&app, false);
                 if let Err(e) = state.daemon.stop().await {
                     error!("Failed to stop backend for device-builder update: {}", e);
-                    let dialog_app = app.clone();
-                    let msg = format!("Failed to stop backend: {}", e);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        dialog_app
-                            .dialog()
-                            .message(msg)
-                            .kind(MessageDialogKind::Error)
-                            .title("Update Failed")
-                            .blocking_show();
-                    })
+                    crate::dialog::notice(
+                        &app,
+                        "Update Failed",
+                        format!("Failed to stop backend: {}", e),
+                        MessageDialogKind::Error,
+                    )
                     .await;
                     return;
                 }
@@ -626,50 +533,38 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                                 "Failed to restart backend after device-builder update: {}",
                                 e
                             );
-                            let dialog_app = app.clone();
-                            let msg = format!(
-                                "Device builder updated to {}, but failed to restart backend: {}",
-                                builder_version, e
-                            );
-                            let _ = tokio::task::spawn_blocking(move || {
-                                dialog_app
-                                    .dialog()
-                                    .message(msg)
-                                    .kind(MessageDialogKind::Warning)
-                                    .title("Update Partially Complete")
-                                    .blocking_show();
-                            })
+                            crate::dialog::notice(
+                                &app,
+                                "Update Partially Complete",
+                                format!(
+                                    "Device builder updated to {}, but failed to restart backend: {}",
+                                    builder_version, e
+                                ),
+                                MessageDialogKind::Warning,
+                            )
                             .await;
                         } else {
                             update_status(&app, true);
-                            let dialog_app = app.clone();
-                            let msg = format!(
-                                "ESPHome Device Builder has been updated to version {}.",
-                                builder_version
-                            );
-                            let _ = tokio::task::spawn_blocking(move || {
-                                dialog_app
-                                    .dialog()
-                                    .message(msg)
-                                    .kind(MessageDialogKind::Info)
-                                    .title("Update Complete")
-                                    .blocking_show();
-                            })
+                            crate::dialog::notice(
+                                &app,
+                                "Update Complete",
+                                format!(
+                                    "ESPHome Device Builder has been updated to version {}.",
+                                    builder_version
+                                ),
+                                MessageDialogKind::Info,
+                            )
                             .await;
                         }
                     }
                     Err(e) => {
                         error!("Device-builder update failed: {}", e);
-                        let dialog_app = app.clone();
-                        let msg = format!("Failed to update ESPHome Device Builder: {}", e);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            dialog_app
-                                .dialog()
-                                .message(msg)
-                                .kind(MessageDialogKind::Error)
-                                .title("Update Failed")
-                                .blocking_show();
-                        })
+                        crate::dialog::notice(
+                            &app,
+                            "Update Failed",
+                            format!("Failed to update ESPHome Device Builder: {}", e),
+                            MessageDialogKind::Error,
+                        )
                         .await;
 
                         // Try to restart backend anyway
@@ -696,7 +591,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = guard_or_return!(state, "channel switch");
+                let guard = guard_or_return!(state, "channel switch");
                 // Read the current channel
                 let old_channel = {
                     let settings = state.settings.read().await;
@@ -708,8 +603,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 }
 
                 // Confirm the channel switch with the user.
-                // Run the blocking dialog on a dedicated thread so it cannot
-                // starve the tokio runtime or the event-loop thread.
                 let warning = if new_channel == ReleaseChannel::Dev {
                     "Warning: The dev channel installs ESPHome directly from GitHub and does NOT support automatic updates. You will need to manually check for updates.\n\n"
                 } else {
@@ -730,107 +623,55 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     return;
                 }
 
-                // Update the check marks immediately to show the new selection
-                update_channel_checks(new_channel);
-
-                // Stop the dashboard
-                update_status(&app, false);
-                if let Err(e) = state.daemon.stop().await {
-                    error!("Failed to stop backend for channel switch: {}", e);
-                    let dialog_app = app.clone();
-                    let msg = format!("Failed to stop dashboard: {}", e);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        dialog_app
-                            .dialog()
-                            .message(msg)
-                            .kind(MessageDialogKind::Error)
-                            .title("Channel Switch Failed")
-                            .blocking_show();
-                    })
-                    .await;
-                    // Revert
-                    update_channel_checks(old_channel);
-                    return;
-                }
-
-                // Install the new channel's version
-                match state.update_checker.switch_channel(&app, new_channel).await {
-                    Ok(()) => {
-                        info!("Switched to {} channel successfully", new_channel);
-
-                        // Save the new channel to settings
-                        {
-                            let mut settings = state.settings.write().await;
-                            settings.release_channel = new_channel;
-                            if let Err(e) = settings.save(&app) {
-                                warn!("Failed to save settings: {}", e);
-                            }
-                        }
-
-                        // Update the version display in the tray menu
-                        refresh_version_display(&app);
-
-                        // Restart the dashboard
-                        if let Err(e) = state.daemon.start().await {
-                            error!("Failed to restart backend after channel switch: {}", e);
-                            let dialog_app = app.clone();
-                            let msg = format!(
+                // The stop→install→persist→start sequence (including label
+                // updates and their failure-path reverts) lives in ops so the
+                // CLI drives the exact same code; the tray adds the dialogs.
+                match ops::switch_release_channel(&app, &state, new_channel, &guard, &|_, _| {})
+                    .await
+                {
+                    SwitchOutcome::Unchanged => {}
+                    SwitchOutcome::Success { .. } => {
+                        let msg = format!(
+                            "Successfully switched to the {} release channel.",
+                            new_channel
+                        );
+                        crate::dialog::notice(
+                            &app,
+                            "Channel Switched",
+                            msg,
+                            MessageDialogKind::Info,
+                        )
+                        .await;
+                    }
+                    SwitchOutcome::StopFailed(e) => {
+                        crate::dialog::notice(
+                            &app,
+                            "Channel Switch Failed",
+                            format!("Failed to stop dashboard: {}", e),
+                            MessageDialogKind::Error,
+                        )
+                        .await;
+                    }
+                    SwitchOutcome::InstallFailed { error, .. } => {
+                        crate::dialog::notice(
+                            &app,
+                            "Channel Switch Failed",
+                            format!("Failed to switch channel: {}", error),
+                            MessageDialogKind::Error,
+                        )
+                        .await;
+                    }
+                    SwitchOutcome::StartFailed(e) => {
+                        crate::dialog::notice(
+                            &app,
+                            "Channel Switch Partially Complete",
+                            format!(
                                 "Switched to {} channel, but failed to restart dashboard: {}",
                                 new_channel, e
-                            );
-                            let _ = tokio::task::spawn_blocking(move || {
-                                dialog_app
-                                    .dialog()
-                                    .message(msg)
-                                    .kind(MessageDialogKind::Warning)
-                                    .title("Channel Switch Partially Complete")
-                                    .blocking_show();
-                            })
-                            .await;
-                        } else {
-                            update_status(&app, true);
-                            let dialog_app = app.clone();
-                            let msg = format!(
-                                "Successfully switched to the {} release channel.",
-                                new_channel
-                            );
-                            let _ = tokio::task::spawn_blocking(move || {
-                                dialog_app
-                                    .dialog()
-                                    .message(msg)
-                                    .kind(MessageDialogKind::Info)
-                                    .title("Channel Switched")
-                                    .blocking_show();
-                            })
-                            .await;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Channel switch failed: {}", e);
-                        let dialog_app = app.clone();
-                        let msg = format!("Failed to switch channel: {}", e);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            dialog_app
-                                .dialog()
-                                .message(msg)
-                                .kind(MessageDialogKind::Error)
-                                .title("Channel Switch Failed")
-                                .blocking_show();
-                        })
+                            ),
+                            MessageDialogKind::Warning,
+                        )
                         .await;
-
-                        // Revert settings
-                        update_channel_checks(old_channel);
-
-                        // Try to restart dashboard anyway
-                        if let Err(restart_err) = state.daemon.start().await {
-                            error!(
-                                "Failed to restart backend after failed channel switch: {}",
-                                restart_err
-                            );
-                        } else {
-                            update_status(&app, true);
-                        }
                     }
                 }
             });
@@ -845,7 +686,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = guard_or_return!(state, "backend switch");
+                let guard = guard_or_return!(state, "backend switch");
                 let old_backend = {
                     let settings = state.settings.read().await;
                     settings.backend
@@ -870,125 +711,76 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                     return;
                 }
 
-                // Update the check marks immediately to show the new selection
-                update_backend_checks(new_backend);
-
-                // Stop the current backend
-                update_status(&app, false);
-                if let Err(e) = state.daemon.stop().await {
-                    error!("Failed to stop daemon for backend switch: {}", e);
-                    let dialog_app = app.clone();
-                    let msg = format!("Failed to stop backend: {}", e);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        dialog_app
-                            .dialog()
-                            .message(msg)
-                            .kind(MessageDialogKind::Error)
-                            .title("Backend Switch Failed")
-                            .blocking_show();
-                    })
-                    .await;
-                    update_backend_checks(old_backend);
-                    return;
-                }
-
-                // Install/upgrade the package for the selected channel first.
-                if let Err(e) = state
-                    .update_checker
-                    .install_device_builder(&app, new_backend)
-                    .await
-                {
-                    error!("Failed to install esphome-device-builder: {}", e);
-                    let dialog_app = app.clone();
-                    let msg = format!("Failed to install esphome-device-builder: {}", e);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        dialog_app
-                            .dialog()
-                            .message(msg)
-                            .kind(MessageDialogKind::Error)
-                            .title("Backend Switch Failed")
-                            .blocking_show();
-                    })
-                    .await;
-                    update_backend_checks(old_backend);
-                    // Try to restart the original backend.
-                    if let Err(restart_err) = state.daemon.start().await {
-                        error!(
-                            "Failed to restart backend after failed switch: {}",
-                            restart_err
-                        );
-                    } else {
-                        update_status(&app, true);
+                // The stop→install→persist→start→wait sequence (including
+                // label updates and their failure-path reverts) lives in ops
+                // so the CLI drives the exact same code; the tray adds the
+                // dialogs and the readiness notification.
+                match ops::switch_backend(&app, &state, new_backend, &guard, &|_, _| {}).await {
+                    SwitchOutcome::Unchanged => {}
+                    SwitchOutcome::Success { ready } => {
+                        let body = if ready {
+                            format!("{} is ready.", new_backend)
+                        } else {
+                            format!(
+                                "Switched to {}, but it didn't become ready in time. Check the logs.",
+                                new_backend
+                            )
+                        };
+                        if let Err(e) = app
+                            .notification()
+                            .builder()
+                            .title("Backend Switched")
+                            .body(body)
+                            .show()
+                        {
+                            warn!("Failed to show backend-switch notification: {}", e);
+                        }
                     }
-                    return;
-                }
-                // Install succeeded — refresh the tray version display.
-                refresh_builder_version_display(&app).await;
-
-                // Persist the new backend channel.
-                {
-                    let mut settings = state.settings.write().await;
-                    settings.backend = new_backend;
-                    if let Err(e) = settings.save(&app) {
-                        warn!("Failed to save settings: {}", e);
-                    }
-                }
-
-                // Restart with the new backend.
-                if let Err(e) = state.daemon.start().await {
-                    error!("Failed to start daemon after backend switch: {}", e);
-                    let dialog_app = app.clone();
-                    let msg = format!("Failed to start backend: {}", e);
-                    let _ = tokio::task::spawn_blocking(move || {
-                        dialog_app
-                            .dialog()
-                            .message(msg)
-                            .kind(MessageDialogKind::Error)
-                            .title("Backend Switch Failed")
-                            .blocking_show();
-                    })
-                    .await;
-                } else {
-                    update_status(&app, true);
-                    info!("Switched backend to {}", new_backend);
-
-                    // Wait for the new backend to be reachable, then notify.
-                    let port = state.daemon.port();
-                    let ready = crate::wait_for_dashboard_ready(port, 60).await;
-                    let body = if ready {
-                        format!("{} is ready.", new_backend)
-                    } else {
-                        format!(
-                            "Switched to {}, but it didn't become ready in time. Check the logs.",
-                            new_backend
+                    SwitchOutcome::StopFailed(e) => {
+                        crate::dialog::notice(
+                            &app,
+                            "Backend Switch Failed",
+                            format!("Failed to stop backend: {}", e),
+                            MessageDialogKind::Error,
                         )
-                    };
-                    if let Err(e) = app
-                        .notification()
-                        .builder()
-                        .title("Backend Switched")
-                        .body(body)
-                        .show()
-                    {
-                        warn!("Failed to show backend-switch notification: {}", e);
+                        .await;
+                    }
+                    SwitchOutcome::InstallFailed { error, .. } => {
+                        crate::dialog::notice(
+                            &app,
+                            "Backend Switch Failed",
+                            format!("Failed to install esphome-device-builder: {}", error),
+                            MessageDialogKind::Error,
+                        )
+                        .await;
+                    }
+                    SwitchOutcome::StartFailed(e) => {
+                        crate::dialog::notice(
+                            &app,
+                            "Backend Switch Failed",
+                            format!("Failed to start backend: {}", e),
+                            MessageDialogKind::Error,
+                        )
+                        .await;
                     }
                 }
             });
         }
         ids::VIEW_LOGS => {
             let logs_dir = state.daemon.logs_dir();
-            if let Err(e) = open::that(logs_dir) {
+            if let Err(e) = open::that_detached(logs_dir) {
                 error!("Failed to open logs folder: {}", e);
             }
         }
         ids::OPEN_CONFIG => {
             let config_dir = state.daemon.config_dir();
-            if let Err(e) = open::that(config_dir) {
+            if let Err(e) = open::that_detached(config_dir) {
                 error!("Failed to open config folder: {}", e);
             }
         }
         ids::RESTART => {
             let state = state.clone();
+            let app = app_handle.clone();
             async_runtime::spawn(async move {
                 // restart() is a stop()->start() sequence, so it must hold the
                 // same re-entrancy guard as the channel/backend switch arms.
@@ -996,9 +788,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
                 // start() with the OLD backend before the switch persists the
                 // new one, leaving the running process out of sync with the
                 // saved settings and tray radio state.
-                let _guard = guard_or_return!(state, "restart");
+                let guard = guard_or_return!(state, "restart");
                 info!("Restarting ESPHome backend");
-                if let Err(e) = state.daemon.restart().await {
+                if let Err(e) = ops::restart_daemon(&app, &state, false, &guard, &|_, _| {}).await {
                     error!("Failed to restart daemon: {}", e);
                 }
             });
@@ -1010,46 +802,5 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>, _a
             app_handle.exit(0);
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn guard_acquires_when_flag_clear() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let g = UpdateGuard::try_acquire(flag.clone());
-        assert!(g.is_some(), "should acquire when flag is clear");
-        assert!(flag.load(Ordering::Acquire), "flag set while guard held");
-    }
-
-    #[test]
-    fn guard_blocks_second_acquire_while_held() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let _first = UpdateGuard::try_acquire(flag.clone()).expect("first acquires");
-        let second = UpdateGuard::try_acquire(flag.clone());
-        assert!(
-            second.is_none(),
-            "second acquire blocked while first is held"
-        );
-    }
-
-    #[test]
-    fn guard_releases_flag_on_drop() {
-        let flag = Arc::new(AtomicBool::new(false));
-        {
-            let _g = UpdateGuard::try_acquire(flag.clone()).expect("acquires");
-            assert!(flag.load(Ordering::Acquire), "held");
-        }
-        assert!(
-            !flag.load(Ordering::Acquire),
-            "flag cleared after guard dropped"
-        );
-        assert!(
-            UpdateGuard::try_acquire(flag.clone()).is_some(),
-            "reacquirable after release"
-        );
     }
 }

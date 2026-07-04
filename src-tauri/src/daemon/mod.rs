@@ -35,6 +35,11 @@ type PidInt = i32;
 /// Human-readable name of the backend process, for log messages.
 const BACKEND_NAME: &str = "ESPHome device builder";
 
+/// File name of the backend's combined stdout+stderr log inside the logs
+/// directory. The CLI's `logs` subcommand tails this file by name, so the
+/// daemon and the client must agree on it.
+pub(crate) const DASHBOARD_LOG_NAME: &str = "dashboard.log";
+
 /// Number of previous `dashboard.log` runs to retain when rotating on start
 /// (`dashboard.log.1` … `dashboard.log.3`). Enough to inspect the run that
 /// preceded a failed restart without unbounded disk growth.
@@ -77,11 +82,10 @@ impl DaemonManager {
         let python_bin_dir = platform::get_python_bin(app_handle)?;
 
         // Use ~/esphome as the default config directory
-        let config_dir = settings.config_dir.clone().unwrap_or_else(|| {
-            dirs::home_dir()
-                .map(|h| h.join("esphome"))
-                .unwrap_or_else(|| PathBuf::from("esphome"))
-        });
+        let config_dir = settings
+            .config_dir
+            .clone()
+            .unwrap_or_else(crate::settings::default_config_dir);
         std::fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
 
         // Create logs directory in app data
@@ -143,7 +147,7 @@ impl DaemonManager {
         // restart (issue #203). Rotate the prior `dashboard.log` to a numbered
         // backup first; best-effort, since losing old logs must never block the
         // backend from starting.
-        let log_path = self.logs_dir.join("dashboard.log");
+        let log_path = self.logs_dir.join(DASHBOARD_LOG_NAME);
         if let Err(e) = crate::util::rotate_log(&log_path, LOG_HISTORY) {
             warn!("Failed to rotate {:?}: {}", log_path, e);
         }
@@ -598,8 +602,9 @@ fn health_check_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/", port)
 }
 
-/// Perform a health check on the dashboard
-async fn health_check(port: u16) -> Result<bool> {
+/// Perform a health check on the dashboard. Also used by the control
+/// server's `status` reply.
+pub(crate) async fn health_check(port: u16) -> Result<bool> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
