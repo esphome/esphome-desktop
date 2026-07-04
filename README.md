@@ -80,6 +80,8 @@ esphome-desktop quit             # quit the running app
 Unlike the tray's confirmation dialogs, the CLI applies changes immediately;
 running the command is the consent. `logs` and `status` also work when the app
 is not running, and `status` prints the config and log directory paths.
+Running `esphome-desktop` with no arguments in a terminal prints this command
+list instead of launching another app instance; use `open` to start the app.
 
 On Linux the deb/rpm/AUR packages put `esphome-desktop` on your `PATH`. On
 macOS the app installs the command on launch, as a small launcher in

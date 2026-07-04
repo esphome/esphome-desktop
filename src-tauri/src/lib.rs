@@ -131,6 +131,10 @@ pub enum CliCommand {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "esphome-desktop")]
 #[command(about = "ESPHome Device Builder", long_about = None)]
+#[command(
+    after_help = "Run 'esphome-desktop open' to start the app and open the dashboard; \
+                  launching with no subcommand starts the app when run outside a terminal."
+)]
 pub struct Cli {
     /// Control an already-running app instead of launching one.
     #[command(subcommand)]
@@ -156,6 +160,21 @@ pub struct Cli {
 /// code. No Tauri, no logging init — this path must stay quiet and quick.
 pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
     control::client::run(command)
+}
+
+/// Whether this is a bare `esphome-desktop` typed in a terminal, which should
+/// print help rather than launch another app instance. Explicit launch flags
+/// keep launching (a terminal launch with `--no-open-dashboard` or
+/// `--use-builder` is deliberate), and launches without a terminal — Finder,
+/// the applications menu, a `.desktop` file, autostart, `open`'s detached
+/// spawn — are the normal app-start path.
+pub fn bare_terminal_invocation(cli: &Cli) -> bool {
+    use std::io::IsTerminal;
+
+    cli.command.is_none()
+        && !cli.no_open_dashboard
+        && !cli.use_builder
+        && (std::io::stdin().is_terminal() || std::io::stdout().is_terminal())
 }
 
 /// Attach to the parent process's console so terminal output is visible:
