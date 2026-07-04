@@ -9,14 +9,21 @@ fn main() -> std::process::ExitCode {
     // On Windows this must go through AttachConsole (release builds start
     // with no console), which both makes --help/usage output visible and,
     // via its success, tells us the launcher had a console. On Unix we check
-    // the std handles directly.
+    // the std handles directly, including stderr so a `cmd >out 2>&1`-style
+    // launch with stdin/stdout redirected but stderr on the tty still counts.
     #[cfg(windows)]
     let from_terminal = esphome_desktop_lib::attach_parent_console();
     #[cfg(not(windows))]
     let from_terminal = {
         use std::io::IsTerminal;
-        std::io::stdin().is_terminal() || std::io::stdout().is_terminal()
+        std::io::stdin().is_terminal()
+            || std::io::stdout().is_terminal()
+            || std::io::stderr().is_terminal()
     };
+
+    // Count args before clap consumes them; a bare invocation is just the
+    // program name (count 1).
+    let arg_count = std::env::args_os().count();
 
     let cli = Cli::parse();
     // A subcommand means "control the running app": run the short-lived CLI
@@ -27,10 +34,12 @@ fn main() -> std::process::ExitCode {
     // A bare `esphome-desktop` typed in a terminal is someone exploring the
     // CLI, not a request to launch another app instance (a second launch is
     // heavyweight: it runs a full startup before single-instance forwards
-    // it). Desktop launches — Finder, the applications menu, autostart —
-    // are not from a terminal and fall through to a normal launch, as does
-    // any explicit launch flag.
-    if esphome_desktop_lib::bare_terminal_invocation(&cli, from_terminal) {
+    // it). Any explicit flag, or a launch from outside a terminal (Finder,
+    // the applications menu, autostart), falls through to a normal launch.
+    if esphome_desktop_lib::is_bare_terminal_launch(from_terminal, arg_count) {
+        // Best-effort: a write failure here is almost always a broken pipe
+        // (`esphome-desktop | head`), which is not worth reporting; clap's
+        // help already ends with a newline.
         let _ = Cli::command().print_help();
         return std::process::ExitCode::SUCCESS;
     }

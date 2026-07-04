@@ -162,16 +162,21 @@ pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
     control::client::run(command)
 }
 
-/// Whether this is a bare `esphome-desktop` run from a terminal, which should
-/// print help rather than launch another app instance. `from_terminal` is the
-/// platform's "started from a console" signal (a real TTY on Unix, a
-/// successful parent-console attach on Windows — see [`attach_parent_console`]).
-/// Explicit launch flags keep launching (a terminal launch with
-/// `--no-open-dashboard` or `--use-builder` is deliberate), and non-terminal
-/// launches — Finder, the applications menu, a `.desktop` file, autostart,
-/// `open`'s detached spawn — take the normal app-start path.
-pub fn bare_terminal_invocation(cli: &Cli, from_terminal: bool) -> bool {
-    cli.command.is_none() && !cli.no_open_dashboard && !cli.use_builder && from_terminal
+/// Whether this is a bare `esphome-desktop` run from a terminal — no
+/// subcommand and no flags at all, just the program name — which should print
+/// the command list instead of launching another app instance. Any explicit
+/// argument is a deliberate invocation and launches as before: a launch flag
+/// like `--no-open-dashboard`, or even the no-op `--builder-channel`, so the
+/// rule needs no per-flag list and stays correct as flags are added.
+/// Non-terminal launches (Finder, the applications menu, a `.desktop` file,
+/// autostart, `open`'s detached spawn) also take the normal app-start path.
+///
+/// `from_terminal` is the platform's "started from a console" signal (a real
+/// TTY on Unix, a successful parent-console attach on Windows — see
+/// [`attach_parent_console`]). `arg_count` is `std::env::args_os().count()`,
+/// so the bare case is a count of 1 (just the program name).
+pub fn is_bare_terminal_launch(from_terminal: bool, arg_count: usize) -> bool {
+    from_terminal && arg_count <= 1
 }
 
 /// Attach to the parent process's console so terminal output is visible, and
@@ -786,42 +791,28 @@ pub fn run(cli: Cli) {
 
 #[cfg(test)]
 mod tests {
-    use super::bare_terminal_invocation;
     use super::dashboard_ready_url;
+    use super::is_bare_terminal_launch;
     use super::updates_menu_hint;
-    use super::Cli;
-    use clap::Parser;
-
-    fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(std::iter::once("esphome-desktop").chain(args.iter().copied()))
-            .expect("parse")
-    }
 
     #[test]
     fn bare_run_in_a_terminal_shows_help() {
-        assert!(bare_terminal_invocation(&parse(&[]), true));
+        // Just the program name (arg_count 1), attached to a terminal.
+        assert!(is_bare_terminal_launch(true, 1));
     }
 
     #[test]
     fn bare_run_without_a_terminal_launches() {
         // Finder / autostart / detached spawn: no terminal, so start the app.
-        assert!(!bare_terminal_invocation(&parse(&[]), false));
+        assert!(!is_bare_terminal_launch(false, 1));
     }
 
     #[test]
-    fn a_subcommand_is_never_a_launch() {
-        // Subcommands are dispatched before this check, but guard anyway.
-        assert!(!bare_terminal_invocation(&parse(&["status"]), true));
-    }
-
-    #[test]
-    fn explicit_launch_flags_launch_even_in_a_terminal() {
-        // A terminal launch with a launch flag is a deliberate start.
-        assert!(!bare_terminal_invocation(
-            &parse(&["--no-open-dashboard"]),
-            true
-        ));
-        assert!(!bare_terminal_invocation(&parse(&["--use-builder"]), true));
+    fn any_argument_launches_even_in_a_terminal() {
+        // A launch flag, a subcommand, or even the no-op `--builder-channel`
+        // is a deliberate invocation: arg_count > 1, so never bare.
+        assert!(!is_bare_terminal_launch(true, 2)); // e.g. --no-open-dashboard
+        assert!(!is_bare_terminal_launch(true, 3)); // e.g. --builder-channel stable
     }
 
     #[test]
