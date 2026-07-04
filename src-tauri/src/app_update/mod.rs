@@ -149,69 +149,14 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
 }
 
 /// Download and install the given update, then prompt the user to restart.
+/// Thin dialog wrapper over [`apply_update_noninteractive`], which owns the
+/// download→stop→install sequence (including the backend restore on a failed
+/// install).
 async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Update) {
     let new_version = update.version.clone();
 
-    let mut downloaded: u64 = 0;
-    let mut last_logged = std::time::Instant::now();
-    // Download first, with the backend still running. A failed download must
-    // not disrupt the running dashboard, so we only stop it once we have the
-    // bytes in hand and are about to write files.
-    let bytes = match update
-        .download(
-            move |chunk, total| {
-                downloaded = downloaded.saturating_add(chunk as u64);
-                // Throttle progress logs to once per second.
-                if last_logged.elapsed() >= Duration::from_secs(1) {
-                    if let Some(total) = total {
-                        info!("Downloading desktop update: {}/{} bytes", downloaded, total);
-                    } else {
-                        info!("Downloading desktop update: {} bytes", downloaded);
-                    }
-                    last_logged = std::time::Instant::now();
-                }
-            },
-            || info!("Desktop update download complete"),
-        )
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            error!("Desktop update download failed: {}", e);
-            show_error(app_handle, format!("Failed to download update: {}", e)).await;
-            return;
-        }
-    };
-
-    // Stop the backend before installing: the install overwrites the bundled
-    // `python/` directory, and on Windows the live `python.exe` keeps those
-    // files open (WinError 5) and holds port 6052, so the write fails and the
-    // next launch can't bind. Reuses the same graceful `DaemonManager::stop()`
-    // the ESPHome package-update path uses; best-effort, so proceed on error.
-    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
-        info!("Stopping ESPHome backend before installing desktop update");
-        // Reflect the stop in the tray immediately; `stop()` only flips the
-        // daemon's internal flag, so the tray would otherwise stay on
-        // "Running" (matches the package-update path in `tray`).
-        crate::tray::update_status(app_handle, false);
-        if let Err(e) = state.daemon.stop().await {
-            warn!("Error stopping backend before update: {}", e);
-        }
-    } else {
-        warn!("App state unavailable; installing update without stopping backend");
-    }
-
-    // `install` is synchronous and writes files, so run it off the async
-    // executor like the dialogs above. Flatten the join error and the install
-    // error so success and failure each have a single arm.
-    info!("Installing desktop update…");
-    let result = match tokio::task::spawn_blocking(move || update.install(bytes)).await {
-        Ok(install) => install.map_err(|e| e.to_string()),
-        Err(join) => Err(format!("install task failed: {}", join)),
-    };
-    match result {
+    match apply_update_noninteractive(app_handle, update, &|_, _| {}).await {
         Ok(()) => {
-            info!("Desktop update {} installed", new_version);
             // Always relaunch after a successful install rather than offering to
             // defer: the install replaced the .app bundle, and the running
             // process must be replaced by a fresh instance of it. On macOS the
@@ -230,10 +175,104 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             crate::platform::relaunch_for_update(app_handle);
         }
         Err(e) => {
+            show_error(app_handle, format!("Failed to update: {}", e)).await;
+        }
+    }
+}
+
+/// Non-interactive variant for the CLI `update` flow: the same
+/// download→stop→install sequence as [`apply_update`], with progress reported
+/// through the callback instead of dialogs, and no relaunch — the caller must
+/// invoke `platform::relaunch_for_update` itself once it has flushed its reply
+/// to the client, otherwise the relaunch would kill the control connection
+/// before the client hears the outcome.
+pub(crate) async fn apply_update_noninteractive(
+    app_handle: &AppHandle,
+    update: tauri_plugin_updater::Update,
+    progress: crate::control::ops::Progress<'_>,
+) -> Result<(), String> {
+    let version = update.version.clone();
+
+    progress("desktop", &format!("downloading desktop update {version}"));
+    let bytes = download_update_bytes(&update)
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    progress("desktop", "stopping the dashboard");
+    stop_backend_for_install(app_handle).await;
+
+    progress("desktop", &format!("installing desktop update {version}"));
+    match install_update_bytes(update, bytes).await {
+        Ok(()) => {
+            info!("Desktop update {} installed", version);
+            Ok(())
+        }
+        Err(e) => {
             error!("Desktop update install failed: {}", e);
             restore_backend(app_handle).await;
-            show_error(app_handle, format!("Failed to install update: {}", e)).await;
+            Err(format!("install failed: {e}"))
         }
+    }
+}
+
+/// Download the update payload with the backend still running. A failed
+/// download must not disrupt the running dashboard, so the backend is only
+/// stopped by the caller once the bytes are in hand and files are about to be
+/// written.
+async fn download_update_bytes(update: &tauri_plugin_updater::Update) -> Result<Vec<u8>, String> {
+    let mut downloaded: u64 = 0;
+    let mut last_logged = std::time::Instant::now();
+    update
+        .download(
+            move |chunk, total| {
+                downloaded = downloaded.saturating_add(chunk as u64);
+                // Throttle progress logs to once per second.
+                if last_logged.elapsed() >= Duration::from_secs(1) {
+                    if let Some(total) = total {
+                        info!("Downloading desktop update: {}/{} bytes", downloaded, total);
+                    } else {
+                        info!("Downloading desktop update: {} bytes", downloaded);
+                    }
+                    last_logged = std::time::Instant::now();
+                }
+            },
+            || info!("Desktop update download complete"),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Stop the backend before installing: the install overwrites the bundled
+/// `python/` directory, and on Windows the live `python.exe` keeps those
+/// files open (WinError 5) and holds port 6052, so the write fails and the
+/// next launch can't bind. Reuses the same graceful `DaemonManager::stop()`
+/// the ESPHome package-update path uses; best-effort, so proceed on error.
+async fn stop_backend_for_install(app_handle: &AppHandle) {
+    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
+        info!("Stopping ESPHome backend before installing desktop update");
+        // Reflect the stop in the tray immediately; `stop()` only flips the
+        // daemon's internal flag, so the tray would otherwise stay on
+        // "Running" (matches the package-update path in `tray`).
+        crate::tray::update_status(app_handle, false);
+        if let Err(e) = state.daemon.stop().await {
+            warn!("Error stopping backend before update: {}", e);
+        }
+    } else {
+        warn!("App state unavailable; installing update without stopping backend");
+    }
+}
+
+/// Install the downloaded bytes. `install` is synchronous and writes files, so
+/// it runs off the async executor; the join error and the install error are
+/// flattened so success and failure each have a single arm.
+async fn install_update_bytes(
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    info!("Installing desktop update…");
+    match tokio::task::spawn_blocking(move || update.install(bytes)).await {
+        Ok(install) => install.map_err(|e| e.to_string()),
+        Err(join) => Err(format!("install task failed: {}", join)),
     }
 }
 
