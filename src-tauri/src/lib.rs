@@ -131,6 +131,10 @@ pub enum CliCommand {
 #[derive(Parser, Debug, Clone)]
 #[command(name = "esphome-desktop")]
 #[command(about = "ESPHome Device Builder", long_about = None)]
+#[command(
+    after_help = "Run 'esphome-desktop open' to start the app and open the dashboard; \
+                  launching with no subcommand starts the app when run outside a terminal."
+)]
 pub struct Cli {
     /// Control an already-running app instead of launching one.
     #[command(subcommand)]
@@ -158,17 +162,37 @@ pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
     control::client::run(command)
 }
 
-/// Attach to the parent process's console so terminal output is visible:
-/// release builds use `windows_subsystem = "windows"`, which starts the
-/// process with no console. Must run before clap parses so `--help` and
-/// usage errors are visible too. A no-op when there is no parent console
-/// (normal double-click launches).
+/// Whether this is a bare `esphome-desktop` run from a terminal — no
+/// subcommand and no flags at all, just the program name — which should print
+/// the command list instead of launching another app instance. Any explicit
+/// argument is a deliberate invocation and launches as before: a launch flag
+/// like `--no-open-dashboard`, or even the no-op `--builder-channel`, so the
+/// rule needs no per-flag list and stays correct as flags are added.
+/// Non-terminal launches (Finder, the applications menu, a `.desktop` file,
+/// autostart, `open`'s detached spawn) also take the normal app-start path.
+///
+/// `from_terminal` is the platform's "started from a console" signal (a real
+/// TTY on Unix, a successful parent-console attach on Windows — see
+/// [`attach_parent_console`]). `arg_count` is `std::env::args_os().count()`,
+/// so the bare case is a count of 1 (just the program name).
+pub fn is_bare_terminal_launch(from_terminal: bool, arg_count: usize) -> bool {
+    from_terminal && arg_count <= 1
+}
+
+/// Attach to the parent process's console so terminal output is visible, and
+/// report whether one was attached. Release builds use
+/// `windows_subsystem = "windows"`, which starts the process with no console,
+/// so `--help` and usage errors would otherwise print nowhere; this must run
+/// before clap parses. `AttachConsole(ATTACH_PARENT_PROCESS)` succeeds only
+/// when the launcher had a console (cmd/PowerShell) and fails on a GUI /
+/// Start-menu / autostart launch, so its result is also the reliable "started
+/// from a terminal" signal — more robust than reading the std handles with
+/// `is_terminal()` afterward, which is not guaranteed to observe the
+/// just-attached console.
 #[cfg(windows)]
-pub fn attach_parent_console() {
+pub fn attach_parent_console() -> bool {
     use ::windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-    unsafe {
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-    }
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS).is_ok() }
 }
 
 /// Application state shared across the app
@@ -768,7 +792,28 @@ pub fn run(cli: Cli) {
 #[cfg(test)]
 mod tests {
     use super::dashboard_ready_url;
+    use super::is_bare_terminal_launch;
     use super::updates_menu_hint;
+
+    #[test]
+    fn bare_run_in_a_terminal_shows_help() {
+        // Just the program name (arg_count 1), attached to a terminal.
+        assert!(is_bare_terminal_launch(true, 1));
+    }
+
+    #[test]
+    fn bare_run_without_a_terminal_launches() {
+        // Finder / autostart / detached spawn: no terminal, so start the app.
+        assert!(!is_bare_terminal_launch(false, 1));
+    }
+
+    #[test]
+    fn any_argument_launches_even_in_a_terminal() {
+        // A launch flag, a subcommand, or even the no-op `--builder-channel`
+        // is a deliberate invocation: arg_count > 1, so never bare.
+        assert!(!is_bare_terminal_launch(true, 2)); // e.g. --no-open-dashboard
+        assert!(!is_bare_terminal_launch(true, 3)); // e.g. --builder-channel stable
+    }
 
     #[test]
     fn dashboard_ready_url_targets_ipv4_loopback() {
