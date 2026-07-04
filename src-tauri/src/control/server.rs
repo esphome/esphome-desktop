@@ -37,10 +37,19 @@ pub fn spawn(app_handle: AppHandle) {
     });
 }
 
+/// Path of the socket THIS process bound, if any. Cleanup must only remove a
+/// socket we own: a second app instance whose control server was disabled
+/// ("already in use") still exits through `RunEvent::Exit`, and removing the
+/// path by mere derivation would delete the primary instance's live socket
+/// out from under it — the app then keeps running but the CLI reports it as
+/// not running until it is restarted.
+#[cfg(unix)]
+static BOUND_SOCKET: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 /// Best-effort removal of the socket file at shutdown (`RunEvent::Exit`).
 #[cfg(unix)]
 pub fn cleanup() {
-    if let Ok(path) = protocol::socket_path() {
+    if let Some(path) = BOUND_SOCKET.get() {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -90,6 +99,8 @@ async fn serve(app: AppHandle) -> anyhow::Result<()> {
     }
     let listener = tokio::net::UnixListener::bind(&path)
         .with_context(|| format!("could not bind {path:?}"))?;
+    // We own the socket from here; only now may exit cleanup remove it.
+    let _ = BOUND_SOCKET.set(path.clone());
     // Belt and suspenders on top of the 0700 parent directory above.
     if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
         warn!("Could not restrict control socket permissions: {}", e);
