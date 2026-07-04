@@ -81,6 +81,14 @@ Unlike the tray's confirmation dialogs, the CLI applies changes immediately;
 running the command is the consent. `logs` and `status` also work when the app
 is not running, and `status` prints the config and log directory paths.
 
+On Linux the deb/rpm/AUR packages put `esphome-desktop` on your `PATH`. On
+macOS the app installs the command on launch, as a small launcher in
+`/opt/homebrew/bin` or `/usr/local/bin` when one is writable; it removes
+itself if you later delete the app. If neither directory is writable, call
+the binary inside the bundle
+(`/Applications/ESPHome Device Builder.app/Contents/MacOS/esphome-desktop`).
+On Windows run it from the install directory.
+
 ### Running as a remote builder
 
 To keep a machine acting as an always-on builder, leave **Startup → Launch at Login** enabled (the default) so the app relaunches after a reboot. It registers a per-user login item (a macOS LaunchAgent, a Windows `HKCU\...\Run` entry, or a Linux `~/.config/autostart` entry), not a system service, so it starts when a desktop session logs in rather than at boot. For an unattended box that reboots on its own, enable your OS's automatic login so a session starts without someone at the keyboard; otherwise the builder stays offline until someone logs in. The login launch is silent (tray only, no browser).
