@@ -16,8 +16,10 @@ use crate::platform;
 const DEFAULT_PORT: u16 = 6052;
 
 /// Default config directory used when `Settings.config_dir` is unset:
-/// `~/esphome`. Shared by the daemon and the CLI's offline `status` so the
-/// two can never drift.
+/// `~/esphome`, or a cwd-relative `esphome` in the degenerate case where the
+/// home directory cannot be resolved (unusual service/container setups).
+/// Shared by the daemon and the CLI's offline `status` so the two can never
+/// drift.
 pub(crate) fn default_config_dir() -> PathBuf {
     dirs::home_dir()
         .map(|home| home.join("esphome"))
