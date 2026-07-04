@@ -5,11 +5,18 @@ use clap::{CommandFactory, Parser};
 use esphome_desktop_lib::Cli;
 
 fn main() -> std::process::ExitCode {
-    // Attach to the invoking console before clap parses: release builds use
-    // `windows_subsystem = "windows"`, so without this, --help/--version and
-    // usage errors for mistyped subcommands print nothing.
+    // Decide whether we were started from a terminal before clap parses.
+    // On Windows this must go through AttachConsole (release builds start
+    // with no console), which both makes --help/usage output visible and,
+    // via its success, tells us the launcher had a console. On Unix we check
+    // the std handles directly.
     #[cfg(windows)]
-    esphome_desktop_lib::attach_parent_console();
+    let from_terminal = esphome_desktop_lib::attach_parent_console();
+    #[cfg(not(windows))]
+    let from_terminal = {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal() || std::io::stdout().is_terminal()
+    };
 
     let cli = Cli::parse();
     // A subcommand means "control the running app": run the short-lived CLI
@@ -21,9 +28,9 @@ fn main() -> std::process::ExitCode {
     // CLI, not a request to launch another app instance (a second launch is
     // heavyweight: it runs a full startup before single-instance forwards
     // it). Desktop launches — Finder, the applications menu, autostart —
-    // have no controlling terminal and fall through to a normal launch, as
-    // does any explicit launch flag.
-    if esphome_desktop_lib::bare_terminal_invocation(&cli) {
+    // are not from a terminal and fall through to a normal launch, as does
+    // any explicit launch flag.
+    if esphome_desktop_lib::bare_terminal_invocation(&cli, from_terminal) {
         let _ = Cli::command().print_help();
         return std::process::ExitCode::SUCCESS;
     }

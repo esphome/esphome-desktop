@@ -162,32 +162,32 @@ pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
     control::client::run(command)
 }
 
-/// Whether this is a bare `esphome-desktop` typed in a terminal, which should
-/// print help rather than launch another app instance. Explicit launch flags
-/// keep launching (a terminal launch with `--no-open-dashboard` or
-/// `--use-builder` is deliberate), and launches without a terminal — Finder,
-/// the applications menu, a `.desktop` file, autostart, `open`'s detached
-/// spawn — are the normal app-start path.
-pub fn bare_terminal_invocation(cli: &Cli) -> bool {
-    use std::io::IsTerminal;
-
-    cli.command.is_none()
-        && !cli.no_open_dashboard
-        && !cli.use_builder
-        && (std::io::stdin().is_terminal() || std::io::stdout().is_terminal())
+/// Whether this is a bare `esphome-desktop` run from a terminal, which should
+/// print help rather than launch another app instance. `from_terminal` is the
+/// platform's "started from a console" signal (a real TTY on Unix, a
+/// successful parent-console attach on Windows — see [`attach_parent_console`]).
+/// Explicit launch flags keep launching (a terminal launch with
+/// `--no-open-dashboard` or `--use-builder` is deliberate), and non-terminal
+/// launches — Finder, the applications menu, a `.desktop` file, autostart,
+/// `open`'s detached spawn — take the normal app-start path.
+pub fn bare_terminal_invocation(cli: &Cli, from_terminal: bool) -> bool {
+    cli.command.is_none() && !cli.no_open_dashboard && !cli.use_builder && from_terminal
 }
 
-/// Attach to the parent process's console so terminal output is visible:
-/// release builds use `windows_subsystem = "windows"`, which starts the
-/// process with no console. Must run before clap parses so `--help` and
-/// usage errors are visible too. A no-op when there is no parent console
-/// (normal double-click launches).
+/// Attach to the parent process's console so terminal output is visible, and
+/// report whether one was attached. Release builds use
+/// `windows_subsystem = "windows"`, which starts the process with no console,
+/// so `--help` and usage errors would otherwise print nowhere; this must run
+/// before clap parses. `AttachConsole(ATTACH_PARENT_PROCESS)` succeeds only
+/// when the launcher had a console (cmd/PowerShell) and fails on a GUI /
+/// Start-menu / autostart launch, so its result is also the reliable "started
+/// from a terminal" signal — more robust than reading the std handles with
+/// `is_terminal()` afterward, which is not guaranteed to observe the
+/// just-attached console.
 #[cfg(windows)]
-pub fn attach_parent_console() {
+pub fn attach_parent_console() -> bool {
     use ::windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
-    unsafe {
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-    }
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS).is_ok() }
 }
 
 /// Application state shared across the app
@@ -786,8 +786,43 @@ pub fn run(cli: Cli) {
 
 #[cfg(test)]
 mod tests {
+    use super::bare_terminal_invocation;
     use super::dashboard_ready_url;
     use super::updates_menu_hint;
+    use super::Cli;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("esphome-desktop").chain(args.iter().copied()))
+            .expect("parse")
+    }
+
+    #[test]
+    fn bare_run_in_a_terminal_shows_help() {
+        assert!(bare_terminal_invocation(&parse(&[]), true));
+    }
+
+    #[test]
+    fn bare_run_without_a_terminal_launches() {
+        // Finder / autostart / detached spawn: no terminal, so start the app.
+        assert!(!bare_terminal_invocation(&parse(&[]), false));
+    }
+
+    #[test]
+    fn a_subcommand_is_never_a_launch() {
+        // Subcommands are dispatched before this check, but guard anyway.
+        assert!(!bare_terminal_invocation(&parse(&["status"]), true));
+    }
+
+    #[test]
+    fn explicit_launch_flags_launch_even_in_a_terminal() {
+        // A terminal launch with a launch flag is a deliberate start.
+        assert!(!bare_terminal_invocation(
+            &parse(&["--no-open-dashboard"]),
+            true
+        ));
+        assert!(!bare_terminal_invocation(&parse(&["--use-builder"]), true));
+    }
 
     #[test]
     fn dashboard_ready_url_targets_ipv4_loopback() {
