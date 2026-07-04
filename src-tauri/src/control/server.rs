@@ -59,7 +59,7 @@ async fn run(app: AppHandle) {
 #[cfg(unix)]
 async fn serve(app: AppHandle) -> anyhow::Result<()> {
     use anyhow::Context;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
     let path = protocol::socket_path()?;
     if let Some(parent) = path.parent() {
@@ -67,7 +67,10 @@ async fn serve(app: AppHandle) -> anyhow::Result<()> {
         // The directory is created (and kept) 0700 so the socket inside is
         // unreachable by other users even during the brief window between
         // bind() — which applies the umask — and the chmod below.
-        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder
             .create(parent)
             .with_context(|| format!("could not create {parent:?}"))?;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))

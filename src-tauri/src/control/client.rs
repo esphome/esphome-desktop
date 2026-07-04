@@ -473,36 +473,59 @@ fn print_status(status: &StatusReply) {
 }
 
 fn offline_status(json: bool) -> ExitCode {
+    let data_dir = crate::platform::data_dir_no_handle();
+    let settings = data_dir
+        .as_ref()
+        .and_then(|dir| crate::settings::peek_settings_file(&dir.join("settings.json")));
+
     if json {
-        println!("{}", serde_json::json!({ "app_running": false }));
+        // Same field names and value formats as the online StatusReply form,
+        // so scripts keep one stable schema whether or not the app is up;
+        // only the fields knowable from settings.json are present.
+        let value = match (&data_dir, &settings) {
+            (Some(data_dir), Some(settings)) => {
+                let config_dir = settings
+                    .config_dir
+                    .clone()
+                    .unwrap_or_else(crate::settings::default_config_dir);
+                serde_json::json!({
+                    "app_running": false,
+                    "port": settings.port,
+                    "release_channel": settings.release_channel,
+                    "backend": settings.backend,
+                    "config_dir": config_dir,
+                    "logs_dir": data_dir.join("logs"),
+                })
+            }
+            _ => serde_json::json!({ "app_running": false }),
+        };
+        println!("{value}");
         return ExitCode::from(EXIT_NOT_RUNNING);
     }
+
     println!("App:             not running");
-    if let Some(data_dir) = crate::platform::data_dir_no_handle() {
-        if let Some(settings) = crate::settings::peek_settings_file(&data_dir.join("settings.json"))
-        {
-            println!("Dashboard:       http://localhost:{}", settings.port);
+    if let (Some(data_dir), Some(settings)) = (data_dir, settings) {
+        println!("Dashboard:       http://localhost:{}", settings.port);
+        println!(
+            "Release channel: {}",
+            channel_name(settings.release_channel)
+        );
+        println!(
+            "Backend:         {} channel",
+            backend_name(settings.backend)
+        );
+        let config_dir = settings
+            .config_dir
+            .unwrap_or_else(crate::settings::default_config_dir);
+        println!("Config dir:      {}", config_dir.display());
+        println!("Logs dir:        {}", data_dir.join("logs").display());
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], settings.port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
             println!(
-                "Release channel: {}",
-                channel_name(settings.release_channel)
+                "Note: something is listening on port {}; if the app was killed, \
+                 its backend may still be running.",
+                settings.port
             );
-            println!(
-                "Backend:         {} channel",
-                backend_name(settings.backend)
-            );
-            let config_dir = settings
-                .config_dir
-                .unwrap_or_else(crate::settings::default_config_dir);
-            println!("Config dir:      {}", config_dir.display());
-            println!("Logs dir:        {}", data_dir.join("logs").display());
-            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], settings.port));
-            if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok() {
-                println!(
-                    "Note: something is listening on port {}; if the app was killed, \
-                     its backend may still be running.",
-                    settings.port
-                );
-            }
         }
     }
     ExitCode::from(EXIT_NOT_RUNNING)
