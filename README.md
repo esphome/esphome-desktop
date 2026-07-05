@@ -101,8 +101,9 @@ esphome-desktop api status         # status as one JSON object
 Every `api` command prints newline-delimited JSON only, one object per line,
 valid JSON even on error (`{"type":"err","code":"not_running",...}`). Gate on
 `schema_version` before using the others. `check-update` returns
-`{"any_available":bool,"app":{...},"esphome":{...},"device_builder":{...}}` where
-each component carries `available`, `installed`, `latest`, and `error`. `update`
+`{"type":"update_check","any_available":bool,"app":{...},"esphome":{...},"device_builder":{...}}`
+where each component carries `available`, `installed`, `latest`, and `error`;
+route on the `type` field, which every reply line carries. `update`
 is fully non-interactive; it stops and restarts the backend without any
 confirmation, so an unattended remote builder always comes back on its own even
 with no one at the keyboard. Trigger it detached (e.g. Python

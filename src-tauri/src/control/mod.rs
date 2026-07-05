@@ -24,8 +24,13 @@ pub mod server;
 pub(crate) fn cli_invocation_path() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "linux")]
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
-        if !appimage.is_empty() {
-            return Some(std::path::PathBuf::from(appimage));
+        let path = std::path::PathBuf::from(appimage);
+        if !path.as_os_str().is_empty() {
+            // `$APPIMAGE` is normally absolute, but canonicalize defensively so
+            // a relative value (rare wrapper launches) still resolves after the
+            // backend changes its working directory; fall back to the raw path
+            // if canonicalization fails.
+            return Some(std::fs::canonicalize(&path).unwrap_or(path));
         }
     }
     std::env::current_exe().ok()

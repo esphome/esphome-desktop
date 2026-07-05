@@ -348,9 +348,9 @@ where
 }
 
 /// Whether `latest` is a newer version than `installed`, mapped onto the
-/// [`ComponentUpdate`] the check reply carries. The same `is_newer_version`
-/// gate the update sequences use, so the "available" flag never disagrees with
-/// what an actual `update` would install.
+/// [`ComponentUpdate`] the check reply carries. Uses the same
+/// `is_newer_version` comparison the update sequences use, so the `available`
+/// flag never disagrees with what an actual `update` would install.
 fn compare(installed: String, latest: String) -> ComponentUpdate {
     if crate::update::is_newer_version(&latest, &installed) {
         ComponentUpdate::upgradable(installed, latest)
