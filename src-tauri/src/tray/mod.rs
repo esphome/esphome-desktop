@@ -804,6 +804,12 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
             });
         }
         ids::QUIT => {
+            // Refuse to tear the app down while an update/switch is mid-flight:
+            // exiting now would orphan a pip install mid-write and corrupt the
+            // site-packages tree (the same reason the update arms hold the
+            // guard). Held only until this arm returns; the click is ignored
+            // with a log line if a sequence is in progress.
+            let _guard = guard_or_return!(state, "Quit");
             info!("Quit requested");
             // Delegate cleanup to the RunEvent::ExitRequested handler in
             // lib.rs so the shutdown sequence lives in exactly one place.

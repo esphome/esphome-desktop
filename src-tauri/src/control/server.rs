@@ -399,6 +399,12 @@ async fn dispatch(
             }
         }
         Request::Quit => {
+            // Refuse to quit while an update/switch is in flight: tearing the
+            // process down now would orphan a pip install mid-write and corrupt
+            // the site-packages tree — the same hazard the Update arm's
+            // `mem::forget` note guards against. Hold the guard until we exit so
+            // no new sequence can start in the window before shutdown.
+            let _guard = guard_or_busy!();
             let _ = tx.send(Reply::ok("quitting"));
             return Some(PostAction::Exit);
         }
