@@ -31,17 +31,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 VERSION_FILES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "src-tauri/Cargo.toml",
-        re.compile(r"^version = .*", re.MULTILINE),
+        re.compile(r"^version = [^\r\n]*", re.MULTILINE),
         'version = "{version}"',
     ),
     (
         "src-tauri/tauri.conf.json",
-        re.compile(r'"version": .*', re.MULTILINE),
+        re.compile(r'"version": [^\r\n]*', re.MULTILINE),
         '"version": "{version}",',
     ),
     (
         "packaging/aur/esphome-desktop-bin/PKGBUILD",
-        re.compile(r"^pkgver=.*", re.MULTILINE),
+        re.compile(r"^pkgver=[^\r\n]*", re.MULTILINE),
         "pkgver={version}",
     ),
 )
@@ -62,7 +62,7 @@ def set_version(
     new, count = pattern.subn(lambda _m: replacement, text)
     if count != 1:
         raise ValueError(
-            f"pattern {pattern.pattern!r} matched {count} lines, expected exactly 1"
+            f"pattern {pattern.pattern!r} matched {count} times, expected exactly 1"
         )
     return new
 
