@@ -557,14 +557,26 @@
       }
 
       fetch('latest.json', { cache: 'no-store' })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) {
+            console.warn('latest.json returned ' + r.status + '; using template-built download URLs');
+            return null;
+          }
+          return r.json();
+        })
         .then((manifest) => {
           if (manifest && manifest.downloads) {
             manifestDownloads = manifest.downloads;
             onManifest.forEach((refresh) => refresh());
+          } else if (manifest) {
+            console.warn('latest.json has no downloads block; using template-built download URLs');
           }
         })
-        .catch(() => { /* keep the template-built fallback URLs */ });
+        .catch((e) => {
+          // Keep the template-built fallback URLs, but leave a trail so a
+          // broken manifest deploy is diagnosable from the console.
+          console.warn('latest.json fetch failed; using template-built download URLs', e);
+        });
 
       // ---- Tabs ----
       const TAB_ORDER = ['windows', 'macos', 'linux'];
