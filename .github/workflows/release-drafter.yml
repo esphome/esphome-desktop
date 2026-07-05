@@ -36,17 +36,11 @@ jobs:
           tag="${{ steps.release-draft.outputs.tag_name }}"
           echo "version=${tag:1}" >> $GITHUB_OUTPUT
 
-      - name: Set Cargo.toml version
+      # One table-driven step rewrites every version-bearing file; adding a
+      # file is one line in the script's table instead of another sed step.
+      - name: Set versions
         run: |
-          sed -i "s/^version = .*/version = \"${{ steps.version.outputs.version }}\"/g" src-tauri/Cargo.toml
-
-      - name: Set tauri.conf.json version
-        run: |
-          sed -i "s/\"version\": .*/\"version\": \"${{ steps.version.outputs.version }}\",/g" src-tauri/tauri.conf.json
-
-      - name: Set PKGBUILD versions
-        run: |
-          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/g" packaging/aur/esphome-desktop-bin/PKGBUILD
+          python3 .github/scripts/set_version.py "${{ steps.version.outputs.version }}"
 
       - name: Update Cargo.lock
         run: |
