@@ -347,6 +347,23 @@ where
     }
 }
 
+/// Detect a component's installed version via [`detect`], mapping the two
+/// non-detected outcomes onto the [`ComponentUpdate`] early exits the check
+/// replies carry: absent is a normal state ("nothing to update"), reported as
+/// `not_installed()` rather than an error, and a detection failure is
+/// `errored` with `installed: None` — the encoding [`install_action`] relies
+/// on to tell detection failures from update-check failures.
+async fn detect_installed_or_report<F>(app: &AppHandle, f: F) -> Result<String, ComponentUpdate>
+where
+    F: FnOnce(&AppHandle) -> anyhow::Result<Option<String>> + Send + 'static,
+{
+    match detect(app, f).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(ComponentUpdate::not_installed()),
+        Err(e) => Err(ComponentUpdate::errored(None, e)),
+    }
+}
+
 /// Whether `latest` is a newer version than `installed`, mapped onto the
 /// [`ComponentUpdate`] the check reply carries. The install sequences derive
 /// their decision from this same result via [`install_action`], so on the
@@ -383,13 +400,11 @@ pub(crate) async fn esphome_update_available(
     state: &Arc<AppState>,
     channel: ReleaseChannel,
 ) -> ComponentUpdate {
-    let installed = match detect(app, crate::update::installed_esphome_version).await {
-        Ok(Some(v)) => v,
-        // ESPHome absent is a normal state ("nothing to update"), not an error —
-        // mirrors the device-builder not-installed path below.
-        Ok(None) => return ComponentUpdate::not_installed(),
-        Err(e) => return ComponentUpdate::errored(None, e),
-    };
+    let installed =
+        match detect_installed_or_report(app, crate::update::installed_esphome_version).await {
+            Ok(v) => v,
+            Err(early) => return early,
+        };
     // The dev channel has no version-based check: `update` always reinstalls the
     // latest dev commit, so a passive check can't call it "newer". Report it as
     // current so the dashboard banner doesn't nag on every dev build.
@@ -410,11 +425,13 @@ pub(crate) async fn device_builder_update_available(
     state: &Arc<AppState>,
     backend: crate::settings::Backend,
 ) -> ComponentUpdate {
-    let installed = match detect(app, crate::update::get_installed_device_builder_version).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return ComponentUpdate::not_installed(),
-        Err(e) => return ComponentUpdate::errored(None, e),
-    };
+    let installed =
+        match detect_installed_or_report(app, crate::update::get_installed_device_builder_version)
+            .await
+        {
+            Ok(v) => v,
+            Err(early) => return early,
+        };
     match state.update_checker.check_device_builder(backend).await {
         Ok(latest) => compare(installed, latest),
         Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
@@ -591,46 +608,30 @@ async fn update_esphome_package(
 ) {
     progress("esphome", "checking for an ESPHome update");
     let check = esphome_update_available(app, state, channel).await;
-    let (installed, target) = match esphome_install_action(check, channel) {
-        InstallAction::Install { installed, target } => (installed, target),
-        InstallAction::UpToDate { installed } => {
-            report.note(format!("esphome {installed} is up to date"));
-            return;
-        }
-        InstallAction::NotInstalled => {
-            report.note("esphome is not installed; skipping".to_string());
-            return;
-        }
-        InstallAction::DetectionFailed(e) => {
-            report.fail(format!("esphome version detection failed: {e}"));
-            return;
-        }
-        InstallAction::CheckFailed(e) => {
-            report.fail(format!("esphome update check failed: {e}"));
-            return;
-        }
-    };
-
-    let label = if target == "dev" {
-        "the latest dev commit".to_string()
-    } else {
-        target.clone()
-    };
-    progress(
-        "esphome",
-        &format!("updating ESPHome {installed} to {label}"),
-    );
-    let result = stop_install_start(app, state, || async {
-        state.update_checker.update_to(app, &target, channel).await
-    })
+    run_package_phase(
+        app,
+        state,
+        progress,
+        report,
+        PackageLabels {
+            step: "esphome",
+            component: "esphome",
+            display_name: "ESPHome",
+        },
+        esphome_install_action(check, channel),
+        // The dev "target" is a channel keyword, not a version; quote it as
+        // prose in the progress and report lines.
+        |target| {
+            if target == "dev" {
+                "the latest dev commit".to_string()
+            } else {
+                target.to_string()
+            }
+        },
+        |target| async move { state.update_checker.update_to(app, &target, channel).await },
+        || refresh_version_display_blocking(app),
+    )
     .await;
-    match result {
-        Ok(()) => {
-            refresh_version_display_blocking(app).await;
-            report.note(format!("esphome updated to {label}"));
-        }
-        Err(e) => report.fail(format!("esphome update failed: {e}")),
-    }
 }
 
 /// Device-builder phase of [`run_full_update`].
@@ -643,43 +644,94 @@ async fn update_device_builder_package(
 ) {
     progress("device-builder", "checking for a device builder update");
     let check = device_builder_update_available(app, state, backend).await;
-    let (installed, latest) = match install_action(check) {
+    run_package_phase(
+        app,
+        state,
+        progress,
+        report,
+        PackageLabels {
+            step: "device-builder",
+            component: "device builder",
+            display_name: "device builder",
+        },
+        install_action(check),
+        |latest| latest.to_string(),
+        |_target| async move {
+            state
+                .update_checker
+                .install_device_builder(app, backend)
+                .await
+        },
+        || tray::refresh_builder_version_display(app),
+    )
+    .await;
+}
+
+/// Wording knobs for [`run_package_phase`]: the progress `step` key, the
+/// lowercase `component` noun the report lines start with, and the
+/// `display_name` quoted in the "updating …" progress detail.
+struct PackageLabels {
+    step: &'static str,
+    component: &'static str,
+    display_name: &'static str,
+}
+
+/// Shared skeleton of the per-package phases of [`run_full_update`]: map the
+/// [`InstallAction`] onto the report for the no-op and failure arms, and for
+/// an actual install run [`stop_install_start`], refresh the version display
+/// on success, and record the outcome. `display_target` maps the raw install
+/// target onto the label quoted in progress and report lines; `install`
+/// receives the raw target.
+#[allow(clippy::too_many_arguments)]
+async fn run_package_phase<F, Fut, R, RFut>(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    progress: Progress<'_>,
+    report: &mut UpdateReport,
+    labels: PackageLabels,
+    action: InstallAction,
+    display_target: impl FnOnce(&str) -> String,
+    install: F,
+    refresh: R,
+) where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = ()>,
+{
+    let component = labels.component;
+    let (installed, target) = match action {
         InstallAction::Install { installed, target } => (installed, target),
         InstallAction::UpToDate { installed } => {
-            report.note(format!("device builder {installed} is up to date"));
+            report.note(format!("{component} {installed} is up to date"));
             return;
         }
         InstallAction::NotInstalled => {
-            report.note("device builder is not installed; skipping".to_string());
+            report.note(format!("{component} is not installed; skipping"));
             return;
         }
         InstallAction::DetectionFailed(e) => {
-            report.fail(format!("device builder version detection failed: {e}"));
+            report.fail(format!("{component} version detection failed: {e}"));
             return;
         }
         InstallAction::CheckFailed(e) => {
-            report.fail(format!("device builder update check failed: {e}"));
+            report.fail(format!("{component} update check failed: {e}"));
             return;
         }
     };
 
+    let label = display_target(&target);
     progress(
-        "device-builder",
-        &format!("updating device builder {installed} to {latest}"),
+        labels.step,
+        &format!("updating {} {installed} to {label}", labels.display_name),
     );
-    let result = stop_install_start(app, state, || async {
-        state
-            .update_checker
-            .install_device_builder(app, backend)
-            .await
-    })
-    .await;
+    let result = stop_install_start(app, state, || install(target)).await;
     match result {
         Ok(()) => {
-            tray::refresh_builder_version_display(app).await;
-            report.note(format!("device builder updated to {latest}"));
+            refresh().await;
+            report.note(format!("{component} updated to {label}"));
         }
-        Err(e) => report.fail(format!("device builder update failed: {e}")),
+        Err(e) => report.fail(format!("{component} update failed: {e}")),
     }
 }
 
