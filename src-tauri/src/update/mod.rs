@@ -116,7 +116,7 @@ impl UpdateChecker {
     ) -> Option<String> {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
-            let installed = get_installed_version(app_handle).ok();
+            let installed = installed_esphome_version(app_handle).ok().flatten();
             let installed_str = installed.as_deref().unwrap_or("unknown").to_string();
 
             let dialog_app = app_handle.clone();
@@ -148,8 +148,21 @@ impl UpdateChecker {
         }
 
         // Get installed version
-        let installed = match get_installed_version(app_handle) {
-            Ok(v) => v,
+        let installed = match installed_esphome_version(app_handle) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                let dialog_app = app_handle.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    dialog_app
+                        .dialog()
+                        .message("ESPHome is not installed")
+                        .kind(MessageDialogKind::Error)
+                        .title("Update Check Failed")
+                        .blocking_show();
+                })
+                .await;
+                return None;
+            }
             Err(e) => {
                 warn!("Could not detect installed version: {}", e);
                 let dialog_app = app_handle.clone();
@@ -269,8 +282,12 @@ impl UpdateChecker {
         }
 
         // Get installed version
-        let installed = match get_installed_version(app_handle) {
-            Ok(v) => v,
+        let installed = match installed_esphome_version(app_handle) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                debug!("ESPHome not installed; skipping update notification");
+                return;
+            }
             Err(e) => {
                 warn!("Could not detect installed version: {}", e);
                 return;
@@ -987,18 +1004,13 @@ where
     }
 }
 
-/// Get the installed ESPHome version
-pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
-    installed_esphome_version(app_handle)?.ok_or_else(|| anyhow::anyhow!("ESPHome not installed"))
-}
-
 /// Installed ESPHome version, distinguishing "not installed" from a real
 /// detection failure: `Ok(Some(v))` when installed, `Ok(None)` when the
 /// `esphome version` command runs but exits non-zero (ESPHome absent), and
-/// `Err` only when the check itself can't run (e.g. Python missing). The
-/// update-availability check uses this so a missing ESPHome shows as "nothing
-/// to update" rather than an error; [`get_installed_version`] keeps the
-/// error-on-absent shape the interactive/tray flows rely on.
+/// `Err` only when the check itself can't run (e.g. Python missing). Every
+/// caller handles `Ok(None)` explicitly, mirroring the device-builder
+/// `get_installed_device_builder_version` shape so "not installed" and
+/// "detection failed" never collapse into one state.
 pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 

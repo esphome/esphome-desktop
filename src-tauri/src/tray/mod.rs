@@ -327,8 +327,16 @@ pub(crate) fn update_startup_checks(enabled: bool) {
 
 /// Re-detect the installed version and update the tray version display.
 pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
-    let version =
-        crate::update::get_installed_version(app_handle).unwrap_or_else(|_| "unknown".to_string());
+    // Mirror the device-builder display: keep "not installed" distinct from a
+    // real detection failure ("unknown") instead of collapsing both.
+    let version = match crate::update::installed_esphome_version(app_handle) {
+        Ok(Some(v)) => v,
+        Ok(None) => "not installed".to_string(),
+        Err(e) => {
+            warn!("Could not detect ESPHome version: {}", e);
+            "unknown".to_string()
+        }
+    };
     update_version(&version);
 }
 
