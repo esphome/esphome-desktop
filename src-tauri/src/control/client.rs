@@ -633,41 +633,37 @@ fn api_read<R: BufRead>(mut reader: R) -> u8 {
         }
         // Parse before echoing: the `api` contract is NDJSON-only, so a line
         // that is not valid JSON must never reach stdout (it would break a
-        // dashboard doing `json.loads` per line). A recognized Reply is echoed
-        // and dispatched; a line that is valid JSON but not a known Reply is
-        // still echoed (forward-compatible with a newer server) and we keep
-        // reading; anything else is a protocol violation we surface as a
-        // synthesized JSON error and stop.
-        match serde_json::from_str::<Reply>(trimmed) {
+        // dashboard doing `json.loads` per line). Guard that case up front, then
+        // echo exactly once for every valid-JSON line.
+        let reply = serde_json::from_str::<Reply>(trimmed);
+        if reply.is_err() && serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
+            return api_err_line(
+                "protocol_error",
+                "the app sent a line that was not valid JSON",
+                EXIT_FAILED,
+            );
+        }
+        echo_json_line(trimmed);
+        match reply {
+            Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
+                return EXIT_SUCCESS
+            }
+            Ok(Reply::Err { code, .. }) => {
+                return match code {
+                    ErrCode::Busy => EXIT_BUSY,
+                    ErrCode::Failed => EXIT_FAILED,
+                }
+            }
             Ok(Reply::Progress { step, .. }) => {
-                echo_json_line(trimmed);
                 if step == STEP_APP_RESTARTING {
                     saw_restart_marker = true;
                 }
             }
-            Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
-                echo_json_line(trimmed);
-                return EXIT_SUCCESS;
-            }
-            Ok(Reply::Err { code, .. }) => {
-                echo_json_line(trimmed);
-                return match code {
-                    ErrCode::Busy => EXIT_BUSY,
-                    ErrCode::Failed => EXIT_FAILED,
-                };
-            }
-            Err(_) if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() => {
-                // Valid JSON, just not a Reply we recognize: still NDJSON, so
-                // echo it and keep reading for the terminal reply.
-                echo_json_line(trimmed);
-            }
-            Err(_) => {
-                return api_err_line(
-                    "protocol_error",
-                    "the app sent a line that was not valid JSON",
-                    EXIT_FAILED,
-                )
-            }
+            // Valid JSON, just not a Reply we recognize: already echoed (still
+            // NDJSON); keep reading for the terminal reply. This is defensive —
+            // the client and app are the same binary, so their reply shapes
+            // always match — but it keeps a stray line from ending the stream.
+            Err(_) => {}
         }
     }
 }
