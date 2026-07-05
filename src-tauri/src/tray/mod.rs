@@ -101,26 +101,21 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Create release channel items
     let current_channel = settings.release_channel;
-    let channel_stable = MenuItemBuilder::with_id(
+    let channel_stable = CHANNEL_STABLE_ITEM.build(
+        app_handle,
         ids::CHANNEL_STABLE,
-        radio_label("Stable", current_channel == ReleaseChannel::Stable),
-    )
-    .build(app_handle)?;
-    let channel_beta = MenuItemBuilder::with_id(
+        current_channel == ReleaseChannel::Stable,
+    )?;
+    let channel_beta = CHANNEL_BETA_ITEM.build(
+        app_handle,
         ids::CHANNEL_BETA,
-        radio_label("Beta", current_channel == ReleaseChannel::Beta),
-    )
-    .build(app_handle)?;
-    let channel_dev = MenuItemBuilder::with_id(
+        current_channel == ReleaseChannel::Beta,
+    )?;
+    let channel_dev = CHANNEL_DEV_ITEM.build(
+        app_handle,
         ids::CHANNEL_DEV,
-        radio_label("Dev", current_channel == ReleaseChannel::Dev),
-    )
-    .build(app_handle)?;
-
-    // Store channel items for later updates
-    let _ = CHANNEL_STABLE_ITEM.set(channel_stable.clone());
-    let _ = CHANNEL_BETA_ITEM.set(channel_beta.clone());
-    let _ = CHANNEL_DEV_ITEM.set(channel_dev.clone());
+        current_channel == ReleaseChannel::Dev,
+    )?;
 
     let channel_submenu = SubmenuBuilder::with_id(app_handle, "release_channel", "Release Channel")
         .item(&channel_stable)
@@ -130,26 +125,17 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Backend submenu items
     let current_backend = settings.backend;
-    let backend_builder_stable = MenuItemBuilder::with_id(
+    // TODO: use `build` once a stable release of esphome-device-builder is out
+    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build_disabled(
+        app_handle,
         ids::BACKEND_BUILDER_STABLE,
-        radio_label(
-            "ESPHome Device Builder (stable)",
-            current_backend == Backend::BuilderStable,
-        ),
-    )
-    .enabled(false) // TODO: remove once a stable release of esphome-device-builder is out
-    .build(app_handle)?;
-    let backend_builder_beta = MenuItemBuilder::with_id(
+        current_backend == Backend::BuilderStable,
+    )?;
+    let backend_builder_beta = BACKEND_BUILDER_BETA_ITEM.build(
+        app_handle,
         ids::BACKEND_BUILDER_BETA,
-        radio_label(
-            "ESPHome Device Builder (beta)",
-            current_backend == Backend::BuilderBeta,
-        ),
-    )
-    .build(app_handle)?;
-
-    let _ = BACKEND_BUILDER_STABLE_ITEM.set(backend_builder_stable.clone());
-    let _ = BACKEND_BUILDER_BETA_ITEM.set(backend_builder_beta.clone());
+        current_backend == Backend::BuilderBeta,
+    )?;
 
     let backend_submenu = SubmenuBuilder::with_id(app_handle, "backend", "Backend")
         .item(&backend_builder_stable)
@@ -163,19 +149,10 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .autolaunch()
         .is_enabled()
         .unwrap_or(settings.launch_at_startup);
-    let startup_enable = MenuItemBuilder::with_id(
-        ids::STARTUP_ENABLE,
-        radio_label("Launch at Login", launch_at_startup),
-    )
-    .build(app_handle)?;
-    let startup_disable = MenuItemBuilder::with_id(
-        ids::STARTUP_DISABLE,
-        radio_label("Don't Launch at Login", !launch_at_startup),
-    )
-    .build(app_handle)?;
-
-    let _ = STARTUP_ENABLE_ITEM.set(startup_enable.clone());
-    let _ = STARTUP_DISABLE_ITEM.set(startup_disable.clone());
+    let startup_enable =
+        STARTUP_ENABLE_ITEM.build(app_handle, ids::STARTUP_ENABLE, launch_at_startup)?;
+    let startup_disable =
+        STARTUP_DISABLE_ITEM.build(app_handle, ids::STARTUP_DISABLE, !launch_at_startup)?;
 
     let startup_submenu = SubmenuBuilder::with_id(app_handle, "startup", "Startup")
         .item(&startup_enable)
@@ -235,20 +212,86 @@ static VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::Once
 /// `esphome-device-builder` version menu item stored globally for updates
 static BUILDER_VERSION_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
+/// A radio-style menu entry: the base label plus the globally stored menu
+/// item. `build` creates the item and registers it; `refresh` rewrites its
+/// label to reflect the current selection.
+struct RadioItem {
+    label: &'static str,
+    item: std::sync::OnceLock<MenuItem<tauri::Wry>>,
+}
+
+impl RadioItem {
+    const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            item: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Build the menu item with a `radio_label` and register it for later
+    /// refreshes.
+    fn build(
+        &self,
+        app_handle: &AppHandle,
+        id: &str,
+        selected: bool,
+    ) -> Result<MenuItem<tauri::Wry>> {
+        self.build_impl(app_handle, id, selected, true)
+    }
+
+    /// Like [`RadioItem::build`], but the item is greyed out.
+    fn build_disabled(
+        &self,
+        app_handle: &AppHandle,
+        id: &str,
+        selected: bool,
+    ) -> Result<MenuItem<tauri::Wry>> {
+        self.build_impl(app_handle, id, selected, false)
+    }
+
+    fn build_impl(
+        &self,
+        app_handle: &AppHandle,
+        id: &str,
+        selected: bool,
+        enabled: bool,
+    ) -> Result<MenuItem<tauri::Wry>> {
+        // If a previous build already registered an item, reuse it so
+        // `refresh` keeps targeting the item that is live in the menu.
+        if let Some(item) = self.item.get() {
+            item.set_text(radio_label(self.label, selected))?;
+            item.set_enabled(enabled)?;
+            return Ok(item.clone());
+        }
+        let item = MenuItemBuilder::with_id(id, radio_label(self.label, selected))
+            .enabled(enabled)
+            .build(app_handle)?;
+        let _ = self.item.set(item.clone());
+        Ok(item)
+    }
+
+    /// Update the registered item's label to reflect the current selection.
+    fn refresh(&self, selected: bool) {
+        if let Some(item) = self.item.get() {
+            if let Err(e) = item.set_text(radio_label(self.label, selected)) {
+                warn!("Failed to update tray menu item '{}': {}", self.label, e);
+            }
+        }
+    }
+}
+
 /// Release channel items stored globally for radio-button behavior
-static CHANNEL_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
-static CHANNEL_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
-static CHANNEL_DEV_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static CHANNEL_STABLE_ITEM: RadioItem = RadioItem::new("Stable");
+static CHANNEL_BETA_ITEM: RadioItem = RadioItem::new("Beta");
+static CHANNEL_DEV_ITEM: RadioItem = RadioItem::new("Dev");
 
 /// Backend menu items stored globally for radio-button behavior
-static BACKEND_BUILDER_STABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
-static BACKEND_BUILDER_BETA_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> =
-    std::sync::OnceLock::new();
+static BACKEND_BUILDER_STABLE_ITEM: RadioItem = RadioItem::new("ESPHome Device Builder (stable)");
+static BACKEND_BUILDER_BETA_ITEM: RadioItem = RadioItem::new("ESPHome Device Builder (beta)");
 
 /// Startup menu items stored globally for radio-button behavior
-static STARTUP_ENABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
-static STARTUP_DISABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+static STARTUP_ENABLE_ITEM: RadioItem = RadioItem::new("Launch at Login");
+static STARTUP_DISABLE_ITEM: RadioItem = RadioItem::new("Don't Launch at Login");
 
 /// Update the tray status text
 pub fn update_status(_app_handle: &AppHandle, running: bool) {
@@ -288,41 +331,21 @@ fn radio_label(name: &str, selected: bool) -> String {
 
 /// Update the channel menu item labels to reflect the given channel
 pub(crate) fn update_channel_checks(channel: ReleaseChannel) {
-    if let Some(item) = CHANNEL_STABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Stable", channel == ReleaseChannel::Stable));
-    }
-    if let Some(item) = CHANNEL_BETA_ITEM.get() {
-        let _ = item.set_text(radio_label("Beta", channel == ReleaseChannel::Beta));
-    }
-    if let Some(item) = CHANNEL_DEV_ITEM.get() {
-        let _ = item.set_text(radio_label("Dev", channel == ReleaseChannel::Dev));
-    }
+    CHANNEL_STABLE_ITEM.refresh(channel == ReleaseChannel::Stable);
+    CHANNEL_BETA_ITEM.refresh(channel == ReleaseChannel::Beta);
+    CHANNEL_DEV_ITEM.refresh(channel == ReleaseChannel::Dev);
 }
 
 /// Update the backend menu item labels to reflect the given backend.
 pub(crate) fn update_backend_checks(backend: Backend) {
-    if let Some(item) = BACKEND_BUILDER_STABLE_ITEM.get() {
-        let _ = item.set_text(radio_label(
-            "ESPHome Device Builder (stable)",
-            backend == Backend::BuilderStable,
-        ));
-    }
-    if let Some(item) = BACKEND_BUILDER_BETA_ITEM.get() {
-        let _ = item.set_text(radio_label(
-            "ESPHome Device Builder (beta)",
-            backend == Backend::BuilderBeta,
-        ));
-    }
+    BACKEND_BUILDER_STABLE_ITEM.refresh(backend == Backend::BuilderStable);
+    BACKEND_BUILDER_BETA_ITEM.refresh(backend == Backend::BuilderBeta);
 }
 
 /// Update the startup menu item labels to reflect whether autostart is enabled.
 pub(crate) fn update_startup_checks(enabled: bool) {
-    if let Some(item) = STARTUP_ENABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Launch at Login", enabled));
-    }
-    if let Some(item) = STARTUP_DISABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Don't Launch at Login", !enabled));
-    }
+    STARTUP_ENABLE_ITEM.refresh(enabled);
+    STARTUP_DISABLE_ITEM.refresh(!enabled);
 }
 
 /// Re-detect the installed version and update the tray version display.
