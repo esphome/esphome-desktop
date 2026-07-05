@@ -286,6 +286,38 @@ fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
     Ok(true)
 }
 
+/// Put a bundled tool's directory at the front of this process's `PATH`
+/// (Windows only).
+///
+/// If `dir` contains `exe_name`, ensures `dir` is at the front of `PATH`
+/// (prepending it unless it is already present, per [`insert_dir_into_path`]),
+/// logs it, and returns `true`; `true` means the tool exists and its directory
+/// is on `PATH`, not that `PATH` was necessarily modified. If the exe is
+/// missing, warns with `missing_consequence` and returns `false` without
+/// touching `PATH`, leaving the caller to decide whether to bail out or
+/// continue.
+#[cfg(target_os = "windows")]
+fn prepend_bundled_tool(
+    dir: &Path,
+    exe_name: &str,
+    human_name: &str,
+    missing_consequence: &str,
+) -> Result<bool> {
+    use tracing::{info, warn};
+
+    let exe = dir.join(exe_name);
+    if !exe.exists() {
+        warn!(
+            "Bundled {} missing at {:?}; {}",
+            human_name, exe, missing_consequence
+        );
+        return Ok(false);
+    }
+    insert_dir_into_path(dir, PathInsert::Front)?;
+    info!("Using bundled {} at {:?}", human_name, exe);
+    Ok(true)
+}
+
 /// Ensure a usable `git` is on `PATH` for the ESPHome backend we spawn.
 ///
 /// ESPHome / PlatformIO / esphome-device-builder shell out to `git` for
@@ -308,35 +340,28 @@ fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
 pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use tracing::{info, warn};
-
         let git_dir = get_bundled_git_dir(app_handle)?;
-        let git_exe = git_dir.join("git.exe");
-        if !git_exe.exists() {
-            warn!(
-                "Bundled MinGit missing at {:?}; git-dependent features will \
-                 fail until git is on PATH",
-                git_exe
-            );
+        if !prepend_bundled_tool(
+            &git_dir,
+            "git.exe",
+            "MinGit",
+            "git-dependent features will fail until git is on PATH",
+        )? {
             return Ok(());
         }
-
-        // Prepend the bundled git dir so it wins over anything already on PATH.
-        insert_dir_into_path(&git_dir, PathInsert::Front)?;
 
         // Also expose the bundled GNU patch (issue #189) when present. Prepended
         // after git so it too sits ahead of the inherited PATH; only this
         // dedicated dir goes on PATH, not MinGit's full usr/bin, so the build
         // doesn't pick up MSYS sh/find/sort that shadow Windows built-ins.
+        // A missing patch.exe is log-and-continue: git alone is still useful.
         let patch_dir = get_bundled_patch_dir(app_handle)?;
-        if patch_dir.join("patch.exe").exists() {
-            insert_dir_into_path(&patch_dir, PathInsert::Front)?;
-            info!("Using bundled patch at {:?}", patch_dir);
-        } else {
-            warn!("Bundled patch.exe missing at {:?}; micro-opus and other components that need `patch` will fail to build", patch_dir);
-        }
-
-        info!("Using bundled MinGit at {:?}", git_exe);
+        prepend_bundled_tool(
+            &patch_dir,
+            "patch.exe",
+            "patch",
+            "micro-opus and other components that need `patch` will fail to build",
+        )?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -407,25 +432,16 @@ pub fn ensure_homebrew_on_path(app_handle: &AppHandle) -> Result<()> {
 pub fn ensure_ccache_on_path(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use tracing::{info, warn};
-
+        // There is no system ccache on Windows to shadow, so prepend vs append
+        // is immaterial; prepend keeps it consistent with the bundled git/patch
+        // handling above.
         let ccache_dir = get_bundled_ccache_dir(app_handle)?;
-        let ccache_exe = ccache_dir.join("ccache.exe");
-        if !ccache_exe.exists() {
-            warn!(
-                "Bundled ccache missing at {:?}; ESP-IDF builds will run without \
-                 compiler caching",
-                ccache_exe
-            );
-            return Ok(());
-        }
-
-        // Prepend the bundled ccache dir so it wins over anything already on
-        // PATH. There is no system ccache on Windows to shadow, so prepend vs
-        // append is immaterial; prepend keeps it consistent with the bundled
-        // git/patch handling above.
-        insert_dir_into_path(&ccache_dir, PathInsert::Front)?;
-        info!("Using bundled ccache at {:?}", ccache_exe);
+        prepend_bundled_tool(
+            &ccache_dir,
+            "ccache.exe",
+            "ccache",
+            "ESP-IDF builds will run without compiler caching",
+        )?;
     }
 
     #[cfg(not(target_os = "windows"))]
