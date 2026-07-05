@@ -111,7 +111,8 @@ pub(crate) fn unique_temp_dir(tag: &str) -> PathBuf {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("failed to create temp dir {}: {e}", dir.display()));
     dir
 }
 
