@@ -399,7 +399,17 @@ async fn dispatch(
             }
         }
         Request::Quit => {
+            // Refuse to quit while an update/switch is in flight: tearing the
+            // process down now would orphan a pip install mid-write and corrupt
+            // the site-packages tree — the same hazard the Update arm's
+            // `mem::forget` note guards against. Keep the flag held for the rest
+            // of this process's life (like the Update arm): dropping it here
+            // would reopen the window during the teardown (writer flush + async
+            // `daemon.stop()`) for a concurrent update to start a pip install
+            // that the imminent exit then orphans.
+            let guard = guard_or_busy!();
             let _ = tx.send(Reply::ok("quitting"));
+            std::mem::forget(guard);
             return Some(PostAction::Exit);
         }
         Request::CheckUpdate => {

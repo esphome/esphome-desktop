@@ -804,7 +804,17 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
             });
         }
         ids::QUIT => {
+            // Refuse to tear the app down while an update/switch is mid-flight:
+            // exiting now would orphan a pip install mid-write and corrupt the
+            // site-packages tree (the same reason the update arms hold the
+            // guard). The click is ignored with a log line if a sequence is in
+            // progress. Keep the flag held for the rest of this process's life
+            // (like the Update arm): dropping it when this arm returns would
+            // reopen the window during the async teardown (`daemon.stop()`) for
+            // a concurrent update to start a pip install the exit then orphans.
+            let guard = guard_or_return!(state, "Quit");
             info!("Quit requested");
+            std::mem::forget(guard);
             // Delegate cleanup to the RunEvent::ExitRequested handler in
             // lib.rs so the shutdown sequence lives in exactly one place.
             app_handle.exit(0);
