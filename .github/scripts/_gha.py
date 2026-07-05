@@ -10,11 +10,16 @@ from __future__ import annotations
 import sys
 
 
+def _escape(msg: str) -> str:
+    """Escape workflow-command message data per GitHub's escaping rules."""
+    return msg.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def warn(msg: str) -> None:
     """Emit a GitHub-Actions-style warning to stderr (also readable locally)."""
-    print(f"::warning::{msg}", file=sys.stderr)
+    print(f"::warning::{_escape(msg)}", file=sys.stderr)
 
 
 def error(msg: str) -> None:
     """Emit a GitHub-Actions-style error to stderr (also readable locally)."""
-    print(f"::error::{msg}", file=sys.stderr)
+    print(f"::error::{_escape(msg)}", file=sys.stderr)

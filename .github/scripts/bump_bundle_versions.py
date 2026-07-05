@@ -55,7 +55,9 @@ from typing import Any, TypeVar
 
 # This script runs by path (not as an installed package), so make the sibling
 # _gha helper importable regardless of the caller's cwd.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 from _gha import error as _error  # noqa: E402
 from _gha import warn as _warn  # noqa: E402
