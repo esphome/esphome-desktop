@@ -4,8 +4,8 @@
 //! Framing is newline-delimited JSON with one request per connection: the
 //! client sends a single [`Request`] line; the server replies with zero or
 //! more [`Reply::Progress`] lines followed by exactly one terminal reply
-//! ([`Reply::Ok`], [`Reply::Err`], or [`Reply::Status`]) and closes the
-//! connection.
+//! ([`Reply::Ok`], [`Reply::Err`], [`Reply::Status`], or
+//! [`Reply::UpdateCheck`]) and closes the connection.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,6 +15,18 @@ use crate::settings::{Backend, ReleaseChannel};
 /// Upper bound on a single protocol line. Requests and replies are tiny; a
 /// line this long means a confused peer, not a real client.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// Version of the machine-readable `esphome-desktop api ...` contract, reported
+/// by `esphome-desktop api version`. The device-builder dashboard gates on this
+/// so we can evolve the human CLI freely.
+///
+/// The `api` client forwards each server reply as its own JSON line (only the
+/// surrounding whitespace is trimmed), so the wire shapes of [`Reply`],
+/// [`StatusReply`], and [`UpdateCheckReply`] — their serde `type` tags and their
+/// fields — ARE this public contract, not merely internal types.
+/// Renaming/removing a field or changing a tag on them is a breaking change to
+/// the dashboard and must bump this version. Do not refactor them casually.
+pub const API_SCHEMA_VERSION: u32 = 1;
 
 /// Name of the control pipe on Windows, where unix sockets are unavailable.
 #[cfg(windows)]
@@ -45,6 +57,9 @@ pub enum Request {
     SetStartup { enable: bool },
     /// Update the desktop app, ESPHome, and the device builder.
     Update,
+    /// Report whether an update is available for any component, without
+    /// installing anything.
+    CheckUpdate,
     /// Restart the dashboard backend.
     Restart,
     /// Quit the app.
@@ -75,6 +90,8 @@ pub enum Reply {
     Progress { step: String, detail: String },
     /// Terminal reply to [`Request::Status`].
     Status(Box<StatusReply>),
+    /// Terminal reply to [`Request::CheckUpdate`].
+    UpdateCheck(Box<UpdateCheckReply>),
 }
 
 impl Reply {
@@ -109,6 +126,79 @@ pub struct StatusReply {
     pub launch_at_startup: bool,
     pub config_dir: PathBuf,
     pub logs_dir: PathBuf,
+}
+
+/// Availability of an update for one component, returned inside
+/// [`UpdateCheckReply`]. A failed check is reported as `error` (with
+/// `available = false`) rather than sinking the whole reply, so one flaky
+/// network call doesn't blind the dashboard to the other components.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentUpdate {
+    /// A newer version than the installed one is available.
+    pub available: bool,
+    /// The currently installed version, if known (`None` when not installed).
+    pub installed: Option<String>,
+    /// The newest available version, if the check succeeded.
+    pub latest: Option<String>,
+    /// Why the check could not complete, if it failed.
+    pub error: Option<String>,
+}
+
+impl ComponentUpdate {
+    /// Installed and current: `latest` is the newest known version (equal to
+    /// `installed` when nothing newer exists).
+    pub fn current(installed: String, latest: String) -> Self {
+        Self {
+            available: false,
+            installed: Some(installed),
+            latest: Some(latest),
+            error: None,
+        }
+    }
+
+    /// A newer version is available.
+    pub fn upgradable(installed: String, latest: String) -> Self {
+        Self {
+            available: true,
+            installed: Some(installed),
+            latest: Some(latest),
+            error: None,
+        }
+    }
+
+    /// The component is not installed; nothing to update.
+    pub fn not_installed() -> Self {
+        Self {
+            available: false,
+            installed: None,
+            latest: None,
+            error: None,
+        }
+    }
+
+    /// The check itself failed.
+    pub fn errored(installed: Option<String>, error: String) -> Self {
+        Self {
+            available: false,
+            installed,
+            latest: None,
+            error: Some(error),
+        }
+    }
+}
+
+/// Terminal reply to [`Request::CheckUpdate`]: per-component update
+/// availability plus a top-level convenience flag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateCheckReply {
+    /// True when any component has an update available; the banner trigger.
+    pub any_available: bool,
+    /// The desktop app itself (Tauri self-update from GitHub Releases).
+    pub app: ComponentUpdate,
+    /// The ESPHome Python package.
+    pub esphome: ComponentUpdate,
+    /// The `esphome-device-builder` package (the dashboard backend).
+    pub device_builder: ComponentUpdate,
 }
 
 /// Short lowercase channel name used on the CLI surface (matches the
@@ -199,6 +289,7 @@ mod tests {
             Request::GetStartup,
             Request::SetStartup { enable: false },
             Request::Update,
+            Request::CheckUpdate,
             Request::Restart,
             Request::Quit,
             Request::Status,
@@ -241,12 +332,38 @@ mod tests {
                 config_dir: PathBuf::from("/home/x/esphome"),
                 logs_dir: PathBuf::from("/home/x/.local/share/io.esphome.builder/logs"),
             })),
+            Reply::UpdateCheck(Box::new(UpdateCheckReply {
+                any_available: true,
+                app: ComponentUpdate::upgradable("0.13.0".into(), "0.14.0".into()),
+                esphome: ComponentUpdate::current("2026.6.2".into(), "2026.6.2".into()),
+                device_builder: ComponentUpdate::not_installed(),
+            })),
         ];
         for reply in replies {
             let line = serde_json::to_string(&reply).expect("serialize");
             let back: Reply = serde_json::from_str(&line).expect("deserialize");
             assert_eq!(back, reply, "line: {line}");
         }
+    }
+
+    #[test]
+    fn update_check_reply_shape() {
+        let reply = Reply::UpdateCheck(Box::new(UpdateCheckReply {
+            any_available: false,
+            app: ComponentUpdate::current("0.13.0".into(), "0.13.0".into()),
+            esphome: ComponentUpdate::errored(Some("2026.6.2".into()), "network down".into()),
+            device_builder: ComponentUpdate::not_installed(),
+        }));
+        let value = serde_json::to_value(&reply).expect("serialize");
+        // The type tag lets the dashboard route the line; the error rides
+        // alongside `available:false` instead of failing the whole reply.
+        assert_eq!(value["type"], "update_check");
+        assert_eq!(value["esphome"]["available"], false);
+        assert_eq!(value["esphome"]["error"], "network down");
+        assert_eq!(
+            value["device_builder"]["installed"],
+            serde_json::Value::Null
+        );
     }
 
     #[cfg(unix)]

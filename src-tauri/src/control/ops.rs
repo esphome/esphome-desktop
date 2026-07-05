@@ -15,6 +15,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{error, info, warn};
 
+use super::protocol::ComponentUpdate;
 use crate::settings::ReleaseChannel;
 use crate::{tray, AppState};
 
@@ -343,6 +344,75 @@ where
     match tokio::task::spawn_blocking(move || f(&app)).await {
         Ok(result) => result.map_err(|e| e.to_string()),
         Err(join) => Err(join.to_string()),
+    }
+}
+
+/// Whether `latest` is a newer version than `installed`, mapped onto the
+/// [`ComponentUpdate`] the check reply carries. Uses the same
+/// `is_newer_version` comparison the update sequences use, so the `available`
+/// flag never disagrees with what an actual `update` would install.
+fn compare(installed: String, latest: String) -> ComponentUpdate {
+    if crate::update::is_newer_version(&latest, &installed) {
+        ComponentUpdate::upgradable(installed, latest)
+    } else {
+        ComponentUpdate::current(installed, latest)
+    }
+}
+
+/// Whether a desktop app self-update is available, without installing it. Reads
+/// the same `updater().check()` the update flow uses, but only reports.
+pub(crate) async fn desktop_update_available(app: &AppHandle) -> ComponentUpdate {
+    let installed = app.package_info().version.to_string();
+    match app.updater() {
+        Ok(updater) => match updater.check().await {
+            Ok(Some(update)) => ComponentUpdate::upgradable(installed, update.version),
+            Ok(None) => ComponentUpdate::current(installed.clone(), installed),
+            Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
+        },
+        Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
+    }
+}
+
+/// Whether an ESPHome package update is available, without installing it.
+pub(crate) async fn esphome_update_available(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    channel: ReleaseChannel,
+) -> ComponentUpdate {
+    let installed = match detect(app, crate::update::installed_esphome_version).await {
+        Ok(Some(v)) => v,
+        // ESPHome absent is a normal state ("nothing to update"), not an error —
+        // mirrors the device-builder not-installed path below.
+        Ok(None) => return ComponentUpdate::not_installed(),
+        Err(e) => return ComponentUpdate::errored(None, e),
+    };
+    // The dev channel has no version-based check: `update` always reinstalls the
+    // latest dev commit, so a passive check can't call it "newer". Report it as
+    // current so the dashboard banner doesn't nag on every dev build.
+    if channel == ReleaseChannel::Dev {
+        return ComponentUpdate::current(installed.clone(), installed);
+    }
+    match state.update_checker.check(channel).await {
+        Ok(Some(latest)) => compare(installed, latest),
+        Ok(None) => ComponentUpdate::current(installed.clone(), installed),
+        Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
+    }
+}
+
+/// Whether a device-builder package update is available, without installing it.
+pub(crate) async fn device_builder_update_available(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    backend: crate::settings::Backend,
+) -> ComponentUpdate {
+    let installed = match detect(app, crate::update::get_installed_device_builder_version).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return ComponentUpdate::not_installed(),
+        Err(e) => return ComponentUpdate::errored(None, e),
+    };
+    match state.update_checker.check_device_builder(backend).await {
+        Ok(latest) => compare(installed, latest),
+        Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
     }
 }
 

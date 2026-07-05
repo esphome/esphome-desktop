@@ -125,6 +125,29 @@ pub enum CliCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Stable, versioned JSON API for the device-builder integration (hidden
+    /// from help; not for interactive use). Emits newline-delimited JSON only.
+    #[command(subcommand, hide = true)]
+    Api(ApiMethod),
+}
+
+/// Methods of the machine-readable `esphome-desktop api <method>` interface.
+/// This is the contract the device-builder dashboard codes against; unlike the
+/// human subcommands above it emits only NDJSON and is versioned via
+/// [`control::protocol::API_SCHEMA_VERSION`], so the human CLI stays free to
+/// change. Every line is one JSON object the caller can `json.loads`.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum ApiMethod {
+    /// Print the API schema version and exit (no running app required)
+    Version,
+    /// Print app and backend status as one JSON object
+    Status,
+    /// Report whether any component has an update available, without installing
+    CheckUpdate,
+    /// Trigger the full update; streams JSON progress then a terminal reply.
+    /// Non-interactive: the backend is restarted without any confirmation, so
+    /// an unattended remote builder recovers on its own.
+    Update,
 }
 
 /// ESPHome Device Builder - System tray application for ESPHome
