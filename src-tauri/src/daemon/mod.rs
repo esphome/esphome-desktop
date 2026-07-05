@@ -598,15 +598,20 @@ impl DaemonManager {
     }
 }
 
-/// Build the health-check URL for the dashboard.
+/// Build the IPv4-loopback URL for probing the dashboard on `port`.
+///
+/// Shared by the periodic health check ([`health_check`]) and the startup
+/// readiness poll (`wait_for_dashboard_ready` in `lib.rs`).
 ///
 /// The backend is spawned with `--address 127.0.0.1` / `--host 127.0.0.1`
 /// (see `start()`), so it only listens on the IPv4 loopback. Probing the
 /// literal `127.0.0.1` rather than the `localhost` hostname avoids a
 /// resolver detour: on IPv6-first hosts `localhost` resolves to `::1`
-/// first, where nothing is listening, producing spurious health-check
-/// failures (and a 5s connect stall per cycle before the IPv4 fallback).
-fn health_check_url(port: u16) -> String {
+/// first, where nothing is listening, producing spurious probe failures
+/// (and a connect stall per cycle before the IPv4 fallback). The
+/// browser-facing `open_dashboard` URL deliberately uses `localhost` and
+/// stays separate.
+pub(crate) fn loopback_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/", port)
 }
 
@@ -617,7 +622,7 @@ pub(crate) async fn health_check(port: u16) -> Result<bool> {
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
 
-    let url = health_check_url(port);
+    let url = loopback_url(port);
     match client.get(&url).send().await {
         Ok(response) => Ok(response.status().is_success()),
         Err(_) => Ok(false),
@@ -626,14 +631,14 @@ pub(crate) async fn health_check(port: u16) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::health_check_url;
+    use super::loopback_url;
 
     #[test]
-    fn health_check_url_targets_ipv4_loopback() {
+    fn loopback_url_targets_ipv4_loopback() {
         // Must match the address the backend binds (`127.0.0.1`), not the
         // `localhost` hostname, so the probe doesn't get steered to `::1`
         // on IPv6-first hosts where the daemon isn't listening.
-        assert_eq!(health_check_url(6052), "http://127.0.0.1:6052/");
-        assert!(!health_check_url(6052).contains("localhost"));
+        assert_eq!(loopback_url(6052), "http://127.0.0.1:6052/");
+        assert!(!loopback_url(6052).contains("localhost"));
     }
 }
