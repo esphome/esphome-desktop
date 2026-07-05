@@ -555,6 +555,9 @@
           const list = manifestDownloads[target];
           const entry = Array.isArray(list) ? list.find((d) => d && d.kind === kind) : undefined;
           if (entry && typeof entry.url === 'string') return entry.url;
+          // A loaded manifest without this pair means the asset naming
+          // drifted; that is exactly what this page must not hide.
+          console.warn('latest.json has no ' + kind + ' entry for ' + target + '; using template-built URL');
         }
         return asset(fallbackFilename);
       }
