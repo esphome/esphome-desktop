@@ -33,13 +33,23 @@ pub(crate) fn appimage_path() -> Option<std::path::PathBuf> {
 /// interface without guessing where the binary lives. On macOS/Windows
 /// `current_exe` is the bundle's own binary, which dispatches subcommands
 /// directly (the same binary the macOS PATH wrapper execs).
+///
+/// The result is always absolute: the backend changes its working directory, so
+/// a relative path would be unusable there. `$APPIMAGE` is normally absolute,
+/// but if it is relative it is canonicalized; should that fail and leave a
+/// relative path, this falls back to `current_exe` rather than export a
+/// cwd-relative value.
 pub(crate) fn cli_invocation_path() -> Option<std::path::PathBuf> {
     if let Some(path) = appimage_path() {
-        // `$APPIMAGE` is normally absolute, but canonicalize defensively so a
-        // relative value (rare wrapper launches) still resolves after the
-        // backend changes its working directory; fall back to the raw path if
-        // canonicalization fails.
-        return Some(std::fs::canonicalize(&path).unwrap_or(path));
+        match std::fs::canonicalize(&path) {
+            Ok(absolute) => return Some(absolute),
+            // Canonicalization failed, but the raw value is already absolute and
+            // thus still usable from any working directory.
+            Err(_) if path.is_absolute() => return Some(path),
+            // Relative and unresolvable: fall through to the always-absolute
+            // current_exe rather than hand the backend a path it can't re-run.
+            Err(_) => {}
+        }
     }
     std::env::current_exe().ok()
 }
