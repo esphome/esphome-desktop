@@ -289,9 +289,11 @@ fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
 /// Put a bundled tool's directory at the front of this process's `PATH`
 /// (Windows only).
 ///
-/// If `dir` contains `exe_name`, prepends `dir` to `PATH` so the bundled copy
-/// wins over anything already there, logs it, and returns `true`. If the exe
-/// is missing, warns with `missing_consequence` and returns `false` without
+/// If `dir` contains `exe_name`, ensures `dir` is at the front of `PATH`
+/// (prepending it unless it is already present, per [`insert_dir_into_path`]),
+/// logs it, and returns `true`; `true` means the tool exists and its directory
+/// is on `PATH`, not that `PATH` was necessarily modified. If the exe is
+/// missing, warns with `missing_consequence` and returns `false` without
 /// touching `PATH`, leaving the caller to decide whether to bail out or
 /// continue.
 #[cfg(target_os = "windows")]
