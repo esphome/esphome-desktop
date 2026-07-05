@@ -125,13 +125,12 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Backend submenu items
     let current_backend = settings.backend;
-    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build(
+    // TODO: use `build` once a stable release of esphome-device-builder is out
+    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build_disabled(
         app_handle,
         ids::BACKEND_BUILDER_STABLE,
         current_backend == Backend::BuilderStable,
     )?;
-    // TODO: remove once a stable release of esphome-device-builder is out
-    backend_builder_stable.set_enabled(false)?;
     let backend_builder_beta = BACKEND_BUILDER_BETA_ITEM.build(
         app_handle,
         ids::BACKEND_BUILDER_BETA,
@@ -237,8 +236,36 @@ impl RadioItem {
         id: &str,
         selected: bool,
     ) -> Result<MenuItem<tauri::Wry>> {
-        let item =
-            MenuItemBuilder::with_id(id, radio_label(self.label, selected)).build(app_handle)?;
+        self.build_impl(app_handle, id, selected, true)
+    }
+
+    /// Like [`RadioItem::build`], but the item is greyed out.
+    fn build_disabled(
+        &self,
+        app_handle: &AppHandle,
+        id: &str,
+        selected: bool,
+    ) -> Result<MenuItem<tauri::Wry>> {
+        self.build_impl(app_handle, id, selected, false)
+    }
+
+    fn build_impl(
+        &self,
+        app_handle: &AppHandle,
+        id: &str,
+        selected: bool,
+        enabled: bool,
+    ) -> Result<MenuItem<tauri::Wry>> {
+        // If a previous build already registered an item, reuse it so
+        // `refresh` keeps targeting the item that is live in the menu.
+        if let Some(item) = self.item.get() {
+            item.set_text(radio_label(self.label, selected))?;
+            item.set_enabled(enabled)?;
+            return Ok(item.clone());
+        }
+        let item = MenuItemBuilder::with_id(id, radio_label(self.label, selected))
+            .enabled(enabled)
+            .build(app_handle)?;
         let _ = self.item.set(item.clone());
         Ok(item)
     }
@@ -246,7 +273,9 @@ impl RadioItem {
     /// Update the registered item's label to reflect the current selection.
     fn refresh(&self, selected: bool) {
         if let Some(item) = self.item.get() {
-            let _ = item.set_text(radio_label(self.label, selected));
+            if let Err(e) = item.set_text(radio_label(self.label, selected)) {
+                warn!("Failed to update tray menu item '{}': {}", self.label, e);
+            }
         }
     }
 }
