@@ -1,0 +1,49 @@
+name: Setup Rust
+description: >-
+  Installs the Rust toolchain and configures the Swatinem/rust-cache settings
+  shared by every Rust CI job. Per-job knobs (toolchain, targets, components,
+  cache key, cache-bin) come in as inputs.
+
+inputs:
+  toolchain:
+    description: Rust toolchain specification passed to dtolnay/rust-toolchain.
+    required: false
+    default: stable
+  targets:
+    description: Comma-separated list of extra target triples to install.
+    required: false
+    default: ""
+  components:
+    description: Comma-separated list of toolchain components to install.
+    required: false
+    default: ""
+  cache-key:
+    description: Swatinem/rust-cache key for this job.
+    required: true
+  cache-bin:
+    description: >-
+      Whether Swatinem/rust-cache caches ~/.cargo/bin. Defaults to "false" as
+      a workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin produces
+      broken cargo/rustc symlinks on the new macOS runner image (harmless to
+      skip on the other platforms).
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, toolchain selected via the input
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
+
+    - name: Setup Rust cache
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        workspaces: src-tauri
+        key: ${{ inputs.cache-key }}
+        # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
+        # produces broken cargo/rustc symlinks on the new macOS runner image.
+        cache-bin: ${{ inputs.cache-bin }}
