@@ -2364,7 +2364,29 @@ mod tests {
         let base = unique_temp_dir("interp-healthy");
         let _ = std::fs::remove_dir_all(&base);
         let bin = write_stub_interpreter(&base, "exit 0");
-        assert!(interpreter_is_usable(&bin));
+        // Retry to ride out a transient ETXTBSY ("text file busy"): this test
+        // binary is multithreaded, and a concurrent fork in another test can
+        // briefly leave the just-written stub open for writing, so the first
+        // execve of it can fail even though the interpreter is fine. Linux
+        // enforces this; macOS does not, which is why only Linux CI flaked.
+        const ATTEMPTS: usize = 20;
+        let mut usable = false;
+        for attempt in 0..ATTEMPTS {
+            if interpreter_is_usable(&bin) {
+                usable = true;
+                break;
+            }
+            // Don't sleep after the final attempt: nothing follows it, so it
+            // would only delay a genuine failure's assert.
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        assert!(
+            usable,
+            "interpreter_is_usable never returned true after {ATTEMPTS} attempts \
+             (a real exec failure, not the transient ETXTBSY this retry covers)"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
