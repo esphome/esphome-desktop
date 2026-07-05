@@ -50,16 +50,20 @@ VERSION_FILES: tuple[tuple[str, re.Pattern[str], str], ...] = (
 def set_version(
     text: str, pattern: re.Pattern[str], template: str, version: str
 ) -> str:
-    """Replace every match of `pattern` with the filled-in `template`.
+    """Replace exactly one match of `pattern` with the filled-in `template`.
 
-    Raises ValueError when nothing matches so a renamed or restructured file
-    fails the release job instead of silently shipping a stale version.
+    Raises ValueError when the match count is not exactly one, so a renamed
+    or restructured file fails the release job instead of silently shipping
+    a stale version, and an over-broad pattern fails instead of silently
+    rewriting extra lines.
     """
     replacement = template.format(version=version)
     # Function replacement so any backslashes/specials stay literal.
     new, count = pattern.subn(lambda _m: replacement, text)
-    if count == 0:
-        raise ValueError(f"pattern {pattern.pattern!r} matched nothing")
+    if count != 1:
+        raise ValueError(
+            f"pattern {pattern.pattern!r} matched {count} lines, expected exactly 1"
+        )
     return new
 
 

@@ -109,8 +109,16 @@ def test_pkgbuild_rewrites_pkgver_only() -> None:
 
 def test_set_version_raises_when_pattern_matches_nothing() -> None:
     pattern, template = _table_entry("src-tauri/Cargo.toml")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="matched 0 lines"):
         set_version.set_version('[package]\nname = "x"\n', pattern, template, "1.0.0")
+
+
+def test_set_version_raises_when_pattern_matches_more_than_once() -> None:
+    # An over-broad pattern must fail loudly instead of rewriting every match.
+    pattern, template = _table_entry("src-tauri/Cargo.toml")
+    text = 'version = "0.1.0"\nversion = "0.2.0"\n'
+    with pytest.raises(ValueError, match="matched 2 lines"):
+        set_version.set_version(text, pattern, template, "1.0.0")
 
 
 def test_table_covers_the_real_files() -> None:
