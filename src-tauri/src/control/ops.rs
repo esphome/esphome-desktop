@@ -348,9 +348,12 @@ where
 }
 
 /// Whether `latest` is a newer version than `installed`, mapped onto the
-/// [`ComponentUpdate`] the check reply carries. Uses the same
-/// `is_newer_version` comparison the update sequences use, so the `available`
-/// flag never disagrees with what an actual `update` would install.
+/// [`ComponentUpdate`] the check reply carries. The install sequences derive
+/// their decision from this same result via [`install_action`], so on the
+/// stable and beta channels the `available` flag never disagrees with what an
+/// actual `update` installs. The one deliberate exception is the ESPHome dev
+/// channel, where the check reports "current" but `update` always reinstalls
+/// (see [`esphome_install_action`]).
 fn compare(installed: String, latest: String) -> ComponentUpdate {
     if crate::update::is_newer_version(&latest, &installed) {
         ComponentUpdate::upgradable(installed, latest)
@@ -374,6 +377,7 @@ pub(crate) async fn desktop_update_available(app: &AppHandle) -> ComponentUpdate
 }
 
 /// Whether an ESPHome package update is available, without installing it.
+/// Also the source of truth for the install path (see [`install_action`]).
 pub(crate) async fn esphome_update_available(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -399,7 +403,8 @@ pub(crate) async fn esphome_update_available(
     }
 }
 
-/// Whether a device-builder package update is available, without installing it.
+/// Whether a device-builder package update is available, without installing
+/// it. Also the source of truth for the install path (see [`install_action`]).
 pub(crate) async fn device_builder_update_available(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -413,6 +418,86 @@ pub(crate) async fn device_builder_update_available(
     match state.update_checker.check_device_builder(backend).await {
         Ok(latest) => compare(installed, latest),
         Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
+    }
+}
+
+/// What an install sequence should do, decided purely from a
+/// [`ComponentUpdate`] produced by the availability helpers. Keeping the
+/// decision out of the async install fns makes it unit-testable and keeps the
+/// install path's view of "is an update available" derived from the exact
+/// value the check path reports; the only deliberate divergence is the
+/// dev-channel override in [`esphome_install_action`].
+#[derive(Debug, PartialEq)]
+enum InstallAction {
+    /// Install `target` over `installed`.
+    Install { installed: String, target: String },
+    /// Nothing newer exists.
+    UpToDate { installed: String },
+    /// The component is not installed; skip it.
+    NotInstalled,
+    /// Version detection failed (the availability helpers encode this as
+    /// `errored` with `installed: None` — they return before ever running the
+    /// update check when detection fails).
+    DetectionFailed(String),
+    /// Detection succeeded but the update check failed (`errored` with
+    /// `installed: Some(_)`).
+    CheckFailed(String),
+}
+
+/// Map an availability result onto the install action. Shared by the ESPHome
+/// and device-builder phases; the dev-channel override is layered on top in
+/// [`esphome_install_action`].
+fn install_action(check: ComponentUpdate) -> InstallAction {
+    match check {
+        ComponentUpdate {
+            error: Some(e),
+            installed: None,
+            ..
+        } => InstallAction::DetectionFailed(e),
+        ComponentUpdate { error: Some(e), .. } => InstallAction::CheckFailed(e),
+        ComponentUpdate {
+            installed: None, ..
+        } => InstallAction::NotInstalled,
+        ComponentUpdate {
+            available: true,
+            installed: Some(installed),
+            latest: Some(target),
+            ..
+        } => InstallAction::Install { installed, target },
+        ComponentUpdate {
+            available,
+            installed: Some(installed),
+            ..
+        } => {
+            // `available` without a `latest` is unconstructible today
+            // (`upgradable` is the only constructor that sets it, and it
+            // always carries both versions). Assert that so a future
+            // constructor can't silently downgrade an "available" result to
+            // up to date; in release builds the conservative reading (never
+            // install on incomplete data) stands.
+            debug_assert!(
+                !available,
+                "ComponentUpdate available without a latest version"
+            );
+            InstallAction::UpToDate { installed }
+        }
+    }
+}
+
+/// ESPHome install action: [`install_action`] plus the dev-channel rule. The
+/// dev channel has no version-based check — the availability helper reports
+/// dev as "current" so the dashboard banner doesn't nag, but `update` always
+/// reinstalls the latest dev commit, which is the only way dev moves forward.
+/// Rewriting only `UpToDate` keeps the not-installed and error paths intact.
+fn esphome_install_action(check: ComponentUpdate, channel: ReleaseChannel) -> InstallAction {
+    match install_action(check) {
+        InstallAction::UpToDate { installed } if channel == ReleaseChannel::Dev => {
+            InstallAction::Install {
+                installed,
+                target: "dev".to_string(),
+            }
+        }
+        action => action,
     }
 }
 
@@ -505,38 +590,25 @@ async fn update_esphome_package(
     report: &mut UpdateReport,
 ) {
     progress("esphome", "checking for an ESPHome update");
-    let installed = match detect(app, crate::update::installed_esphome_version).await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            report.fail("ESPHome is not installed".to_string());
+    let check = esphome_update_available(app, state, channel).await;
+    let (installed, target) = match esphome_install_action(check, channel) {
+        InstallAction::Install { installed, target } => (installed, target),
+        InstallAction::UpToDate { installed } => {
+            report.note(format!("esphome {installed} is up to date"));
             return;
         }
-        Err(e) => {
+        InstallAction::NotInstalled => {
+            report.note("esphome is not installed; skipping".to_string());
+            return;
+        }
+        InstallAction::DetectionFailed(e) => {
             report.fail(format!("esphome version detection failed: {e}"));
             return;
         }
-    };
-
-    // The dev channel has no version-based check; `update` reinstalls from the
-    // latest dev commit, which is the only way dev moves forward.
-    let target = if channel == ReleaseChannel::Dev {
-        Some("dev".to_string())
-    } else {
-        match state.update_checker.check(channel).await {
-            Ok(Some(latest)) if crate::update::is_newer_version(&latest, &installed) => {
-                Some(latest)
-            }
-            Ok(_) => None,
-            Err(e) => {
-                report.fail(format!("esphome update check failed: {e}"));
-                return;
-            }
+        InstallAction::CheckFailed(e) => {
+            report.fail(format!("esphome update check failed: {e}"));
+            return;
         }
-    };
-
-    let Some(target) = target else {
-        report.note(format!("esphome {installed} is up to date"));
-        return;
     };
 
     let label = if target == "dev" {
@@ -570,29 +642,26 @@ async fn update_device_builder_package(
     report: &mut UpdateReport,
 ) {
     progress("device-builder", "checking for a device builder update");
-    let installed = match detect(app, crate::update::get_installed_device_builder_version).await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
+    let check = device_builder_update_available(app, state, backend).await;
+    let (installed, latest) = match install_action(check) {
+        InstallAction::Install { installed, target } => (installed, target),
+        InstallAction::UpToDate { installed } => {
+            report.note(format!("device builder {installed} is up to date"));
+            return;
+        }
+        InstallAction::NotInstalled => {
             report.note("device builder is not installed; skipping".to_string());
             return;
         }
-        Err(e) => {
+        InstallAction::DetectionFailed(e) => {
             report.fail(format!("device builder version detection failed: {e}"));
             return;
         }
-    };
-
-    let latest = match state.update_checker.check_device_builder(backend).await {
-        Ok(v) => v,
-        Err(e) => {
+        InstallAction::CheckFailed(e) => {
             report.fail(format!("device builder update check failed: {e}"));
             return;
         }
     };
-    if !crate::update::is_newer_version(&latest, &installed) {
-        report.note(format!("device builder {installed} is up to date"));
-        return;
-    }
 
     progress(
         "device-builder",
@@ -705,6 +774,120 @@ mod tests {
         assert!(
             UpdateGuard::try_acquire(flag.clone()).is_some(),
             "reacquirable after release"
+        );
+    }
+
+    #[test]
+    fn install_action_upgradable_installs_latest() {
+        let action = install_action(ComponentUpdate::upgradable(
+            "2025.6.0".into(),
+            "2025.7.0".into(),
+        ));
+        assert_eq!(
+            action,
+            InstallAction::Install {
+                installed: "2025.6.0".into(),
+                target: "2025.7.0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_action_current_is_up_to_date() {
+        let action = install_action(ComponentUpdate::current(
+            "2025.7.0".into(),
+            "2025.7.0".into(),
+        ));
+        assert_eq!(
+            action,
+            InstallAction::UpToDate {
+                installed: "2025.7.0".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn install_action_not_installed_skips() {
+        assert_eq!(
+            install_action(ComponentUpdate::not_installed()),
+            InstallAction::NotInstalled
+        );
+    }
+
+    #[test]
+    fn install_action_maps_detection_failure() {
+        assert_eq!(
+            install_action(ComponentUpdate::errored(None, "python broke".into())),
+            InstallAction::DetectionFailed("python broke".into())
+        );
+    }
+
+    #[test]
+    fn install_action_maps_check_failure() {
+        assert_eq!(
+            install_action(ComponentUpdate::errored(
+                Some("1.2.3".into()),
+                "network down".into()
+            )),
+            InstallAction::CheckFailed("network down".into())
+        );
+    }
+
+    #[test]
+    fn esphome_dev_channel_always_reinstalls() {
+        let action = esphome_install_action(
+            ComponentUpdate::current("2026.7.0-dev".into(), "2026.7.0-dev".into()),
+            ReleaseChannel::Dev,
+        );
+        assert_eq!(
+            action,
+            InstallAction::Install {
+                installed: "2026.7.0-dev".into(),
+                target: "dev".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn esphome_dev_channel_not_installed_skips() {
+        assert_eq!(
+            esphome_install_action(ComponentUpdate::not_installed(), ReleaseChannel::Dev),
+            InstallAction::NotInstalled
+        );
+    }
+
+    #[test]
+    fn esphome_dev_channel_detection_failure_still_fails() {
+        assert_eq!(
+            esphome_install_action(
+                ComponentUpdate::errored(None, "boom".into()),
+                ReleaseChannel::Dev
+            ),
+            InstallAction::DetectionFailed("boom".into())
+        );
+    }
+
+    #[test]
+    fn esphome_stable_channel_uses_plain_mapping() {
+        let action = esphome_install_action(
+            ComponentUpdate::upgradable("2025.6.0".into(), "2025.7.0".into()),
+            ReleaseChannel::Stable,
+        );
+        assert_eq!(
+            action,
+            InstallAction::Install {
+                installed: "2025.6.0".into(),
+                target: "2025.7.0".into(),
+            }
+        );
+        assert_eq!(
+            esphome_install_action(
+                ComponentUpdate::current("2025.7.0".into(), "2025.7.0".into()),
+                ReleaseChannel::Stable,
+            ),
+            InstallAction::UpToDate {
+                installed: "2025.7.0".into(),
+            }
         );
     }
 }

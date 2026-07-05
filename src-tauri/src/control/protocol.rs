@@ -176,7 +176,10 @@ impl ComponentUpdate {
         }
     }
 
-    /// The check itself failed.
+    /// The check itself failed. `installed: None` means version detection
+    /// itself failed; `Some` means detection succeeded but the update check
+    /// failed. The install path relies on this distinction to pick its
+    /// failure message.
     pub fn errored(installed: Option<String>, error: String) -> Self {
         Self {
             available: false,
