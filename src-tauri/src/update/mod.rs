@@ -53,6 +53,20 @@ impl UpdateChecker {
         }
     }
 
+    /// Fetch and parse the PyPI JSON metadata for `package`.
+    ///
+    /// Callers pass fixed internal package names, so no URL encoding is needed.
+    async fn fetch_pypi(&self, package: &str) -> Result<PyPIResponse> {
+        self.client
+            .get(format!("https://pypi.org/pypi/{package}/json"))
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch PyPI info for {package}"))?
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse PyPI response for {package}"))
+    }
+
     /// Check for updates and return the latest version string for the given channel.
     ///
     /// - Stable: returns the latest stable version from PyPI
@@ -62,15 +76,7 @@ impl UpdateChecker {
         match channel {
             ReleaseChannel::Stable => {
                 debug!("Checking for stable ESPHome updates on PyPI");
-                let response: PyPIResponse = self
-                    .client
-                    .get("https://pypi.org/pypi/esphome/json")
-                    .send()
-                    .await
-                    .context("Failed to fetch PyPI info")?
-                    .json()
-                    .await
-                    .context("Failed to parse PyPI response")?;
+                let response = self.fetch_pypi("esphome").await?;
 
                 let latest = response.info.version;
                 info!("Latest stable ESPHome version on PyPI: {}", latest);
@@ -78,15 +84,7 @@ impl UpdateChecker {
             }
             ReleaseChannel::Beta => {
                 debug!("Checking for beta ESPHome updates on PyPI");
-                let response: PyPIResponse = self
-                    .client
-                    .get("https://pypi.org/pypi/esphome/json")
-                    .send()
-                    .await
-                    .context("Failed to fetch PyPI info")?
-                    .json()
-                    .await
-                    .context("Failed to parse PyPI response")?;
+                let response = self.fetch_pypi("esphome").await?;
 
                 // Pick the version to offer on the beta channel. We want the
                 // newest beta (e.g. "2025.4.0b1"), but only when it is actually
@@ -417,15 +415,7 @@ impl UpdateChecker {
     /// `Backend::BuilderStable` returns the latest final release; `BuilderBeta`
     /// returns the latest version including pre-releases.
     pub async fn check_device_builder(&self, backend: Backend) -> Result<String> {
-        let response: PyPIResponse = self
-            .client
-            .get("https://pypi.org/pypi/esphome-device-builder/json")
-            .send()
-            .await
-            .context("Failed to fetch PyPI info for esphome-device-builder")?
-            .json()
-            .await
-            .context("Failed to parse PyPI response for esphome-device-builder")?;
+        let response = self.fetch_pypi("esphome-device-builder").await?;
 
         let include_pre = backend == Backend::BuilderBeta;
         let latest = if include_pre {
