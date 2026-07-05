@@ -169,14 +169,48 @@ fn exchange(request: &Request, timeout: Duration) -> Result<Outcome, ConnectErro
     Ok(read_replies(reply_reader(stream, timeout)))
 }
 
+/// One step of a reply read loop: what `read_line` produced, classified the
+/// same way for both reply readers. The dispatch on the line's content stays
+/// in each caller ([`read_replies`] maps to [`Outcome`] for the human CLI,
+/// `api_read` echoes NDJSON and maps to an exit code); only this read/classify
+/// skeleton is shared.
+enum LineStep {
+    /// A line was read into the buffer.
+    Got,
+    /// The server closed the connection.
+    Eof,
+    /// The read timed out.
+    Timeout,
+    /// Any other read error.
+    ReadErr(std::io::Error),
+}
+
+/// Clear `line`, read the next reply line into it, and classify the result.
+fn read_reply_line<R: BufRead>(reader: &mut R, line: &mut String) -> LineStep {
+    line.clear();
+    match reader.read_line(line) {
+        Ok(0) => LineStep::Eof,
+        Ok(_) => LineStep::Got,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            LineStep::Timeout
+        }
+        Err(e) => LineStep::ReadErr(e),
+    }
+}
+
 /// Read reply lines, printing progress, until a terminal reply or EOF.
 fn read_replies<R: BufRead>(mut reader: R) -> Outcome {
     let mut saw_restart_marker = false;
     let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
+        match read_reply_line(&mut reader, &mut line) {
+            LineStep::Got => {}
+            LineStep::Eof => {
                 // The server closed without a terminal reply. After the
                 // app-restarting marker that's expected: the relaunch tears
                 // the connection down before (or while) the reply lands.
@@ -186,20 +220,14 @@ fn read_replies<R: BufRead>(mut reader: R) -> Outcome {
                     Outcome::Failed("connection closed before the operation finished".to_string())
                 };
             }
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
+            LineStep::Timeout => {
                 return Outcome::Failed(
                     "timed out waiting for the app's reply; the operation may still be \
                      running in the app, check `esphome-desktop status`"
                         .to_string(),
                 )
             }
-            Err(e) => return Outcome::Failed(format!("error reading reply: {e}")),
+            LineStep::ReadErr(e) => return Outcome::Failed(format!("error reading reply: {e}")),
         }
         match serde_json::from_str::<Reply>(line.trim()) {
             Ok(Reply::Progress { step, detail }) => {
@@ -598,9 +626,9 @@ fn api_read<R: BufRead>(mut reader: R) -> u8 {
     let mut saw_restart_marker = false;
     let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => {
+        match read_reply_line(&mut reader, &mut line) {
+            LineStep::Got => {}
+            LineStep::Eof => {
                 // A desktop self-update relaunch tears the connection down right
                 // after its terminal `ok`; the marker tells us that's success.
                 return if saw_restart_marker {
@@ -613,20 +641,16 @@ fn api_read<R: BufRead>(mut reader: R) -> u8 {
                     )
                 };
             }
-            Ok(_) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
+            LineStep::Timeout => {
                 return api_err_line(
                     "timeout",
                     "timed out waiting for the app's reply; the operation may still be running",
                     EXIT_FAILED,
                 )
             }
-            Err(e) => return api_err_line("read_failed", &e.to_string(), EXIT_FAILED),
+            LineStep::ReadErr(e) => {
+                return api_err_line("read_failed", &e.to_string(), EXIT_FAILED)
+            }
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -816,6 +840,57 @@ mod tests {
     use crate::settings::{Backend, ReleaseChannel};
     use std::io::Cursor;
     use std::path::PathBuf;
+
+    /// A reader whose next read fails with the given error, for exercising
+    /// the error arms of [`read_reply_line`].
+    struct ErrReader(Option<std::io::Error>);
+
+    impl std::io::Read for ErrReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(self.0.take().expect("read called more than once"))
+        }
+    }
+
+    impl BufRead for ErrReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(self.0.take().expect("fill_buf called more than once"))
+        }
+
+        fn consume(&mut self, _amt: usize) {}
+    }
+
+    #[test]
+    fn read_reply_line_classifies_all_outcomes() {
+        let mut line = String::new();
+
+        let mut got = Cursor::new(b"hello\n".to_vec());
+        assert!(matches!(
+            read_reply_line(&mut got, &mut line),
+            LineStep::Got
+        ));
+        assert_eq!(line, "hello\n");
+
+        let mut eof = Cursor::new(Vec::new());
+        assert!(matches!(
+            read_reply_line(&mut eof, &mut line),
+            LineStep::Eof
+        ));
+        assert!(line.is_empty(), "buffer cleared before each read");
+
+        for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
+            let mut reader = ErrReader(Some(std::io::Error::from(kind)));
+            assert!(matches!(
+                read_reply_line(&mut reader, &mut line),
+                LineStep::Timeout
+            ));
+        }
+
+        let mut broken = ErrReader(Some(std::io::Error::other("boom")));
+        assert!(matches!(
+            read_reply_line(&mut broken, &mut line),
+            LineStep::ReadErr(_)
+        ));
+    }
 
     fn outcome_for(lines: &str) -> Outcome {
         read_replies(Cursor::new(lines.as_bytes().to_vec()))
