@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
 
@@ -117,28 +117,22 @@ impl UpdateChecker {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
             let installed = installed_esphome_version(app_handle).ok().flatten();
-            let installed_str = installed.as_deref().unwrap_or("unknown").to_string();
+            let installed_str = installed.as_deref().unwrap_or("unknown");
 
-            let dialog_app = app_handle.clone();
-            let should_update = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(format!(
-                        "You are on the dev channel.\n\n\
-                         Currently installed: {}\n\n\
-                         This will reinstall ESPHome from the latest commit on GitHub.\n\n\
-                         Would you like to update now?",
-                        installed_str
-                    ))
-                    .title("Dev Channel Update")
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        "Update Now".to_string(),
-                        "Cancel".to_string(),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+            let should_update = crate::dialog::confirm(
+                app_handle,
+                "Dev Channel Update",
+                format!(
+                    "You are on the dev channel.\n\n\
+                     Currently installed: {}\n\n\
+                     This will reinstall ESPHome from the latest commit on GitHub.\n\n\
+                     Would you like to update now?",
+                    installed_str
+                ),
+                "Update Now",
+                "Cancel",
+            )
+            .await;
 
             if should_update {
                 // Return a sentinel value that update_to will recognize
@@ -151,30 +145,23 @@ impl UpdateChecker {
         let installed = match installed_esphome_version(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
-                let dialog_app = app_handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message("ESPHome is not installed")
-                        .kind(MessageDialogKind::Error)
-                        .title("Update Check Failed")
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    "Update Check Failed",
+                    "ESPHome is not installed".to_string(),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
             Err(e) => {
                 warn!("Could not detect installed version: {}", e);
-                let dialog_app = app_handle.clone();
-                let msg = format!("Could not detect installed version: {}", e);
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .kind(MessageDialogKind::Error)
-                        .title("Update Check Failed")
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    "Update Check Failed",
+                    format!("Could not detect installed version: {}", e),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
@@ -184,30 +171,23 @@ impl UpdateChecker {
         let latest = match self.check(channel).await {
             Ok(Some(v)) => v,
             Ok(None) => {
-                let dialog_app = app_handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message("Could not determine latest version")
-                        .kind(MessageDialogKind::Error)
-                        .title("Update Check Failed")
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    "Update Check Failed",
+                    "Could not determine latest version".to_string(),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
             Err(e) => {
                 warn!("Update check failed: {}", e);
-                let dialog_app = app_handle.clone();
-                let msg = format!("Failed to check for updates: {}", e);
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .kind(MessageDialogKind::Error)
-                        .title("Update Check Failed")
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    "Update Check Failed",
+                    format!("Failed to check for updates: {}", e),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
@@ -227,24 +207,13 @@ impl UpdateChecker {
             };
 
             // Ask user if they want to update
-            let dialog_app = app_handle.clone();
             let msg = format!(
                 "ESPHome {} ({}) is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
                 latest, channel_label, installed
             );
-            let should_update = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .title("Update Available")
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        "Update Now".to_string(),
-                        "Later".to_string(),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+            let should_update =
+                crate::dialog::confirm(app_handle, "Update Available", msg, "Update Now", "Later")
+                    .await;
 
             if should_update {
                 return Some(latest);
@@ -252,16 +221,12 @@ impl UpdateChecker {
         } else {
             info!("ESPHome is up to date ({})", installed);
 
-            let dialog_app = app_handle.clone();
-            let msg = format!("ESPHome {} is the latest version.", installed);
-            let _ = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .kind(MessageDialogKind::Info)
-                    .title("No Updates Available")
-                    .blocking_show();
-            })
+            crate::dialog::notice(
+                app_handle,
+                "No Updates Available",
+                format!("ESPHome {} is the latest version.", installed),
+                MessageDialogKind::Info,
+            )
             .await;
         }
 
@@ -570,24 +535,18 @@ impl UpdateChecker {
             installed, latest, installed
         );
 
-        let dialog_app = app_handle.clone();
         let msg = format!(
             "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
             latest, installed
         );
-        let should_update = tokio::task::spawn_blocking(move || {
-            dialog_app
-                .dialog()
-                .message(msg)
-                .title("Device Builder Update Available")
-                .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                    "Update Now".to_string(),
-                    "Later".to_string(),
-                ))
-                .blocking_show()
-        })
-        .await
-        .unwrap_or(false);
+        let should_update = crate::dialog::confirm(
+            app_handle,
+            "Device Builder Update Available",
+            msg,
+            "Update Now",
+            "Later",
+        )
+        .await;
 
         if should_update {
             Some(latest)
