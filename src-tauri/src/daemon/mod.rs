@@ -105,8 +105,21 @@ impl DaemonManager {
         })
     }
 
-    /// Start the ESPHome device builder
+    /// Start the ESPHome device builder.
+    ///
+    /// Emits the tray status itself — "Running" on success, "Stopped" on
+    /// failure — so callers don't have to pair every start with a
+    /// `tray::update_status` call (a forgotten pairing leaves the tray
+    /// stale). The status reflects the actual post-call state, not the
+    /// intent.
     pub async fn start(&self) -> Result<()> {
+        let result = self.start_inner().await;
+        crate::tray::update_status(&self.app_handle, self.is_running());
+        result
+    }
+
+    /// The start sequence proper; see [`Self::start`] for the tray wrapper.
+    async fn start_inner(&self) -> Result<()> {
         // Hold the process lock for the entire start sequence (check ->
         // spawn -> store) so two concurrent start() calls can't both pass
         // the running check and each spawn a child. Without this, the
@@ -376,8 +389,24 @@ impl DaemonManager {
         Ok(())
     }
 
-    /// Stop the ESPHome dashboard
+    /// Stop the ESPHome dashboard.
+    ///
+    /// Emits the tray status itself: "Stopped" optimistically up front (the
+    /// graceful drain below can take up to 30s, during which the tray should
+    /// not claim the backend is running), restored to the actual state if the
+    /// stop fails — after a failed stop the backend may well still be
+    /// running, so the optimistic label must not stand.
     pub async fn stop(&self) -> Result<()> {
+        crate::tray::update_status(&self.app_handle, false);
+        let result = self.stop_inner().await;
+        if result.is_err() {
+            crate::tray::update_status(&self.app_handle, self.is_running());
+        }
+        result
+    }
+
+    /// The stop sequence proper; see [`Self::stop`] for the tray wrapper.
+    async fn stop_inner(&self) -> Result<()> {
         // Acquire the process lock *before* reading/mutating `running` so the
         // check-and-act is fully atomic against start(), which also reads
         // `running` under this lock. The check is done post-lock (no lockless

@@ -612,9 +612,6 @@ pub fn run(cli: Cli) {
                 drop(startup_guard);
                 match start_result {
                     Ok(()) => {
-                        // Update tray status to show running
-                        tray::update_status(&daemon_app, true);
-
                         // Warn (non-blocking) if git is missing. ESPHome needs
                         // it for external components, remote packages, and other
                         // deps, so many configs won't compile without it; absent
@@ -637,7 +634,6 @@ pub fn run(cli: Cli) {
                     }
                     Err(e) => {
                         error!("Failed to start ESPHome daemon: {}", e);
-                        tray::update_status(&daemon_app, false);
                     }
                 }
             });

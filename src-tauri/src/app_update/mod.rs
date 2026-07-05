@@ -244,10 +244,6 @@ async fn download_update_bytes(update: &tauri_plugin_updater::Update) -> Result<
 async fn stop_backend_for_install(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
         info!("Stopping ESPHome backend before installing desktop update");
-        // Reflect the stop in the tray immediately; `stop()` only flips the
-        // daemon's internal flag, so the tray would otherwise stay on
-        // "Running" (matches the package-update path in `tray`).
-        crate::tray::update_status(app_handle, false);
         if let Err(e) = state.daemon.stop().await {
             warn!("Error stopping backend before update: {}", e);
         }
@@ -274,14 +270,12 @@ async fn install_update_bytes(
 /// it before installing, so on a failed install — where the bundle was not
 /// replaced and the running process is still valid — without this the running
 /// app would be left with no dashboard. (A successful install always relaunches,
-/// so it never takes this path.) Best-effort: restart it and restore the tray
-/// status.
+/// so it never takes this path.) Best-effort.
 async fn restore_backend(app_handle: &AppHandle) {
     if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>() {
         info!("Restarting ESPHome backend after desktop update");
-        match state.daemon.start().await {
-            Ok(()) => crate::tray::update_status(app_handle, true),
-            Err(e) => warn!("Failed to restart backend after update: {}", e),
+        if let Err(e) = state.daemon.start().await {
+            warn!("Failed to restart backend after update: {}", e);
         }
     }
 }
