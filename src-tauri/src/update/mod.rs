@@ -860,7 +860,7 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
 }
 
 /// Build the `pip install` argument list (appended after the `-m pip install`
-/// prefix supplied by [`platform::pip_command`]) for installing/upgrading
+/// prefix supplied by [`crate::platform::pip_command`]) for installing/upgrading
 /// `esphome-device-builder`.
 ///
 /// When `ignore_installed` is false this is a plain `pip install --upgrade`,
@@ -923,7 +923,7 @@ async fn run_device_builder_install(
 const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/dev.zip";
 
 /// Build the `pip install` argument list (appended after the `-m pip install`
-/// prefix supplied by [`platform::pip_command`]) for installing ESPHome from
+/// prefix supplied by [`crate::platform::pip_command`]) for installing ESPHome from
 /// the dev GitHub zip.
 ///
 /// When `ignore_installed` is false this is a plain `--force-reinstall`, which
