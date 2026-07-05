@@ -634,7 +634,8 @@ mod tests {
         // Must match the address the backend binds (`127.0.0.1`), not the
         // `localhost` hostname, so the probe doesn't get steered to `::1`
         // on IPv6-first hosts where the daemon isn't listening.
-        assert_eq!(loopback_url(6052), "http://127.0.0.1:6052/");
-        assert!(!loopback_url(6052).contains("localhost"));
+        let url = loopback_url(6052);
+        assert_eq!(url, "http://127.0.0.1:6052/");
+        assert!(!url.contains("localhost"));
     }
 }
