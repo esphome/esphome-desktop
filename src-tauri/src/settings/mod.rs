@@ -215,7 +215,9 @@ impl Settings {
         let settings_path = Self::settings_path(app_handle)?;
 
         let mut settings = load_settings_file(&settings_path);
-        settings.installed_version = detect_installed_version(app_handle).ok();
+        settings.installed_version = crate::update::installed_esphome_version(app_handle)
+            .ok()
+            .flatten();
         Ok(settings)
     }
 
@@ -338,29 +340,6 @@ fn unique_backup_path(path: &Path) -> PathBuf {
             return candidate;
         }
         n += 1;
-    }
-}
-
-/// Detect the installed ESPHome version from the venv
-fn detect_installed_version(app_handle: &AppHandle) -> Result<String> {
-    let python_path = platform::get_python_path(app_handle)?;
-
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run esphome version")?;
-
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Extract just the version number (e.g., "2024.1.0" from "Version: 2024.1.0")
-        let version = version
-            .strip_prefix("Version: ")
-            .unwrap_or(&version)
-            .to_string();
-        Ok(version)
-    } else {
-        anyhow::bail!("ESPHome not installed")
     }
 }
 
