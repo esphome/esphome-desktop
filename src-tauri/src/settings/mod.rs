@@ -367,20 +367,8 @@ fn detect_installed_version(app_handle: &AppHandle) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::unique_temp_dir;
     use std::fs;
-    use std::path::PathBuf;
-
-    /// Create a unique, empty temp directory for a test and return its path.
-    /// The process id plus a per-test tag keeps both intra-process parallelism
-    /// and two concurrent `cargo test` binaries on the same host from
-    /// colliding.
-    fn unique_temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("esphome_settings_{}_{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
 
     #[test]
     fn default_backend_matches_stable_release_channel() {
