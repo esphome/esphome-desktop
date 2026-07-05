@@ -215,9 +215,13 @@ impl Settings {
         let settings_path = Self::settings_path(app_handle)?;
 
         let mut settings = load_settings_file(&settings_path);
-        settings.installed_version = crate::update::installed_esphome_version(app_handle)
-            .ok()
-            .flatten();
+        settings.installed_version = match crate::update::installed_esphome_version(app_handle) {
+            Ok(version) => version,
+            Err(e) => {
+                debug!("Could not detect installed ESPHome version: {e}");
+                None
+            }
+        };
         Ok(settings)
     }
 
