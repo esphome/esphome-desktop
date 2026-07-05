@@ -12,14 +12,12 @@ pytest suite (maintainer-requested framework, fully typed, no classes).
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import urllib.error
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import pytest
+from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / ".github" / "scripts" / "bump_bundle_versions.py"
@@ -46,18 +44,7 @@ CCACHE_SHA256="2222222222222222222222222222222222222222222222222222222222222222"
 """
 
 
-def _load_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("bump_bundle_versions", SCRIPT_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec so dataclasses can resolve the module's annotations
-    # (it looks the module up in sys.modules during class processing).
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-bump = _load_module()
+bump = load_script_module(SCRIPT_PATH)
 
 
 # --------------------------------------------------------------------------- #

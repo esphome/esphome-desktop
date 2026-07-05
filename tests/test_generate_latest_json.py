@@ -23,15 +23,14 @@ longer pure stdlib — but matches the project's chosen test framework.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import ModuleType
 from typing import Any
 
 import pytest
+from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / ".github" / "scripts" / "generate_latest_json.py"
@@ -43,16 +42,7 @@ TAG = "v0.10.0"
 REPO = "esphome/esphome-desktop"
 
 
-def _load_generator() -> ModuleType:
-    """Import the generator script by path (it isn't an installable package)."""
-    spec = importlib.util.spec_from_file_location("generate_latest_json", SCRIPT_PATH)
-    assert spec and spec.loader, f"cannot load {SCRIPT_PATH}"
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-gen = _load_generator()
+gen = load_script_module(SCRIPT_PATH)
 
 
 def _release() -> dict[str, Any]:

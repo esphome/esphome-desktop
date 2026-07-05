@@ -17,26 +17,16 @@ pytest suite (maintainer-requested framework, fully typed, no classes).
 
 from __future__ import annotations
 
-import importlib.util
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
-from types import ModuleType
+
+from conftest import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "src-tauri" / "scripts" / "device_builder_maintenance.py"
 
 
-def _load_module() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "device_builder_maintenance", SCRIPT_PATH
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-maint = _load_module()
+maint = load_script_module(SCRIPT_PATH)
 
 
 def _make_dist_info(
