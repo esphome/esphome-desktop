@@ -556,7 +556,7 @@
         return asset(fallbackFilename);
       }
 
-      fetch('latest.json')
+      fetch('latest.json', { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((manifest) => {
           if (manifest && manifest.downloads) {
@@ -611,13 +611,13 @@
         };
         const btn = document.getElementById('mac-download');
 
-        function refresh() {
-          btn.href = files[arch.get()]();
+        function refresh(a) {
+          btn.href = files[a]();
         }
 
         const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', refresh);
-        refresh();
-        onManifest.push(refresh);
+        refresh(arch.get());
+        onManifest.push(() => refresh(arch.get()));
 
         if (detected === 'macos') {
           detectArchAsync().then((a) => { if (a) arch.set(a); });
