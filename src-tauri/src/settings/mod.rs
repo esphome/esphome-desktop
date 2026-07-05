@@ -55,10 +55,16 @@ impl fmt::Display for ReleaseChannel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
-    /// ESPHome device builder, stable release from PyPI
+    /// ESPHome device builder, stable release from PyPI.
+    ///
+    /// This is the default so a fresh install (and any legacy/unknown/corrupt
+    /// settings that fall back here) matches the stable-by-default
+    /// [`ReleaseChannel`]: a user on the stable channel must not be silently
+    /// offered a beta device-builder update (#241). Beta is opt-in via the tray
+    /// or the `backend beta` CLI subcommand.
+    #[default]
     BuilderStable,
     /// ESPHome device builder, beta/pre-release from PyPI
-    #[default]
     BuilderBeta,
 }
 
@@ -377,6 +383,16 @@ mod tests {
     }
 
     #[test]
+    fn default_backend_matches_stable_release_channel() {
+        // The device-builder backend must default to stable so it agrees with
+        // the stable-by-default release channel; a stable-channel user must not
+        // be silently offered a beta device-builder update (#241).
+        assert_eq!(Backend::default(), Backend::BuilderStable);
+        assert_eq!(ReleaseChannel::default(), ReleaseChannel::Stable);
+        assert_eq!(Settings::default().backend, Backend::BuilderStable);
+    }
+
+    #[test]
     fn missing_file_yields_defaults() {
         let dir = unique_temp_dir("missing");
         let path = dir.join("settings.json");
@@ -421,7 +437,7 @@ mod tests {
     #[test]
     fn legacy_classic_backend_migrates_to_default() {
         // An old settings file selecting the removed classic dashboard backend
-        // must migrate to the default device builder (beta), keep its other
+        // must migrate to the default device builder (stable), keep its other
         // fields, and NOT be treated as corrupt (which would discard every
         // other preference).
         let dir = unique_temp_dir("classic");
@@ -430,7 +446,7 @@ mod tests {
 
         let settings = load_settings_file(&path);
 
-        assert_eq!(settings.backend, Backend::BuilderBeta);
+        assert_eq!(settings.backend, Backend::BuilderStable);
         assert_eq!(settings.port, 1234);
         assert!(path.exists());
         assert!(!path.with_extension("json.corrupt").exists());
@@ -496,7 +512,7 @@ mod tests {
 
         let settings = load_settings_file(&path);
 
-        assert_eq!(settings.backend, Backend::BuilderBeta);
+        assert_eq!(settings.backend, Backend::BuilderStable);
         assert_eq!(settings.port, 1234);
         assert!(path.exists());
         assert!(!path.with_extension("json.corrupt").exists());
