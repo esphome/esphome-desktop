@@ -413,12 +413,8 @@ fn app_launch_command() -> Result<std::process::Command, String> {
     }
 
     #[cfg(target_os = "linux")]
-    {
-        if let Some(appimage) = std::env::var_os("APPIMAGE") {
-            if !appimage.is_empty() {
-                return Ok(std::process::Command::new(appimage));
-            }
-        }
+    if let Some(appimage) = super::appimage_path() {
+        return Ok(std::process::Command::new(appimage));
     }
 
     Ok(std::process::Command::new(exe))
@@ -551,9 +547,10 @@ fn api(method: ApiMethod) -> ExitCode {
         // Pure handshake: answer even while the app is starting (or absent), so
         // the dashboard can gate on the version before making any other call.
         ApiMethod::Version => {
-            print_json(&serde_json::json!({
-                "schema_version": protocol::API_SCHEMA_VERSION,
-            }));
+            println!(
+                "{}",
+                serde_json::json!({ "schema_version": protocol::API_SCHEMA_VERSION })
+            );
             return ExitCode::SUCCESS;
         }
         ApiMethod::Status => (Request::Status, DEFAULT_TIMEOUT),
@@ -662,17 +659,11 @@ fn api_read<R: BufRead>(mut reader: R) -> u8 {
 /// Client-only `code`s (`not_running`, `timeout`, ...) sit alongside the
 /// server's `busy`/`failed`; the dashboard treats `code` as an opaque string.
 fn api_err_line(code: &str, message: &str, exit: u8) -> u8 {
-    print_json(&serde_json::json!({
-        "type": "err",
-        "code": code,
-        "message": message,
-    }));
+    println!(
+        "{}",
+        serde_json::json!({ "type": "err", "code": code, "message": message })
+    );
     exit
-}
-
-/// Print a JSON value as one line on stdout.
-fn print_json(value: &serde_json::Value) {
-    println!("{value}");
 }
 
 /// `logs`: print/tail the dashboard log, or open the logs folder. Fully

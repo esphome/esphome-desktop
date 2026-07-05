@@ -455,15 +455,6 @@ pub fn run(cli: Cli) {
                 error!("Failed to set up bundled ccache: {}", e);
             }
 
-            // Export the esphome-desktop CLI path so the device-builder backend
-            // (and anything it spawns) knows what to call to check for and
-            // trigger updates through the stable `api` interface. Set on this
-            // process before the daemon task spawns, so the child inherits it
-            // like the PATH additions above and picks it up again on restart.
-            if let Some(bin) = control::cli_invocation_path() {
-                std::env::set_var("ESPHOME_DESKTOP_BIN", bin);
-            }
-
             // One-shot prompt to remove the pre-rename `/Applications/ESPHome Builder.app`.
             // No-op on non-macOS and after the user has answered once.
             platform::cleanup_legacy_macos_app(app.handle());

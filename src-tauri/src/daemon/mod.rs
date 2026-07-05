@@ -229,9 +229,14 @@ impl DaemonManager {
             "ESPHOME_DESKTOP_VERSION",
             self.app_handle.package_info().version.to_string(),
         );
-        // The backend also inherits ESPHOME_DESKTOP_BIN (the esphome-desktop CLI
-        // path) from this process, exported at startup so the dashboard can
-        // check for and trigger updates via the `api` interface. See lib.rs.
+        // Tell the backend where the esphome-desktop CLI lives so the dashboard
+        // can check for and trigger updates through the stable `api` interface
+        // (esphome-desktop api check-update / api update). Set beside the other
+        // backend env vars and re-applied on every respawn like them; the
+        // backend's own child processes inherit it too. See control::client.
+        if let Some(bin) = crate::control::cli_invocation_path() {
+            cmd.env("ESPHOME_DESKTOP_BIN", bin);
+        }
 
         // On Windows, force the spawned Python (and any subprocesses it
         // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.

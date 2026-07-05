@@ -365,7 +365,7 @@ pub(crate) async fn desktop_update_available(app: &AppHandle) -> ComponentUpdate
     let installed = app.package_info().version.to_string();
     match app.updater() {
         Ok(updater) => match updater.check().await {
-            Ok(Some(update)) => ComponentUpdate::upgradable(installed, update.version.clone()),
+            Ok(Some(update)) => ComponentUpdate::upgradable(installed, update.version),
             Ok(None) => ComponentUpdate::current(installed.clone(), installed),
             Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
         },
