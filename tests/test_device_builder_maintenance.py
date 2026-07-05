@@ -20,7 +20,7 @@ from __future__ import annotations
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
-from conftest import load_script_module
+from script_loader import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "src-tauri" / "scripts" / "device_builder_maintenance.py"
