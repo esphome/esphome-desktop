@@ -2369,15 +2369,24 @@ mod tests {
         // briefly leave the just-written stub open for writing, so the first
         // execve of it can fail even though the interpreter is fine. Linux
         // enforces this; macOS does not, which is why only Linux CI flaked.
+        const ATTEMPTS: usize = 20;
         let mut usable = false;
-        for _ in 0..20 {
+        for attempt in 0..ATTEMPTS {
             if interpreter_is_usable(&bin) {
                 usable = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Don't sleep after the final attempt: nothing follows it, so it
+            // would only delay a genuine failure's assert.
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
-        assert!(usable);
+        assert!(
+            usable,
+            "interpreter_is_usable never returned true after {ATTEMPTS} attempts \
+             (a real exec failure, not the transient ETXTBSY this retry covers)"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
