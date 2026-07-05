@@ -37,9 +37,6 @@ struct PyPIRelease {
     yanked: bool,
 }
 
-/// URL template for the PyPI JSON API; `{}` is the package name.
-const PYPI_JSON_URL: &str = "https://pypi.org/pypi/{}/json";
-
 /// Update checker
 pub struct UpdateChecker {
     client: reqwest::Client,
@@ -57,9 +54,11 @@ impl UpdateChecker {
     }
 
     /// Fetch and parse the PyPI JSON metadata for `package`.
+    ///
+    /// Callers pass fixed internal package names, so no URL encoding is needed.
     async fn fetch_pypi(&self, package: &str) -> Result<PyPIResponse> {
         self.client
-            .get(PYPI_JSON_URL.replace("{}", package))
+            .get(format!("https://pypi.org/pypi/{package}/json"))
             .send()
             .await
             .with_context(|| format!("Failed to fetch PyPI info for {package}"))?
