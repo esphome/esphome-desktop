@@ -550,8 +550,11 @@
       // kind, falling back to a hand-built release-asset filename.
       function urlFor(target, kind, fallbackFilename) {
         if (manifestDownloads) {
-          const entry = (manifestDownloads[target] || []).find((d) => d.kind === kind);
-          if (entry) return entry.url;
+          // Tolerate a malformed manifest: only trust a well-formed entry,
+          // otherwise fall back to the template-built URL.
+          const list = manifestDownloads[target];
+          const entry = Array.isArray(list) ? list.find((d) => d && d.kind === kind) : undefined;
+          if (entry && typeof entry.url === 'string') return entry.url;
         }
         return asset(fallbackFilename);
       }
@@ -624,7 +627,8 @@
         const btn = document.getElementById('mac-download');
 
         function refresh(a) {
-          btn.href = files[a]();
+          // A stale persisted arch value must not break the page.
+          btn.href = (files[a] || files.arm64)();
         }
 
         const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', refresh);
@@ -663,7 +667,10 @@
         };
 
         function refresh() {
-          const entry = files[arch.get()][format.get()];
+          // Same guard as macOS: stale persisted arch or format values fall
+          // back to the defaults instead of throwing.
+          const perArch = files[arch.get()] || files.x64;
+          const entry = perArch[format.get()] || perArch.deb;
           btn.href = entry.url();
           label.textContent = entry.label;
           Object.keys(installBlocks).forEach((k) => {
