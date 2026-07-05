@@ -511,12 +511,13 @@ install_python_packages() {
     echo "=== Verifying ESPHome (${platform}) ==="
     "$python_dir/$python_bin" -m esphome version
 
-    # Install ESPHome Device Builder (the default backend). Pre-releases are
-    # allowed so the bundle tracks the BuilderBeta channel that's wired up as
-    # Backend::default() in src-tauri/src/settings/mod.rs.
+    # Install ESPHome Device Builder (the default backend). Ship the stable
+    # release so the bundle matches Backend::default() == BuilderStable in
+    # src-tauri/src/settings/mod.rs; a beta binary here would put fresh installs
+    # on the beta channel while the UI reports Stable (see #241/#245).
     echo ""
     echo "=== Installing ESPHome Device Builder (${platform}) ==="
-    "$python_dir/$python_bin" -m pip install --pre esphome-device-builder
+    "$python_dir/$python_bin" -m pip install esphome-device-builder
 
     echo ""
     echo "=== Verifying ESPHome Device Builder (${platform}) ==="
