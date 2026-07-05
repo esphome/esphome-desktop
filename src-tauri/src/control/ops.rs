@@ -108,6 +108,63 @@ pub(crate) enum SwitchOutcome {
     StartFailed(String),
 }
 
+/// Stop prologue shared by the switch flows: report progress, optimistically
+/// show "stopped", and stop the daemon. On failure run `revert` (restores the
+/// tray radio checks), show the daemon's actual state, and hand back the
+/// [`SwitchOutcome::StopFailed`] for the caller to return. `stop_what` names
+/// what failed to stop in the log line.
+async fn stop_or_revert(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    progress: Progress<'_>,
+    detail: &str,
+    stop_what: &str,
+    revert: impl FnOnce(),
+) -> Result<(), SwitchOutcome> {
+    progress("stop", detail);
+    tray::update_status(app, false);
+    if let Err(e) = state.daemon.stop().await {
+        error!("Failed to stop {}: {}", stop_what, e);
+        revert();
+        show_actual_status(app, state);
+        return Err(SwitchOutcome::StopFailed(e.to_string()));
+    }
+    Ok(())
+}
+
+/// Install-failure epilogue shared by the switch flows: run `revert` to
+/// restore the tray radio checks, then attempt a best-effort restart of the
+/// previous install (`context` feeds the restart-failure log), folding both
+/// into [`SwitchOutcome::InstallFailed`]. Callers log their flow-specific
+/// error line before calling.
+async fn install_failed(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    error: String,
+    context: &str,
+    revert: impl FnOnce(),
+) -> SwitchOutcome {
+    revert();
+    let restarted = restart_after_failure(app, state, context).await;
+    SwitchOutcome::InstallFailed { error, restarted }
+}
+
+/// Apply `mutate` to the settings under the write lock and persist them,
+/// downgrading a save failure to a warning (the in-memory value still
+/// stands). `mutate` returns whether anything changed; an unchanged result
+/// skips the save.
+async fn set_and_save<F>(app: &AppHandle, state: &Arc<AppState>, mutate: F)
+where
+    F: FnOnce(&mut crate::settings::Settings) -> bool,
+{
+    let mut settings = state.settings.write().await;
+    if mutate(&mut settings) {
+        if let Err(e) = settings.save(app) {
+            warn!("Failed to save settings: {}", e);
+        }
+    }
+}
+
 /// Switch the ESPHome release channel: stop the dashboard, install the new
 /// channel's version, persist the setting, and restart. Tray radio labels and
 /// the status line are updated (and reverted on failure) along the way.
@@ -126,13 +183,17 @@ pub(crate) async fn switch_release_channel(
     // Show the new selection immediately; reverted on failure below.
     tray::update_channel_checks(new_channel);
 
-    progress("stop", "stopping the dashboard");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop backend for channel switch: {}", e);
-        tray::update_channel_checks(old_channel);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
+    if let Err(outcome) = stop_or_revert(
+        app,
+        state,
+        progress,
+        "stopping the dashboard",
+        "backend for channel switch",
+        || tray::update_channel_checks(old_channel),
+    )
+    .await
+    {
+        return outcome;
     }
 
     progress(
@@ -143,13 +204,11 @@ pub(crate) async fn switch_release_channel(
         Ok(()) => {
             info!("Switched to {} channel successfully", new_channel);
 
-            {
-                let mut settings = state.settings.write().await;
+            set_and_save(app, state, |settings| {
                 settings.release_channel = new_channel;
-                if let Err(e) = settings.save(app) {
-                    warn!("Failed to save settings: {}", e);
-                }
-            }
+                true
+            })
+            .await;
 
             refresh_version_display_blocking(app).await;
 
@@ -163,12 +222,10 @@ pub(crate) async fn switch_release_channel(
         }
         Err(e) => {
             error!("Channel switch failed: {}", e);
-            tray::update_channel_checks(old_channel);
-            let restarted = restart_after_failure(app, state, "failed channel switch").await;
-            SwitchOutcome::InstallFailed {
-                error: e.to_string(),
-                restarted,
-            }
+            install_failed(app, state, e.to_string(), "failed channel switch", || {
+                tray::update_channel_checks(old_channel)
+            })
+            .await
         }
     }
 }
@@ -190,13 +247,17 @@ pub(crate) async fn switch_backend(
 
     tray::update_backend_checks(new_backend);
 
-    progress("stop", "stopping the backend");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop daemon for backend switch: {}", e);
-        tray::update_backend_checks(old_backend);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
+    if let Err(outcome) = stop_or_revert(
+        app,
+        state,
+        progress,
+        "stopping the backend",
+        "daemon for backend switch",
+        || tray::update_backend_checks(old_backend),
+    )
+    .await
+    {
+        return outcome;
     }
 
     // Install/upgrade the package for the selected channel first.
@@ -210,24 +271,20 @@ pub(crate) async fn switch_backend(
         .await
     {
         error!("Failed to install esphome-device-builder: {}", e);
-        tray::update_backend_checks(old_backend);
-        let restarted = restart_after_failure(app, state, "failed backend switch").await;
-        return SwitchOutcome::InstallFailed {
-            error: e.to_string(),
-            restarted,
-        };
+        return install_failed(app, state, e.to_string(), "failed backend switch", || {
+            tray::update_backend_checks(old_backend)
+        })
+        .await;
     }
     // Install succeeded — refresh the tray version display.
     tray::refresh_builder_version_display(app).await;
 
     // Persist the new backend channel.
-    {
-        let mut settings = state.settings.write().await;
+    set_and_save(app, state, |settings| {
         settings.backend = new_backend;
-        if let Err(e) = settings.save(app) {
-            warn!("Failed to save settings: {}", e);
-        }
-    }
+        true
+    })
+    .await;
 
     progress("start", "starting the backend");
     if let Err(e) = state.daemon.start().await {
@@ -283,15 +340,15 @@ pub(crate) async fn set_launch_at_startup(
     enable: bool,
 ) -> bool {
     let _toggle = STARTUP_TOGGLE.lock().await;
-    {
-        let mut settings = state.settings.write().await;
+    set_and_save(app_handle, state, |settings| {
         if settings.launch_at_startup != enable {
             settings.launch_at_startup = enable;
-            if let Err(e) = settings.save(app_handle) {
-                warn!("Failed to save settings: {}", e);
-            }
+            true
+        } else {
+            false
         }
-    }
+    })
+    .await;
 
     // Always (re)apply the OS call, even when the persisted value already
     // matches, so an already-selected choice retries a registration that
