@@ -613,23 +613,27 @@ async fn update_esphome_package(
         state,
         progress,
         report,
-        PackageLabels {
-            step: "esphome",
-            component: "esphome",
-            display_name: "ESPHome",
-        },
         esphome_install_action(check, channel),
-        // The dev "target" is a channel keyword, not a version; quote it as
-        // prose in the progress and report lines.
-        |target| {
-            if target == "dev" {
-                "the latest dev commit".to_string()
-            } else {
-                target.to_string()
-            }
+        PackagePhase {
+            labels: PackageLabels {
+                step: "esphome",
+                component: "esphome",
+                display_name: "ESPHome",
+            },
+            // The dev "target" is a channel keyword, not a version; quote it
+            // as prose in the progress and report lines.
+            display_target: |target: &str| {
+                if target == "dev" {
+                    "the latest dev commit".to_string()
+                } else {
+                    target.to_string()
+                }
+            },
+            install: |target: String| async move {
+                state.update_checker.update_to(app, &target, channel).await
+            },
+            refresh: || refresh_version_display_blocking(app),
         },
-        |target| async move { state.update_checker.update_to(app, &target, channel).await },
-        || refresh_version_display_blocking(app),
     )
     .await;
 }
@@ -649,20 +653,22 @@ async fn update_device_builder_package(
         state,
         progress,
         report,
-        PackageLabels {
-            step: "device-builder",
-            component: "device builder",
-            display_name: "device builder",
-        },
         install_action(check),
-        |latest| latest.to_string(),
-        |_target| async move {
-            state
-                .update_checker
-                .install_device_builder(app, backend)
-                .await
+        PackagePhase {
+            labels: PackageLabels {
+                step: "device-builder",
+                component: "device builder",
+                display_name: "device builder",
+            },
+            display_target: |latest: &str| latest.to_string(),
+            install: |_target| async move {
+                state
+                    .update_checker
+                    .install_device_builder(app, backend)
+                    .await
+            },
+            refresh: || tray::refresh_builder_version_display(app),
         },
-        || tray::refresh_builder_version_display(app),
     )
     .await;
 }
@@ -676,29 +682,43 @@ struct PackageLabels {
     display_name: &'static str,
 }
 
+/// Component-specific configuration for [`run_package_phase`]: the wording
+/// [`PackageLabels`], `display_target` mapping the raw install target onto
+/// the label quoted in progress and report lines, the `install` future
+/// (receives the raw target), and the version-display `refresh` run after a
+/// successful install.
+struct PackagePhase<D, F, R> {
+    labels: PackageLabels,
+    display_target: D,
+    install: F,
+    refresh: R,
+}
+
 /// Shared skeleton of the per-package phases of [`run_full_update`]: map the
 /// [`InstallAction`] onto the report for the no-op and failure arms, and for
 /// an actual install run [`stop_install_start`], refresh the version display
-/// on success, and record the outcome. `display_target` maps the raw install
-/// target onto the label quoted in progress and report lines; `install`
-/// receives the raw target.
-#[allow(clippy::too_many_arguments)]
-async fn run_package_phase<F, Fut, R, RFut>(
+/// on success, and record the outcome. Everything component-specific comes
+/// bundled in the [`PackagePhase`].
+async fn run_package_phase<D, F, Fut, R, RFut>(
     app: &AppHandle,
     state: &Arc<AppState>,
     progress: Progress<'_>,
     report: &mut UpdateReport,
-    labels: PackageLabels,
     action: InstallAction,
-    display_target: impl FnOnce(&str) -> String,
-    install: F,
-    refresh: R,
+    phase: PackagePhase<D, F, R>,
 ) where
+    D: FnOnce(&str) -> String,
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
     R: FnOnce() -> RFut,
     RFut: std::future::Future<Output = ()>,
 {
+    let PackagePhase {
+        labels,
+        display_target,
+        install,
+        refresh,
+    } = phase;
     let component = labels.component;
     let (installed, target) = match action {
         InstallAction::Install { installed, target } => (installed, target),
