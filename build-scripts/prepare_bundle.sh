@@ -112,20 +112,40 @@ compute_sha256() {
     fi
 }
 
-# Verify a file against an expected SHA-256, exiting on mismatch. Thin wrapper
-# over compute_sha256 used by the MinGit download, whose expected digest is a
-# pinned constant rather than a SHA256SUMS lookup.
-verify_sha256() {
-    local file="$1"
+# Download a URL to a destination path, verified against an expected SHA-256.
+# A cached file already at the destination is reused only if its digest
+# matches; on mismatch it is re-downloaded. `--fail` makes an HTTP error a
+# non-zero exit (not a 200-status error body written to disk) and `--retry`
+# rides out transient blips. The download goes to a temp path that is promoted
+# onto the destination only after the digest checks out, so an interrupted or
+# corrupt download never becomes a sticky, always-failing cache entry (the
+# fixed-path cache trap from #152/#153).
+download_verified() {
+    local url="$1"
     local expected="$2"
+    local dest="$3"
+
+    if [[ -f "$dest" ]] && [[ "$(compute_sha256 "$dest")" == "$expected" ]]; then
+        echo "Using cached download: $dest"
+        return
+    fi
+    [[ -f "$dest" ]] && echo "Cached file checksum mismatch — re-downloading"
+    local partial="${dest}.partial.$$"
+    if ! curl -fL --retry 3 -o "$partial" "$url"; then
+        rm -f "$partial"
+        echo "ERROR: failed to download $url" >&2
+        exit 1
+    fi
     local actual
-    actual=$(compute_sha256 "$file") || exit 1
+    actual=$(compute_sha256 "$partial")
     if [[ "$actual" != "$expected" ]]; then
-        echo "ERROR: checksum mismatch for $file" >&2
+        rm -f "$partial"
+        echo "ERROR: checksum mismatch for $(basename "$dest")" >&2
         echo "  expected: $expected" >&2
         echo "  actual:   $actual" >&2
         exit 1
     fi
+    mv -f "$partial" "$dest"
     echo "Verified SHA-256: $actual"
 }
 
@@ -166,28 +186,7 @@ download_and_extract_python() {
         exit 1
     fi
 
-    if [[ -f "$temp_file" ]] && [[ "$(compute_sha256 "$temp_file")" == "$expected_sha" ]]; then
-        echo "Using cached download: $temp_file"
-    else
-        [[ -f "$temp_file" ]] && echo "Cached file checksum mismatch — re-downloading"
-        local partial="${temp_file}.partial.$$"
-        if ! curl -fL --retry 3 -o "$partial" "$url"; then
-            rm -f "$partial"
-            echo "ERROR: failed to download $url" >&2
-            exit 1
-        fi
-        local actual_sha
-        actual_sha=$(compute_sha256 "$partial")
-        if [[ "$actual_sha" != "$expected_sha" ]]; then
-            rm -f "$partial"
-            echo "ERROR: checksum mismatch for $filename" >&2
-            echo "  expected: $expected_sha" >&2
-            echo "  actual:   $actual_sha" >&2
-            exit 1
-        fi
-        mv "$partial" "$temp_file"
-        echo "Verified SHA-256: $actual_sha"
-    fi
+    download_verified "$url" "$expected_sha" "$temp_file"
 
     echo ""
     echo "=== Extracting Python for ${platform} ==="
@@ -223,20 +222,7 @@ prepare_git_for_platform() {
 
     echo ""
     echo "=== Downloading MinGit ${MINGIT_VERSION} ==="
-    if [[ -f "$temp_file" ]]; then
-        echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$MINGIT_SHA256"
-    else
-        # `--fail` so an HTTP error is a non-zero exit (not a 200-status error
-        # body written to disk) and `--retry` to ride out transient blips.
-        # Download to a .partial and only rename onto the cache path once the
-        # checksum passes, so an interrupted or corrupt download never becomes a
-        # sticky, always-failing cache entry (the fixed-path cache trap from
-        # #152/#153).
-        curl -fL --retry 3 -o "${temp_file}.partial" "$MINGIT_URL"
-        verify_sha256 "${temp_file}.partial" "$MINGIT_SHA256"
-        mv -f "${temp_file}.partial" "$temp_file"
-    fi
+    download_verified "$MINGIT_URL" "$MINGIT_SHA256" "$temp_file"
 
     echo ""
     echo "=== Extracting MinGit into ${GIT_BUNDLE_DIR} ==="
@@ -276,14 +262,7 @@ prepare_patch_for_windows() {
 
     echo ""
     echo "=== Downloading PortableGit (for patch.exe) ==="
-    if [[ -f "$temp_file" ]]; then
-        echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$PORTABLEGIT_SHA256"
-    else
-        curl -fL --retry 3 -o "${temp_file}.partial" "$PORTABLEGIT_URL"
-        verify_sha256 "${temp_file}.partial" "$PORTABLEGIT_SHA256"
-        mv -f "${temp_file}.partial" "$temp_file"
-    fi
+    download_verified "$PORTABLEGIT_URL" "$PORTABLEGIT_SHA256" "$temp_file"
 
     echo ""
     echo "=== Extracting patch.exe into ${patch_dir} ==="
@@ -355,17 +334,7 @@ prepare_ccache_for_platform() {
 
     echo ""
     echo "=== Downloading ccache ${CCACHE_VERSION} ==="
-    if [[ -f "$temp_file" ]]; then
-        echo "Using cached download: $temp_file"
-        verify_sha256 "$temp_file" "$CCACHE_SHA256"
-    else
-        # `--fail`/`--retry` and the .partial->rename dance mirror the MinGit
-        # download so an interrupted or corrupt fetch never becomes a sticky,
-        # always-failing cache entry.
-        curl -fL --retry 3 -o "${temp_file}.partial" "$CCACHE_URL"
-        verify_sha256 "${temp_file}.partial" "$CCACHE_SHA256"
-        mv -f "${temp_file}.partial" "$temp_file"
-    fi
+    download_verified "$CCACHE_URL" "$CCACHE_SHA256" "$temp_file"
 
     echo ""
     echo "=== Extracting ccache.exe into ${CCACHE_BUNDLE_DIR} ==="
