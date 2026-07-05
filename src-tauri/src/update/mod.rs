@@ -604,17 +604,21 @@ fn select_beta_target(releases: &HashMap<String, Vec<PyPIRelease>>, stable: &str
     }
 }
 
-/// Find the latest beta/pre-release version from PyPI releases.
+/// Find the highest version among PyPI releases whose version string matches
+/// `predicate`.
 ///
-/// Beta versions on PyPI look like "2025.4.0b1", "2025.4.0b2", etc.
-/// We find the highest version that contains a beta suffix.
-fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+/// Skips version strings that don't start with a digit (not a valid-looking
+/// version) and versions with no installable files (fully yanked or files
+/// removed): PyPI keeps the version key with an empty/all-yanked file list,
+/// and offering it would download nothing or install a pulled release.
+fn highest_version(
+    releases: &HashMap<String, Vec<PyPIRelease>>,
+    predicate: impl Fn(&str) -> bool,
+) -> Option<String> {
     let mut best: Option<String> = None;
 
     for (version_str, files) in releases {
-        // Only consider versions with a beta suffix (e.g. "2025.4.0b1").
-        // ESPHome beta releases always use bN naming.
-        if !has_beta_suffix(version_str) {
+        if !predicate(version_str) {
             continue;
         }
 
@@ -627,10 +631,7 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
             continue;
         }
 
-        // Skip versions with no installable files (fully yanked or files
-        // removed). PyPI keeps the version key with an empty/all-yanked
-        // file list; offering it would download nothing or install a
-        // pulled release.
+        // Skip versions with no installable files (fully yanked or removed).
         if !has_active_files(files) {
             continue;
         }
@@ -646,6 +647,15 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
     }
 
     best
+}
+
+/// Find the latest beta/pre-release version from PyPI releases.
+///
+/// Beta versions on PyPI look like "2025.4.0b1", "2025.4.0b2", etc.
+/// We find the highest version that contains a beta suffix; ESPHome beta
+/// releases always use bN naming.
+fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+    highest_version(releases, has_beta_suffix)
 }
 
 /// Check whether a version string has a beta suffix like "b1", "b2", etc.
@@ -676,25 +686,7 @@ fn has_active_files(files: &[PyPIRelease]) -> bool {
 /// pre-releases. Used for the "beta" device-builder channel where any
 /// pre-release counts (a/b/rc/dev), not just `bN` like ESPHome itself.
 fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
-    let mut best: Option<String> = None;
-    for (v, files) in releases {
-        if !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        // Skip versions with no installable files (fully yanked or removed).
-        if !has_active_files(files) {
-            continue;
-        }
-        match &best {
-            None => best = Some(v.clone()),
-            Some(curr) => {
-                if is_newer_version(v, curr) {
-                    best = Some(v.clone());
-                }
-            }
-        }
-    }
-    best
+    highest_version(releases, |_| true)
 }
 
 /// Maintenance helper run with the bundled interpreter as `python -c <src>
