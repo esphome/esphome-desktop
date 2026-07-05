@@ -125,19 +125,34 @@ download_verified() {
     local expected="$2"
     local dest="$3"
 
-    if [[ -f "$dest" ]] && [[ "$(compute_sha256 "$dest")" == "$expected" ]]; then
-        echo "Using cached download: $dest"
-        return
+    if [[ -f "$dest" ]]; then
+        local cached
+        if ! cached=$(compute_sha256 "$dest"); then
+            echo "ERROR: failed to hash cached $dest" >&2
+            exit 1
+        fi
+        if [[ "$cached" == "$expected" ]]; then
+            echo "Using cached download: $dest"
+            return
+        fi
+        echo "Cached file checksum mismatch — re-downloading"
     fi
-    [[ -f "$dest" ]] && echo "Cached file checksum mismatch — re-downloading"
     local partial="${dest}.partial.$$"
+    # Remove the partial if the script dies mid-download (SIGINT/SIGTERM or any
+    # exit before the file is promoted). The script sets no other traps, so
+    # clearing these after the promotion below cannot clobber anything.
+    trap 'rm -f "$partial"' INT TERM EXIT
     if ! curl -fL --retry 3 -o "$partial" "$url"; then
         rm -f "$partial"
         echo "ERROR: failed to download $url" >&2
         exit 1
     fi
     local actual
-    actual=$(compute_sha256 "$partial")
+    if ! actual=$(compute_sha256 "$partial"); then
+        rm -f "$partial"
+        echo "ERROR: failed to hash downloaded $(basename "$dest")" >&2
+        exit 1
+    fi
     if [[ "$actual" != "$expected" ]]; then
         rm -f "$partial"
         echo "ERROR: checksum mismatch for $(basename "$dest")" >&2
@@ -146,6 +161,7 @@ download_verified() {
         exit 1
     fi
     mv -f "$partial" "$dest"
+    trap - INT TERM EXIT
     echo "Verified SHA-256: $actual"
 }
 
