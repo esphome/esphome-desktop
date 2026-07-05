@@ -109,7 +109,10 @@ confirmation, so an unattended remote builder always comes back on its own even
 with no one at the keyboard. Trigger it detached (e.g. Python
 `Popen([...], start_new_session=True)`) and poll `check-update`/`status`
 afterward; the update completes in the app even if the caller is torn down when
-the backend restarts.
+the backend restarts. Unlike the human `status --json`, `api` commands other
+than `version` require a running app; when it is down they emit
+`{"type":"err","code":"not_running",...}` and exit 3 rather than an offline
+summary (the backend only calls the API while the app is up).
 
 On Linux the deb/rpm/AUR packages put `esphome-desktop` on your `PATH`. On
 macOS the app installs the command on launch, as a small launcher in

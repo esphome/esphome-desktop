@@ -14,6 +14,8 @@ use super::protocol::{
 };
 use crate::{ApiMethod, CliCommand, OnOff};
 
+/// The operation succeeded.
+const EXIT_SUCCESS: u8 = 0;
 /// The operation ran and failed.
 const EXIT_FAILED: u8 = 1;
 /// The app is not running (or the control channel is unreachable).
@@ -560,13 +562,15 @@ fn api(method: ApiMethod) -> ExitCode {
         // without any consent, so an unattended remote builder recovers itself.
         ApiMethod::Update => (Request::Update, UPDATE_TIMEOUT),
     };
-    api_stream(&request, timeout)
+    // The stream helpers work in raw exit codes so they stay unit-testable
+    // (ExitCode is opaque); wrap once here at the boundary.
+    ExitCode::from(api_stream(&request, timeout))
 }
 
 /// Connect, send one request, and echo each server reply line verbatim (already
 /// JSON) until the terminal reply or EOF. The exit code mirrors the terminal
 /// reply for shell callers; the JSON line is authoritative for the dashboard.
-fn api_stream(request: &Request, timeout: Duration) -> ExitCode {
+fn api_stream(request: &Request, timeout: Duration) -> u8 {
     let mut stream = match connect() {
         Ok(stream) => stream,
         Err(ConnectError::NotRunning) => {
@@ -591,7 +595,8 @@ fn api_stream(request: &Request, timeout: Duration) -> ExitCode {
 }
 
 /// Drain reply lines, echoing each raw JSON line, until a terminal reply.
-fn api_read<R: BufRead>(mut reader: R) -> ExitCode {
+/// Returns the exit code the terminal reply maps to.
+fn api_read<R: BufRead>(mut reader: R) -> u8 {
     let mut saw_restart_marker = false;
     let mut line = String::new();
     loop {
@@ -601,7 +606,7 @@ fn api_read<R: BufRead>(mut reader: R) -> ExitCode {
                 // A desktop self-update relaunch tears the connection down right
                 // after its terminal `ok`; the marker tells us that's success.
                 return if saw_restart_marker {
-                    ExitCode::SUCCESS
+                    EXIT_SUCCESS
                 } else {
                     api_err_line(
                         "connection_closed",
@@ -638,12 +643,12 @@ fn api_read<R: BufRead>(mut reader: R) -> ExitCode {
                 }
             }
             Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
-                return ExitCode::SUCCESS
+                return EXIT_SUCCESS
             }
             Ok(Reply::Err { code, .. }) => {
                 return match code {
-                    ErrCode::Busy => ExitCode::from(EXIT_BUSY),
-                    ErrCode::Failed => ExitCode::from(EXIT_FAILED),
+                    ErrCode::Busy => EXIT_BUSY,
+                    ErrCode::Failed => EXIT_FAILED,
                 }
             }
             // A line we can't classify was still echoed; keep reading for the
@@ -656,13 +661,13 @@ fn api_read<R: BufRead>(mut reader: R) -> ExitCode {
 /// Print a synthesized client-side error as one JSON line and return `exit`.
 /// Client-only `code`s (`not_running`, `timeout`, ...) sit alongside the
 /// server's `busy`/`failed`; the dashboard treats `code` as an opaque string.
-fn api_err_line(code: &str, message: &str, exit: u8) -> ExitCode {
+fn api_err_line(code: &str, message: &str, exit: u8) -> u8 {
     print_json(&serde_json::json!({
         "type": "err",
         "code": code,
         "message": message,
     }));
-    ExitCode::from(exit)
+    exit
 }
 
 /// Print a JSON value as one line on stdout.
@@ -873,6 +878,70 @@ mod tests {
     #[test]
     fn garbage_reply_is_a_failure() {
         assert!(matches!(outcome_for("not json\n"), Outcome::Failed(_)));
+    }
+
+    fn api_exit_for(lines: &str) -> u8 {
+        api_read(Cursor::new(lines.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn api_ok_after_progress_exits_success() {
+        let exit = api_exit_for(
+            "{\"type\":\"progress\",\"step\":\"esphome\",\"detail\":\"installing\"}\n\
+             {\"type\":\"ok\",\"message\":\"done\"}\n",
+        );
+        assert_eq!(exit, EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn api_update_check_reply_exits_success() {
+        let raw = serde_json::to_string(&Reply::UpdateCheck(Box::new(
+            crate::control::protocol::UpdateCheckReply {
+                any_available: false,
+                app: crate::control::protocol::ComponentUpdate::not_installed(),
+                esphome: crate::control::protocol::ComponentUpdate::not_installed(),
+                device_builder: crate::control::protocol::ComponentUpdate::not_installed(),
+            },
+        )))
+        .unwrap();
+        assert_eq!(api_exit_for(&format!("{raw}\n")), EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn api_busy_and_failed_map_to_their_exit_codes() {
+        assert_eq!(
+            api_exit_for("{\"type\":\"err\",\"message\":\"busy\",\"code\":\"busy\"}\n"),
+            EXIT_BUSY
+        );
+        assert_eq!(
+            api_exit_for("{\"type\":\"err\",\"message\":\"boom\",\"code\":\"failed\"}\n"),
+            EXIT_FAILED
+        );
+    }
+
+    #[test]
+    fn api_eof_after_restart_marker_is_success() {
+        // The load-bearing case for unattended builders: the self-update
+        // relaunch closes the connection after the marker, which is success.
+        let exit = api_exit_for(
+            "{\"type\":\"progress\",\"step\":\"app_restarting\",\"detail\":\"restarting\"}\n",
+        );
+        assert_eq!(exit, EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn api_eof_without_terminal_reply_is_a_failure() {
+        let exit =
+            api_exit_for("{\"type\":\"progress\",\"step\":\"stop\",\"detail\":\"stopping\"}\n");
+        assert_eq!(exit, EXIT_FAILED);
+    }
+
+    #[test]
+    fn api_unclassifiable_line_does_not_end_the_stream() {
+        // A line api_read can't parse is echoed, not terminal; the following
+        // ok still decides the exit code.
+        let exit = api_exit_for("not json\n{\"type\":\"ok\",\"message\":\"done\"}\n");
+        assert_eq!(exit, EXIT_SUCCESS);
     }
 
     #[test]
