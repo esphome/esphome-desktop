@@ -631,28 +631,54 @@ fn api_read<R: BufRead>(mut reader: R) -> u8 {
         if trimmed.is_empty() {
             continue;
         }
-        // Echo the server's JSON exactly so the dashboard sees the real schema.
-        println!("{trimmed}");
+        // Parse before echoing: the `api` contract is NDJSON-only, so a line
+        // that is not valid JSON must never reach stdout (it would break a
+        // dashboard doing `json.loads` per line). A recognized Reply is echoed
+        // and dispatched; a line that is valid JSON but not a known Reply is
+        // still echoed (forward-compatible with a newer server) and we keep
+        // reading; anything else is a protocol violation we surface as a
+        // synthesized JSON error and stop.
         match serde_json::from_str::<Reply>(trimmed) {
             Ok(Reply::Progress { step, .. }) => {
+                echo_json_line(trimmed);
                 if step == STEP_APP_RESTARTING {
                     saw_restart_marker = true;
                 }
             }
             Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
-                return EXIT_SUCCESS
+                echo_json_line(trimmed);
+                return EXIT_SUCCESS;
             }
             Ok(Reply::Err { code, .. }) => {
+                echo_json_line(trimmed);
                 return match code {
                     ErrCode::Busy => EXIT_BUSY,
                     ErrCode::Failed => EXIT_FAILED,
-                }
+                };
             }
-            // A line we can't classify was still echoed; keep reading for the
-            // terminal reply (or let EOF decide).
-            Err(_) => {}
+            Err(_) if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() => {
+                // Valid JSON, just not a Reply we recognize: still NDJSON, so
+                // echo it and keep reading for the terminal reply.
+                echo_json_line(trimmed);
+            }
+            Err(_) => {
+                return api_err_line(
+                    "protocol_error",
+                    "the app sent a line that was not valid JSON",
+                    EXIT_FAILED,
+                )
+            }
         }
     }
+}
+
+/// Print one already-validated JSON line and flush, so a dashboard consuming
+/// this process's stdout as a pipe sees each progress line promptly rather than
+/// only when the OS buffer fills.
+fn echo_json_line(line: &str) {
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
 }
 
 /// Print a synthesized client-side error as one JSON line and return `exit`.
@@ -928,10 +954,20 @@ mod tests {
     }
 
     #[test]
-    fn api_unclassifiable_line_does_not_end_the_stream() {
-        // A line api_read can't parse is echoed, not terminal; the following
-        // ok still decides the exit code.
+    fn api_non_json_line_is_a_protocol_error() {
+        // The `api` contract is NDJSON-only: a line that isn't valid JSON must
+        // not be echoed as-is (it would break a per-line `json.loads`); it ends
+        // the stream with a synthesized JSON error instead.
         let exit = api_exit_for("not json\n{\"type\":\"ok\",\"message\":\"done\"}\n");
+        assert_eq!(exit, EXIT_FAILED);
+    }
+
+    #[test]
+    fn api_unknown_json_variant_is_echoed_and_stream_continues() {
+        // A line that is valid JSON but not a Reply we recognize (e.g. a newer
+        // server variant) is still NDJSON, so it's forwarded and the following
+        // terminal reply still decides the exit code.
+        let exit = api_exit_for("{\"type\":\"future\"}\n{\"type\":\"ok\",\"message\":\"done\"}\n");
         assert_eq!(exit, EXIT_SUCCESS);
     }
 

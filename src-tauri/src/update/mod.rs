@@ -989,6 +989,17 @@ where
 
 /// Get the installed ESPHome version
 pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
+    installed_esphome_version(app_handle)?.ok_or_else(|| anyhow::anyhow!("ESPHome not installed"))
+}
+
+/// Installed ESPHome version, distinguishing "not installed" from a real
+/// detection failure: `Ok(Some(v))` when installed, `Ok(None)` when the
+/// `esphome version` command runs but exits non-zero (ESPHome absent), and
+/// `Err` only when the check itself can't run (e.g. Python missing). The
+/// update-availability check uses this so a missing ESPHome shows as "nothing
+/// to update" rather than an error; [`get_installed_version`] keeps the
+/// error-on-absent shape the interactive/tray flows rely on.
+pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
     let mut cmd = std::process::Command::new(&python_path);
@@ -997,17 +1008,16 @@ pub fn get_installed_version(app_handle: &AppHandle) -> Result<String> {
 
     let output = cmd.output().context("Failed to run esphome version")?;
 
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Extract just the version number
-        let version = version
-            .strip_prefix("Version: ")
-            .unwrap_or(&version)
-            .to_string();
-        Ok(version)
-    } else {
-        anyhow::bail!("ESPHome not installed")
+    if !output.status.success() {
+        return Ok(None);
     }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Extract just the version number
+    let version = version
+        .strip_prefix("Version: ")
+        .unwrap_or(&version)
+        .to_string();
+    Ok(Some(version))
 }
 
 /// Pre-release precedence for a version's tag, following PEP 440 ordering:

@@ -379,8 +379,11 @@ pub(crate) async fn esphome_update_available(
     state: &Arc<AppState>,
     channel: ReleaseChannel,
 ) -> ComponentUpdate {
-    let installed = match detect(app, crate::update::get_installed_version).await {
-        Ok(v) => v,
+    let installed = match detect(app, crate::update::installed_esphome_version).await {
+        Ok(Some(v)) => v,
+        // ESPHome absent is a normal state ("nothing to update"), not an error —
+        // mirrors the device-builder not-installed path below.
+        Ok(None) => return ComponentUpdate::not_installed(),
         Err(e) => return ComponentUpdate::errored(None, e),
     };
     // The dev channel has no version-based check: `update` always reinstalls the
