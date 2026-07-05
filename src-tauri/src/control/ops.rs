@@ -349,8 +349,11 @@ where
 
 /// Whether `latest` is a newer version than `installed`, mapped onto the
 /// [`ComponentUpdate`] the check reply carries. The install sequences derive
-/// their decision from this same result via [`install_action`], so the
-/// `available` flag can never disagree with what an actual `update` installs.
+/// their decision from this same result via [`install_action`], so on the
+/// stable and beta channels the `available` flag never disagrees with what an
+/// actual `update` installs. The one deliberate exception is the ESPHome dev
+/// channel, where the check reports "current" but `update` always reinstalls
+/// (see [`esphome_install_action`]).
 fn compare(installed: String, latest: String) -> ComponentUpdate {
     if crate::update::is_newer_version(&latest, &installed) {
         ComponentUpdate::upgradable(installed, latest)
@@ -420,9 +423,10 @@ pub(crate) async fn device_builder_update_available(
 
 /// What an install sequence should do, decided purely from a
 /// [`ComponentUpdate`] produced by the availability helpers. Keeping the
-/// decision out of the async install fns makes it unit-testable and makes it
-/// structurally impossible for the install path to disagree with the check
-/// path about whether an update exists — both are derived from the same value.
+/// decision out of the async install fns makes it unit-testable and keeps the
+/// install path's view of "is an update available" derived from the exact
+/// value the check path reports; the only deliberate divergence is the
+/// dev-channel override in [`esphome_install_action`].
 #[derive(Debug, PartialEq)]
 enum InstallAction {
     /// Install `target` over `installed`.
@@ -461,9 +465,22 @@ fn install_action(check: ComponentUpdate) -> InstallAction {
             ..
         } => InstallAction::Install { installed, target },
         ComponentUpdate {
+            available,
             installed: Some(installed),
             ..
-        } => InstallAction::UpToDate { installed },
+        } => {
+            // `available` without a `latest` is unconstructible today
+            // (`upgradable` is the only constructor that sets it, and it
+            // always carries both versions). Assert that so a future
+            // constructor can't silently downgrade an "available" result to
+            // up to date; in release builds the conservative reading (never
+            // install on incomplete data) stands.
+            debug_assert!(
+                !available,
+                "ComponentUpdate available without a latest version"
+            );
+            InstallAction::UpToDate { installed }
+        }
     }
 }
 
