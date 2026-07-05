@@ -194,14 +194,21 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions and ask the user (dev never reaches here, so
-        // channel_name only ever yields "stable" or "beta")
+        // Compare versions and ask the user. Dev is handled at the top of
+        // this function, so channel_name only ever yields "stable" or "beta";
+        // keep that invariant explicit.
+        let channel_label = match channel {
+            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
+            ReleaseChannel::Dev => {
+                unreachable!("dev channel is handled before the shared check tail")
+            }
+        };
         prompt_if_newer(
             app_handle,
             &UpdateWording {
                 component: "ESPHome",
                 log_prefix: "Update",
-                channel_label: Some(channel_name(channel)),
+                channel_label: Some(channel_label),
             },
             "Update Available",
             latest,
@@ -247,14 +254,21 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions and notify (dev never reaches here, so
-        // channel_name only ever yields "stable" or "beta")
+        // Compare versions and notify. Dev is handled at the top of this
+        // function, so channel_name only ever yields "stable" or "beta";
+        // keep that invariant explicit.
+        let channel_label = match channel {
+            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
+            ReleaseChannel::Dev => {
+                unreachable!("dev channel is handled before the shared check tail")
+            }
+        };
         notify_if_newer(
             app_handle,
             &UpdateWording {
                 component: "ESPHome",
                 log_prefix: "Update",
-                channel_label: Some(channel_name(channel)),
+                channel_label: Some(channel_label),
             },
             &latest,
             &installed,
@@ -541,6 +555,22 @@ impl UpdateWording<'_> {
             None => format!("{} {}", self.component, version),
         }
     }
+
+    /// Full body of the "would you like to update now?" confirm dialog shown
+    /// by [`prompt_if_newer`].
+    fn prompt_message(&self, latest: &str, installed: &str) -> String {
+        format!(
+            "{} is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
+            self.subject(latest),
+            installed
+        )
+    }
+
+    /// Title of the background "update available" notification shown by
+    /// [`notify_if_newer`].
+    fn notification_title(&self) -> String {
+        format!("{} Update Available", self.component)
+    }
 }
 
 /// Shared tail of the user-initiated update checks: compare versions and, when
@@ -576,11 +606,7 @@ async fn prompt_if_newer(
         wording.log_prefix, installed, latest, installed
     );
 
-    let msg = format!(
-        "{} is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
-        wording.subject(&latest),
-        installed
-    );
+    let msg = wording.prompt_message(&latest, installed);
     if crate::dialog::confirm(app_handle, title, msg, "Update Now", "Later").await {
         Some(latest)
     } else {
@@ -611,7 +637,7 @@ fn notify_if_newer(
 
     if let Err(e) = notify_update_available(
         app_handle,
-        &format!("{} Update Available", wording.component),
+        &wording.notification_title(),
         &wording.subject(latest),
         installed,
         tray_available,
@@ -634,13 +660,19 @@ pub(crate) fn notify_update_available(
         .notification()
         .builder()
         .title(title)
-        .body(format!(
-            "{} is available (you have {}). {}",
-            subject,
-            installed,
-            crate::updates_menu_hint(tray_available)
-        ))
+        .body(update_notification_body(subject, installed, tray_available))
         .show()
+}
+
+/// Body of the standard "update available" notification, shared by every
+/// caller of [`notify_update_available`].
+fn update_notification_body(subject: &str, installed: &str, tray_available: bool) -> String {
+    format!(
+        "{} is available (you have {}). {}",
+        subject,
+        installed,
+        crate::updates_menu_hint(tray_available)
+    )
 }
 
 /// Choose the version to offer on the beta channel.
@@ -1170,17 +1202,80 @@ mod tests {
         args.iter().any(|a| a == flag)
     }
 
-    #[test]
-    fn subject_appends_channel_label_when_present() {
-        let esphome = UpdateWording {
+    /// The ESPHome wording as built by the check tails (channel label present).
+    fn esphome_wording() -> UpdateWording<'static> {
+        UpdateWording {
             component: "ESPHome",
             log_prefix: "Update",
             channel_label: Some("stable"),
-        };
-        assert_eq!(esphome.subject("2025.1.0"), "ESPHome 2025.1.0 (stable)");
+        }
+    }
+
+    #[test]
+    fn subject_appends_channel_label_when_present() {
+        assert_eq!(
+            esphome_wording().subject("2025.1.0"),
+            "ESPHome 2025.1.0 (stable)"
+        );
         assert_eq!(
             DEVICE_BUILDER_WORDING.subject("1.2.3"),
             "ESPHome Device Builder 1.2.3"
+        );
+    }
+
+    #[test]
+    fn prompt_message_pins_exact_dialog_text() {
+        assert_eq!(
+            esphome_wording().prompt_message("2025.1.0", "2024.12.2"),
+            "ESPHome 2025.1.0 (stable) is available.\n\n\
+             You currently have version 2024.12.2.\n\n\
+             Would you like to update now?"
+        );
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.prompt_message("1.2.3", "1.2.2"),
+            "ESPHome Device Builder 1.2.3 is available.\n\n\
+             You currently have version 1.2.2.\n\n\
+             Would you like to update now?"
+        );
+    }
+
+    #[test]
+    fn notification_title_pins_exact_text() {
+        assert_eq!(
+            esphome_wording().notification_title(),
+            "ESPHome Update Available"
+        );
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.notification_title(),
+            "ESPHome Device Builder Update Available"
+        );
+    }
+
+    #[test]
+    fn notification_body_pins_exact_text_for_both_tray_states() {
+        // With a tray, the hint points at the tray menu.
+        assert_eq!(
+            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", true),
+            "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
+             Open the tray menu and choose \"Check for Updates...\" to update."
+        );
+        assert_eq!(
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", true),
+            "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
+             Open the tray menu and choose \"Check for Updates...\" to update."
+        );
+        // Without a tray, the hint falls back to the CLI.
+        assert_eq!(
+            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", false),
+            "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
+             No system tray was detected. Run `esphome-desktop update` from a \
+             terminal to update."
+        );
+        assert_eq!(
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", false),
+            "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
+             No system tray was detected. Run `esphome-desktop update` from a \
+             terminal to update."
         );
     }
 
