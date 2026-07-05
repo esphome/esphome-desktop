@@ -20,9 +20,10 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// by `esphome-desktop api version`. The device-builder dashboard gates on this
 /// so we can evolve the human CLI freely.
 ///
-/// The `api` client echoes server replies verbatim, so the wire shapes of
-/// [`Reply`], [`StatusReply`], and [`UpdateCheckReply`] — their serde `type`
-/// tags and their fields — ARE this public contract, not merely internal types.
+/// The `api` client forwards each server reply as its own JSON line (only the
+/// surrounding whitespace is trimmed), so the wire shapes of [`Reply`],
+/// [`StatusReply`], and [`UpdateCheckReply`] — their serde `type` tags and their
+/// fields — ARE this public contract, not merely internal types.
 /// Renaming/removing a field or changing a tag on them is a breaking change to
 /// the dashboard and must bump this version. Do not refactor them casually.
 pub const API_SCHEMA_VERSION: u32 = 1;

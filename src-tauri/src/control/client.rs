@@ -564,9 +564,10 @@ fn api(method: ApiMethod) -> ExitCode {
     ExitCode::from(api_stream(&request, timeout))
 }
 
-/// Connect, send one request, and echo each server reply line verbatim (already
-/// JSON) until the terminal reply or EOF. The exit code mirrors the terminal
-/// reply for shell callers; the JSON line is authoritative for the dashboard.
+/// Connect, send one request, and forward each server reply as a validated JSON
+/// line (trimmed of surrounding whitespace) until the terminal reply or EOF. The
+/// exit code mirrors the terminal reply for shell callers; the JSON line is
+/// authoritative for the dashboard.
 fn api_stream(request: &Request, timeout: Duration) -> u8 {
     let mut stream = match connect() {
         Ok(stream) => stream,
@@ -591,7 +592,7 @@ fn api_stream(request: &Request, timeout: Duration) -> u8 {
     api_read(reply_reader(stream, timeout))
 }
 
-/// Drain reply lines, echoing each raw JSON line, until a terminal reply.
+/// Drain reply lines, forwarding each validated JSON line, until a terminal reply.
 /// Returns the exit code the terminal reply maps to.
 fn api_read<R: BufRead>(mut reader: R) -> u8 {
     let mut saw_restart_marker = false;
