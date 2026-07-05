@@ -682,10 +682,10 @@ fn snapshot_preserved_versions(
 /// gutted stdlib still executes it cleanly while every import fails.
 #[cfg(not(target_os = "windows"))]
 fn interpreter_is_usable(python_bin: &Path) -> bool {
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-c", "import importlib.metadata"]);
-    configure_no_window_command(&mut cmd);
-    matches!(cmd.output(), Ok(o) if o.status.success())
+    matches!(
+        run_python_capture(python_bin, ["-c", "import importlib.metadata"]),
+        Ok(o) if o.status.success()
+    )
 }
 
 /// Read the consecutive-defer counter, returning 0 when the marker is missing
@@ -791,11 +791,7 @@ fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<Strin
         "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
     );
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-c", &script]);
-    configure_no_window_command(&mut cmd);
-    let output = cmd
-        .output()
+    let output = run_python_capture(python_bin, ["-c", &script])
         .with_context(|| format!("Failed to run version probe for {package} via {python_bin:?}"))?;
     parse_probe_output(
         package,
@@ -1030,11 +1026,40 @@ pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
     };
 
     // Try to run esphome version
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    configure_no_window_command(&mut cmd);
+    run_python_capture(&python_path, ["-m", "esphome", "version"])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+/// Spawn the given Python interpreter with `args`, suppress the console
+/// window on Windows, and capture its output. This only removes the
+/// spawn/capture boilerplate: it adds no flags of its own (callers pass
+/// exactly the flags they need, `-I` included or not), and callers keep their
+/// own policy for exit status, logging, and stdout/stderr interpretation.
+pub fn run_python_capture<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::io::Result<std::process::Output> {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(args);
+    configure_no_window_command(&mut cmd);
+    cmd.output()
+}
+
+/// [`run_python_capture`], returning the trimmed stdout on a successful exit
+/// and `None` on a non-zero exit. stderr is discarded, so callers that need
+/// it (or the exit status) should use [`run_python_capture`] directly.
+pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::io::Result<Option<String>> {
+    let output = run_python_capture(python, args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
 }
 
 /// Configure std::process::Command to not create a console window on Windows
