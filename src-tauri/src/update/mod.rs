@@ -1170,6 +1170,20 @@ mod tests {
         args.iter().any(|a| a == flag)
     }
 
+    #[test]
+    fn subject_appends_channel_label_when_present() {
+        let esphome = UpdateWording {
+            component: "ESPHome",
+            log_prefix: "Update",
+            channel_label: Some("stable"),
+        };
+        assert_eq!(esphome.subject("2025.1.0"), "ESPHome 2025.1.0 (stable)");
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.subject("1.2.3"),
+            "ESPHome Device Builder 1.2.3"
+        );
+    }
+
     /// One non-yanked file — a normally installable release.
     fn active() -> Vec<PyPIRelease> {
         vec![PyPIRelease { yanked: false }]
