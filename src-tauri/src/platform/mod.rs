@@ -1470,17 +1470,9 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::util::unique_temp_dir;
         use std::fs;
         use std::path::Path;
-
-        /// Fresh temp dir per test; process id + tag avoids collisions.
-        fn unique_temp_dir(tag: &str) -> PathBuf {
-            let dir =
-                std::env::temp_dir().join(format!("esphome_cli_cmd_{}_{tag}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).expect("create temp dir");
-            dir
-        }
 
         fn bin_dir(dir: &Path) -> PathBuf {
             let bin = dir.join("bin");
@@ -1858,20 +1850,8 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::util::unique_temp_dir;
         use std::fs;
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        /// Unique temp dir per call so parallel tests never collide.
-        fn unique_temp_dir(tag: &str) -> PathBuf {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            std::env::temp_dir().join(format!(
-                "koan-appindicator-{}-{}-{}",
-                tag,
-                std::process::id(),
-                n
-            ))
-        }
 
         #[test]
         fn candidate_paths_are_all_rooted_in_appdir() {
@@ -2053,6 +2033,8 @@ pub fn is_tray_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::util::unique_temp_dir;
 
     #[test]
     fn path_with_prepended_puts_dir_first() {
@@ -2171,22 +2153,6 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(entries[0].as_os_str().as_bytes(), b"/weird\xffdir");
         assert_eq!(entries[1], PathBuf::from("/opt/homebrew/bin"));
-    }
-
-    /// Unique temp dir per call. Combines the process id with a monotonic
-    /// counter so tests running in parallel within the same process can never
-    /// collide on (or delete) each other's directories.
-    #[cfg(unix)]
-    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "koan-copytest-{}-{}-{}",
-            tag,
-            std::process::id(),
-            n
-        ))
     }
 
     #[cfg(unix)]

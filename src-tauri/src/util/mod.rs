@@ -97,6 +97,25 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
+/// Create a unique, empty temp directory for a test and return its path.
+/// The process id plus a per-test tag and a monotonic counter keep both
+/// intra-process parallelism and two concurrent `cargo test` binaries on the
+/// same host from colliding. Callers clean up after themselves (or wrap the
+/// path in a guard like the `TmpDir` in this module's tests); leftovers from a
+/// crashed run with a recycled pid are wiped before the directory is recreated.
+#[cfg(test)]
+pub(crate) fn unique_temp_dir(tag: &str) -> PathBuf {
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "esphome-desktop-test-{}-{tag}-{seq}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("failed to create temp dir {}: {e}", dir.display()));
+    dir
+}
+
 /// Rotate `path` before a fresh run, keeping up to `keep` previous copies.
 ///
 /// The launcher redirects the dashboard child's stdout/stderr into a single
@@ -140,14 +159,7 @@ mod tests {
 
     impl TmpDir {
         fn new(tag: &str) -> Self {
-            let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "esphome-desktop-test-{}-{}-{seq}",
-                std::process::id(),
-                tag
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            Self(unique_temp_dir(tag))
         }
 
         fn path(&self) -> &Path {
