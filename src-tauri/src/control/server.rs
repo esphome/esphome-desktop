@@ -453,11 +453,11 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
     // them concurrently so `status` pays the slowest, not the sum.
     let (backend_healthy, esphome_version, device_builder_version, launch_at_startup) = tokio::join!(
         async { crate::daemon::health_check(port).await.unwrap_or(false) },
-        ops::detect(app, crate::update::get_installed_version),
+        ops::detect(app, crate::update::installed_esphome_version),
         ops::detect(app, crate::update::get_installed_device_builder_version),
         ops::startup_enabled(app, launch_fallback),
     );
-    let esphome_version = esphome_version.ok();
+    let esphome_version = esphome_version.ok().flatten();
     let device_builder_version = device_builder_version.ok().flatten();
 
     StatusReply {

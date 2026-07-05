@@ -505,8 +505,12 @@ async fn update_esphome_package(
     report: &mut UpdateReport,
 ) {
     progress("esphome", "checking for an ESPHome update");
-    let installed = match detect(app, crate::update::get_installed_version).await {
-        Ok(v) => v,
+    let installed = match detect(app, crate::update::installed_esphome_version).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            report.fail("ESPHome is not installed".to_string());
+            return;
+        }
         Err(e) => {
             report.fail(format!("esphome version detection failed: {e}"));
             return;
