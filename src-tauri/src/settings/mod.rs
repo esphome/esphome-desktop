@@ -102,8 +102,8 @@ where
 ///
 /// Port `0` is the dangerous case: a server reads it as "pick any free
 /// ephemeral port," but this app uses the configured value verbatim for the
-/// health check (`health_check_url`) and the dashboard URL it opens, never the
-/// port the backend actually bound. A persisted `{"port": 0}` (hand-edited
+/// health check (`daemon::loopback_url`) and the dashboard URL it opens, never
+/// the port the backend actually bound. A persisted `{"port": 0}` (hand-edited
 /// file) would therefore leave the dashboard permanently unreachable with no
 /// visible error. A non-number (null, string, bool from a hand-edited or future
 /// file) likewise falls back here rather than failing the whole parse and

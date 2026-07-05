@@ -277,20 +277,6 @@ pub(crate) fn open_dashboard(port: u16) {
     }
 }
 
-/// Build the URL the startup readiness probe should poll.
-///
-/// The daemon is spawned with `--host 127.0.0.1` / `--address 127.0.0.1`
-/// (see `DaemonManager::start()`), so it only listens on the IPv4 loopback.
-/// We probe the literal `127.0.0.1` rather than the `localhost` hostname to
-/// avoid a resolver detour: on IPv6-first hosts `localhost` resolves to
-/// `::1` first, where nothing is listening, so each poll can stall on the
-/// `::1` connect attempt before falling back to IPv4 — delaying the
-/// browser-open on startup. The periodic health check should probe
-/// `127.0.0.1` for the same reason.
-fn dashboard_ready_url(port: u16) -> String {
-    format!("http://127.0.0.1:{}/", port)
-}
-
 /// Wait for the dashboard to be ready by polling the health endpoint
 pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bool {
     let client = match reqwest::Client::builder()
@@ -301,7 +287,7 @@ pub(crate) async fn wait_for_dashboard_ready(port: u16, timeout_secs: u64) -> bo
         Err(_) => return false,
     };
 
-    let url = dashboard_ready_url(port);
+    let url = daemon::loopback_url(port);
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
@@ -814,7 +800,6 @@ pub fn run(cli: Cli) {
 
 #[cfg(test)]
 mod tests {
-    use super::dashboard_ready_url;
     use super::is_bare_terminal_launch;
     use super::updates_menu_hint;
 
@@ -836,17 +821,6 @@ mod tests {
         // is a deliberate invocation: arg_count > 1, so never bare.
         assert!(!is_bare_terminal_launch(true, 2)); // e.g. --no-open-dashboard
         assert!(!is_bare_terminal_launch(true, 3)); // e.g. --builder-channel stable
-    }
-
-    #[test]
-    fn dashboard_ready_url_targets_ipv4_loopback() {
-        // The daemon binds `127.0.0.1` only, so the readiness probe must
-        // target the IPv4 literal rather than the `localhost` hostname —
-        // otherwise IPv6-first hosts steer the connect to `::1`, where
-        // nothing is listening, stalling each poll before the IPv4 fallback.
-        let url = dashboard_ready_url(6052);
-        assert_eq!(url, "http://127.0.0.1:6052/");
-        assert!(!url.contains("localhost"));
     }
 
     #[test]
