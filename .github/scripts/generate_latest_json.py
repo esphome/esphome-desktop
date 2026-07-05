@@ -45,6 +45,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# This script runs by path (not as an installed package), so make the sibling
+# _gha helper importable regardless of the caller's cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _gha import warn as _warn  # noqa: E402
+
 # (Tauri updater target, regex matching the .sig asset name)
 # fmt: off
 PLATFORM_SIG_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
@@ -85,11 +91,6 @@ ASSETS_PENDING_BLOCK_RE = re.compile(
     r"^> \[!CAUTION\].*?<!-- ASSETS_PENDING -->\n?",
     re.DOTALL | re.MULTILINE,
 )
-
-
-def _warn(msg: str) -> None:
-    """Emit a GitHub-Actions-style warning to stderr (also readable locally)."""
-    print(f"::warning::{msg}", file=sys.stderr)
 
 
 def _strip_assets_pending_warning(body: str) -> str:

@@ -53,6 +53,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
+# This script runs by path (not as an installed package), so make the sibling
+# _gha helper importable regardless of the caller's cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _gha import error as _error  # noqa: E402
+from _gha import warn as _warn  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PREPARE_BUNDLE = REPO_ROOT / "build-scripts" / "prepare_bundle.sh"
 
@@ -88,16 +95,6 @@ PBS_ASSET_RE_TEMPLATE = (
     r"cpython-(?P<py>{minor}\.\d+)\+(?P<pbs>\d+)-"
     r"x86_64-unknown-linux-gnu-install_only_stripped\.tar\.gz"
 )
-
-
-def _warn(msg: str) -> None:
-    """Emit a GitHub-Actions-style warning to stderr (also readable locally)."""
-    print(f"::warning::{msg}", file=sys.stderr)
-
-
-def _error(msg: str) -> None:
-    """Emit a GitHub-Actions-style error to stderr (also readable locally)."""
-    print(f"::error::{msg}", file=sys.stderr)
 
 
 class ResolutionError(Exception):
