@@ -26,7 +26,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # (file, version-line pattern, replacement template). Patterns are multiline so
-# they anchor per line, and replacements rewrite the whole matched line.
+# they anchor per line, and each replacement rewrites just the matched
+# substring — the same edit the old per-file sed steps made.
 VERSION_FILES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "src-tauri/Cargo.toml",
@@ -49,7 +50,7 @@ VERSION_FILES: tuple[tuple[str, re.Pattern[str], str], ...] = (
 def set_version(
     text: str, pattern: re.Pattern[str], template: str, version: str
 ) -> str:
-    """Rewrite every line matching `pattern` with the filled-in `template`.
+    """Replace every match of `pattern` with the filled-in `template`.
 
     Raises ValueError when nothing matches so a renamed or restructured file
     fails the release job instead of silently shipping a stale version.
@@ -73,15 +74,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = Path(args.root)
+    # Two phases: compute every rewrite first, write only after all patterns
+    # matched, so a failure can't leave the tree partially bumped.
+    rewritten: list[tuple[Path, str, str]] = []
     for rel_path, pattern, template in VERSION_FILES:
         path = root / rel_path
-        text = path.read_text(encoding="utf-8")
         try:
+            text = path.read_text(encoding="utf-8")
             new = set_version(text, pattern, template, args.version)
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             print(f"::error::{rel_path}: {exc}", file=sys.stderr)
             return 1
-        path.write_text(new, encoding="utf-8")
+        rewritten.append((path, rel_path, new))
+    for path, rel_path, new in rewritten:
+        try:
+            path.write_text(new, encoding="utf-8")
+        except OSError as exc:
+            print(f"::error::{rel_path}: {exc}", file=sys.stderr)
+            return 1
         print(f"{rel_path}: set version to {args.version}")
     return 0
 

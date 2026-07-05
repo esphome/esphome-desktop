@@ -14,6 +14,7 @@ pytest suite (maintainer-requested framework, fully typed, no classes).
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -66,7 +67,7 @@ def _load_module() -> ModuleType:
 set_version = _load_module()
 
 
-def _table_entry(rel_path: str) -> tuple[str, str]:
+def _table_entry(rel_path: str) -> tuple[re.Pattern[str], str]:
     """Return `(pattern, template)` for a file in the VERSION_FILES table."""
     for path, pattern, template in set_version.VERSION_FILES:
         if path == rel_path:
@@ -157,3 +158,26 @@ def test_main_fails_when_a_pattern_matches_nothing(tmp_path: Path) -> None:
     (tmp_path / "src-tauri" / "tauri.conf.json").write_text("{}\n", encoding="utf-8")
     rc = set_version.main(["0.15.0", "--root", str(tmp_path)])
     assert rc == 1
+    # Writes happen only after every pattern matched, so the earlier files in
+    # the table must be untouched, not left partially bumped.
+    assert (tmp_path / "src-tauri" / "Cargo.toml").read_text(
+        encoding="utf-8"
+    ) == CARGO_TOML
+    assert (
+        tmp_path / "packaging" / "aur" / "esphome-desktop-bin" / "PKGBUILD"
+    ).read_text(encoding="utf-8") == PKGBUILD
+
+
+def test_main_fails_with_error_message_when_a_file_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A missing file must produce the ::error:: annotation naming the file and
+    # a non-zero exit, not a raw traceback, and must not touch the other files.
+    _write_tree(tmp_path)
+    (tmp_path / "src-tauri" / "tauri.conf.json").unlink()
+    rc = set_version.main(["0.15.0", "--root", str(tmp_path)])
+    assert rc == 1
+    assert "::error::src-tauri/tauri.conf.json:" in capsys.readouterr().err
+    assert (tmp_path / "src-tauri" / "Cargo.toml").read_text(
+        encoding="utf-8"
+    ) == CARGO_TOML
