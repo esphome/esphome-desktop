@@ -89,13 +89,7 @@ jobs:
       # Linux-specific dependencies
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            patchelf \
-            libayatana-appindicator3-dev
+        uses: ./.github/actions/linux-tauri-deps
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
