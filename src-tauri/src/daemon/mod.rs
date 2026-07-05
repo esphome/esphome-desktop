@@ -229,6 +229,9 @@ impl DaemonManager {
             "ESPHOME_DESKTOP_VERSION",
             self.app_handle.package_info().version.to_string(),
         );
+        // The backend also inherits ESPHOME_DESKTOP_BIN (the esphome-desktop CLI
+        // path) from this process, exported at startup so the dashboard can
+        // check for and trigger updates via the `api` interface. See lib.rs.
 
         // On Windows, force the spawned Python (and any subprocesses it
         // spawns for compile/logs) to use UTF-8 for stdin/stdout/stderr.

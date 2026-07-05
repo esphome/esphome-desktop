@@ -10,9 +10,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use super::protocol::{
-    backend_name, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
+    self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
 };
-use crate::{CliCommand, OnOff};
+use crate::{ApiMethod, CliCommand, OnOff};
 
 /// The operation ran and failed.
 const EXIT_FAILED: u8 = 1;
@@ -27,6 +27,9 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(180);
 /// Switches and updates download and pip-install packages.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(600);
+/// `check-update` hits GitHub and PyPI and spawns Python for the installed
+/// versions; more headroom than a local request, far less than an install.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Lines shown by the default (non-follow) `logs` tail.
 const TAIL_LINES: usize = 50;
@@ -70,6 +73,7 @@ pub(crate) fn run(command: CliCommand) -> ExitCode {
         CliCommand::Restart => simple(Request::Restart, RESTART_TIMEOUT),
         CliCommand::Quit => simple(Request::Quit, DEFAULT_TIMEOUT),
         CliCommand::Status { json } => status_cmd(json),
+        CliCommand::Api(method) => api(method),
     }
 }
 
@@ -210,6 +214,11 @@ fn read_replies<R: BufRead>(mut reader: R) -> Outcome {
                 }
             }
             Ok(Reply::Status(reply)) => return Outcome::Status(reply),
+            // No human subcommand requests a check; it only arrives via `api`,
+            // which reads replies on its own path.
+            Ok(Reply::UpdateCheck(_)) => {
+                return Outcome::Failed("unexpected update-check reply".to_string())
+            }
             Err(e) => return Outcome::Failed(format!("could not parse server reply: {e}")),
         }
     }
@@ -529,6 +538,136 @@ fn offline_status(json: bool) -> ExitCode {
         }
     }
     ExitCode::from(EXIT_NOT_RUNNING)
+}
+
+/// `api <method>`: the machine-readable contract the device-builder dashboard
+/// codes against. Emits newline-delimited JSON only — one object per line, on
+/// stdout, valid JSON even for errors — so the human CLI's wording stays free
+/// to change. Versioned via [`protocol::API_SCHEMA_VERSION`].
+fn api(method: ApiMethod) -> ExitCode {
+    let (request, timeout) = match method {
+        // Pure handshake: answer even while the app is starting (or absent), so
+        // the dashboard can gate on the version before making any other call.
+        ApiMethod::Version => {
+            print_json(&serde_json::json!({
+                "schema_version": protocol::API_SCHEMA_VERSION,
+            }));
+            return ExitCode::SUCCESS;
+        }
+        ApiMethod::Status => (Request::Status, DEFAULT_TIMEOUT),
+        ApiMethod::CheckUpdate => (Request::CheckUpdate, CHECK_TIMEOUT),
+        // Non-interactive by construction: the server restarts the backend
+        // without any consent, so an unattended remote builder recovers itself.
+        ApiMethod::Update => (Request::Update, UPDATE_TIMEOUT),
+    };
+    api_stream(&request, timeout)
+}
+
+/// Connect, send one request, and echo each server reply line verbatim (already
+/// JSON) until the terminal reply or EOF. The exit code mirrors the terminal
+/// reply for shell callers; the JSON line is authoritative for the dashboard.
+fn api_stream(request: &Request, timeout: Duration) -> ExitCode {
+    let mut stream = match connect() {
+        Ok(stream) => stream,
+        Err(ConnectError::NotRunning) => {
+            return api_err_line("not_running", "the app is not running", EXIT_NOT_RUNNING)
+        }
+        Err(ConnectError::BadPath(message)) => {
+            return api_err_line("bad_path", &message, EXIT_FAILED)
+        }
+    };
+    let mut line = match serde_json::to_string(request) {
+        Ok(line) => line,
+        Err(e) => return api_err_line("encode_failed", &e.to_string(), EXIT_FAILED),
+    };
+    line.push('\n');
+    if let Err(e) = stream
+        .write_all(line.as_bytes())
+        .and_then(|()| stream.flush())
+    {
+        return api_err_line("send_failed", &e.to_string(), EXIT_FAILED);
+    }
+    api_read(reply_reader(stream, timeout))
+}
+
+/// Drain reply lines, echoing each raw JSON line, until a terminal reply.
+fn api_read<R: BufRead>(mut reader: R) -> ExitCode {
+    let mut saw_restart_marker = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                // A desktop self-update relaunch tears the connection down right
+                // after its terminal `ok`; the marker tells us that's success.
+                return if saw_restart_marker {
+                    ExitCode::SUCCESS
+                } else {
+                    api_err_line(
+                        "connection_closed",
+                        "connection closed before the operation finished",
+                        EXIT_FAILED,
+                    )
+                };
+            }
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return api_err_line(
+                    "timeout",
+                    "timed out waiting for the app's reply; the operation may still be running",
+                    EXIT_FAILED,
+                )
+            }
+            Err(e) => return api_err_line("read_failed", &e.to_string(), EXIT_FAILED),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Echo the server's JSON exactly so the dashboard sees the real schema.
+        println!("{trimmed}");
+        match serde_json::from_str::<Reply>(trimmed) {
+            Ok(Reply::Progress { step, .. }) => {
+                if step == STEP_APP_RESTARTING {
+                    saw_restart_marker = true;
+                }
+            }
+            Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
+                return ExitCode::SUCCESS
+            }
+            Ok(Reply::Err { code, .. }) => {
+                return match code {
+                    ErrCode::Busy => ExitCode::from(EXIT_BUSY),
+                    ErrCode::Failed => ExitCode::from(EXIT_FAILED),
+                }
+            }
+            // A line we can't classify was still echoed; keep reading for the
+            // terminal reply (or let EOF decide).
+            Err(_) => {}
+        }
+    }
+}
+
+/// Print a synthesized client-side error as one JSON line and return `exit`.
+/// Client-only `code`s (`not_running`, `timeout`, ...) sit alongside the
+/// server's `busy`/`failed`; the dashboard treats `code` as an opaque string.
+fn api_err_line(code: &str, message: &str, exit: u8) -> ExitCode {
+    print_json(&serde_json::json!({
+        "type": "err",
+        "code": code,
+        "message": message,
+    }));
+    ExitCode::from(exit)
+}
+
+/// Print a JSON value as one line on stdout.
+fn print_json(value: &serde_json::Value) {
+    println!("{value}");
 }
 
 /// `logs`: print/tail the dashboard log, or open the logs folder. Fully

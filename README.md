@@ -83,6 +83,33 @@ is not running, and `status` prints the config and log directory paths.
 Running `esphome-desktop` with no arguments in a terminal prints this command
 list instead of launching another app instance; use `open` to start the app.
 
+### Device-builder integration API
+
+The ESPHome Device Builder dashboard (the backend the app runs) can show an
+"update available" banner and trigger the update itself through a stable,
+versioned JSON interface, separate from the human commands above so their
+wording can change without breaking the dashboard. The app sets
+`ESPHOME_DESKTOP_BIN` in the backend's environment, pointing at the CLI to call:
+
+```bash
+esphome-desktop api version        # {"schema_version":1} (no running app needed)
+esphome-desktop api check-update   # one JSON line: per-component update availability
+esphome-desktop api update         # trigger the full update; streams JSON, then a terminal line
+esphome-desktop api status         # status as one JSON object
+```
+
+Every `api` command prints newline-delimited JSON only, one object per line,
+valid JSON even on error (`{"type":"err","code":"not_running",...}`). Gate on
+`schema_version` before using the others. `check-update` returns
+`{"any_available":bool,"app":{...},"esphome":{...},"device_builder":{...}}` where
+each component carries `available`, `installed`, `latest`, and `error`. `update`
+is fully non-interactive; it stops and restarts the backend without any
+confirmation, so an unattended remote builder always comes back on its own even
+with no one at the keyboard. Trigger it detached (e.g. Python
+`Popen([...], start_new_session=True)`) and poll `check-update`/`status`
+afterward; the update completes in the app even if the caller is torn down when
+the backend restarts.
+
 On Linux the deb/rpm/AUR packages put `esphome-desktop` on your `PATH`. On
 macOS the app installs the command on launch, as a small launcher in
 `/opt/homebrew/bin` or `/usr/local/bin` when one is writable; it removes

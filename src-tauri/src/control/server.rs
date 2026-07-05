@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::ops::{self, SwitchOutcome, UpdateGuard};
-use super::protocol::{self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply};
+use super::protocol::{
+    self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, UpdateCheckReply,
+};
 use crate::AppState;
 
 /// Backoff before retrying a failed accept or pipe re-create, so a
@@ -400,6 +402,10 @@ async fn dispatch(
             let _ = tx.send(Reply::ok("quitting"));
             return Some(PostAction::Exit);
         }
+        Request::CheckUpdate => {
+            let check = build_update_check(app, &state).await;
+            let _ = tx.send(Reply::UpdateCheck(Box::new(check)));
+        }
         Request::Status => {
             let status = build_status(app, &state).await;
             let _ = tx.send(Reply::Status(Box::new(status)));
@@ -466,5 +472,27 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
         launch_at_startup,
         config_dir: state.daemon.config_dir().clone(),
         logs_dir: state.daemon.logs_dir().clone(),
+    }
+}
+
+/// Check every component for an available update without installing anything.
+/// Read-only, so it takes no [`UpdateGuard`] and is safe to run even while an
+/// update is in flight. The three checks hit the network (GitHub, PyPI) and
+/// spawn Python for the installed versions, so run them concurrently.
+async fn build_update_check(app: &AppHandle, state: &Arc<AppState>) -> UpdateCheckReply {
+    let (channel, backend) = {
+        let settings = state.settings.read().await;
+        (settings.release_channel, settings.backend)
+    };
+    let (app_update, esphome, device_builder) = tokio::join!(
+        ops::desktop_update_available(app),
+        ops::esphome_update_available(app, state, channel),
+        ops::device_builder_update_available(app, state, backend),
+    );
+    UpdateCheckReply {
+        any_available: app_update.available || esphome.available || device_builder.available,
+        app: app_update,
+        esphome,
+        device_builder,
     }
 }
