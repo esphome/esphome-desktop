@@ -904,13 +904,27 @@ mod tests {
         ));
     }
 
-    /// A writer whose next write or flush fails with the given error, for
-    /// exercising the send arm of [`send_request`].
-    struct ErrWriter(Option<std::io::Error>);
+    /// A writer whose next `write` fails with the given error (`flush`
+    /// always succeeds), for exercising the write half of [`send_request`].
+    struct WriteErrWriter(Option<std::io::Error>);
 
-    impl Write for ErrWriter {
+    impl Write for WriteErrWriter {
         fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
             Err(self.0.take().expect("write called more than once"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that accepts every `write` but whose next `flush` fails with
+    /// the given error, for exercising the flush half of [`send_request`].
+    struct FlushErrWriter(Option<std::io::Error>);
+
+    impl Write for FlushErrWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -928,9 +942,17 @@ mod tests {
 
         // A write failure surfaces as SendError::Send. (Encoding a Request
         // cannot fail, so that arm has no unit test.)
-        let mut broken = ErrWriter(Some(std::io::Error::other("boom")));
+        let mut broken_write = WriteErrWriter(Some(std::io::Error::other("boom")));
         assert!(matches!(
-            send_request(&mut broken, &Request::Status),
+            send_request(&mut broken_write, &Request::Status),
+            Err(SendError::Send(_))
+        ));
+
+        // A flush failure after a successful write also surfaces as
+        // SendError::Send.
+        let mut broken_flush = FlushErrWriter(Some(std::io::Error::other("boom")));
+        assert!(matches!(
+            send_request(&mut broken_flush, &Request::Status),
             Err(SendError::Send(_))
         ));
     }
