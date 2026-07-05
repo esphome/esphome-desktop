@@ -155,18 +155,35 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
 /// An `Err` means the connection could not be established.
 fn exchange(request: &Request, timeout: Duration) -> Result<Outcome, ConnectError> {
     let mut stream = connect()?;
-    let mut line = match serde_json::to_string(request) {
-        Ok(line) => line,
-        Err(e) => return Ok(Outcome::Failed(format!("could not encode request: {e}"))),
-    };
-    line.push('\n');
-    if let Err(e) = stream
-        .write_all(line.as_bytes())
-        .and_then(|()| stream.flush())
-    {
-        return Ok(Outcome::Failed(format!("error sending request: {e}")));
+    if let Err(e) = send_request(&mut stream, request) {
+        return Ok(Outcome::Failed(match e {
+            SendError::Encode(e) => format!("could not encode request: {e}"),
+            SendError::Send(e) => format!("error sending request: {e}"),
+        }));
     }
     Ok(read_replies(reply_reader(stream, timeout)))
+}
+
+/// Why [`send_request`] failed. The mapping to an error surface stays in each
+/// caller ([`exchange`] formats an [`Outcome::Failed`] message for the human
+/// CLI, `api_stream` emits an NDJSON error line); only the encode-and-write
+/// skeleton is shared.
+enum SendError {
+    /// The request could not be encoded as JSON.
+    Encode(serde_json::Error),
+    /// The encoded request line could not be written to the stream.
+    Send(std::io::Error),
+}
+
+/// Encode `request` as one newline-terminated JSON line and write it to
+/// `stream`, flushing afterwards.
+fn send_request<W: Write>(stream: &mut W, request: &Request) -> Result<(), SendError> {
+    let mut line = serde_json::to_string(request).map_err(SendError::Encode)?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(SendError::Send)
 }
 
 /// One step of a reply read loop: what `read_line` produced, classified the
@@ -606,16 +623,11 @@ fn api_stream(request: &Request, timeout: Duration) -> u8 {
             return api_err_line("bad_path", &message, EXIT_FAILED)
         }
     };
-    let mut line = match serde_json::to_string(request) {
-        Ok(line) => line,
-        Err(e) => return api_err_line("encode_failed", &e.to_string(), EXIT_FAILED),
-    };
-    line.push('\n');
-    if let Err(e) = stream
-        .write_all(line.as_bytes())
-        .and_then(|()| stream.flush())
-    {
-        return api_err_line("send_failed", &e.to_string(), EXIT_FAILED);
+    if let Err(e) = send_request(&mut stream, request) {
+        return match e {
+            SendError::Encode(e) => api_err_line("encode_failed", &e.to_string(), EXIT_FAILED),
+            SendError::Send(e) => api_err_line("send_failed", &e.to_string(), EXIT_FAILED),
+        };
     }
     api_read(reply_reader(stream, timeout))
 }
@@ -889,6 +901,37 @@ mod tests {
         assert!(matches!(
             read_reply_line(&mut broken, &mut line),
             LineStep::ReadErr(_)
+        ));
+    }
+
+    /// A writer whose next write or flush fails with the given error, for
+    /// exercising the send arm of [`send_request`].
+    struct ErrWriter(Option<std::io::Error>);
+
+    impl Write for ErrWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.take().expect("write called more than once"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(self.0.take().expect("flush called more than once"))
+        }
+    }
+
+    #[test]
+    fn send_request_writes_one_line_and_classifies_send_failures() {
+        // Success: exactly the encoded request plus a trailing newline.
+        let mut sink = Vec::new();
+        assert!(send_request(&mut sink, &Request::Status).is_ok());
+        let expected = format!("{}\n", serde_json::to_string(&Request::Status).unwrap());
+        assert_eq!(sink, expected.as_bytes());
+
+        // A write failure surfaces as SendError::Send. (Encoding a Request
+        // cannot fail, so that arm has no unit test.)
+        let mut broken = ErrWriter(Some(std::io::Error::other("boom")));
+        assert!(matches!(
+            send_request(&mut broken, &Request::Status),
+            Err(SendError::Send(_))
         ));
     }
 
