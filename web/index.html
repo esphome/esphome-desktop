@@ -562,7 +562,8 @@
         return asset(fallbackFilename);
       }
 
-      fetch('latest.json', { cache: 'no-store' })
+      // no-cache revalidates on each load but still allows conditional 304s.
+      fetch('latest.json', { cache: 'no-cache' })
         .then((r) => {
           if (!r.ok) {
             console.warn('latest.json returned ' + r.status + '; using template-built download URLs');
@@ -573,7 +574,10 @@
         .then((manifest) => {
           if (manifest && manifest.downloads) {
             manifestDownloads = manifest.downloads;
-            onManifest.forEach((refresh) => refresh());
+            onManifest.forEach((refresh) => {
+              // One failing refresh must not keep the rest on fallback URLs.
+              try { refresh(); } catch (e) { console.warn('manifest refresh failed', e); }
+            });
           } else if (manifest) {
             console.warn('latest.json has no downloads block; using template-built download URLs');
           }
