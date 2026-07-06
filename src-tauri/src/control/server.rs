@@ -366,7 +366,7 @@ async fn dispatch(
         }
         Request::Restart => {
             let guard = guard_or_busy!();
-            match ops::restart_daemon(app, &state, true, &guard, &progress).await {
+            match ops::restart_daemon(&state, true, &guard, &progress).await {
                 Ok(true) => {
                     let _ = tx.send(Reply::ok("dashboard restarted and ready"));
                 }

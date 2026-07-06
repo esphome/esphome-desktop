@@ -384,7 +384,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     info!("User requested update to version {}", version);
 
                     // Stop the dashboard
-                    update_status(&app, false);
                     if let Err(e) = state.daemon.stop().await {
                         error!("Failed to stop backend for update: {}", e);
                         crate::dialog::notice(
@@ -423,7 +422,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                                 )
                                 .await;
                             } else {
-                                update_status(&app, true);
                                 let msg = if channel == ReleaseChannel::Dev {
                                     "ESPHome has been updated to the latest dev version."
                                         .to_string()
@@ -455,8 +453,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                                     "Failed to restart backend after failed update: {}",
                                     restart_err
                                 );
-                            } else {
-                                update_status(&app, true);
                             }
                         }
                     }
@@ -476,7 +472,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     builder_version
                 );
 
-                update_status(&app, false);
                 if let Err(e) = state.daemon.stop().await {
                     error!("Failed to stop backend for device-builder update: {}", e);
                     crate::dialog::notice(
@@ -512,7 +507,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                             )
                             .await;
                         } else {
-                            update_status(&app, true);
                             crate::dialog::notice(
                                 &app,
                                 "Update Complete",
@@ -541,8 +535,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                                 "Failed to restart backend after failed device-builder update: {}",
                                 restart_err
                             );
-                        } else {
-                            update_status(&app, true);
                         }
                     }
                 }
@@ -658,7 +650,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
         }
         ids::RESTART => {
             let state = state.clone();
-            let app = app_handle.clone();
             async_runtime::spawn(async move {
                 // restart() is a stop()->start() sequence, so it must hold the
                 // same re-entrancy guard as the channel switch arm.
@@ -668,7 +659,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 // saved settings and tray radio state.
                 let guard = guard_or_return!(state, "restart");
                 info!("Restarting ESPHome backend");
-                if let Err(e) = ops::restart_daemon(&app, &state, false, &guard, &|_, _| {}).await {
+                if let Err(e) = ops::restart_daemon(&state, false, &guard, &|_, _| {}).await {
                     error!("Failed to restart daemon: {}", e);
                 }
             });

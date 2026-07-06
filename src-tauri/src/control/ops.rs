@@ -83,13 +83,6 @@ pub(crate) fn not_ready_note() -> String {
     format!("did not become ready within {READY_TIMEOUT_SECS}s; check the logs")
 }
 
-/// Show the daemon's actual state in the tray. The switch/restart sequences
-/// optimistically set "stopped" before stopping; after a failed stop the
-/// backend may well still be running, so the optimistic label must not stand.
-fn show_actual_status(app: &AppHandle, state: &AppState) {
-    tray::update_status(app, state.daemon.is_running());
-}
-
 /// How a channel switch ended. The tray maps these onto dialogs, the
 /// control server onto terminal replies.
 pub(crate) enum SwitchOutcome {
@@ -104,6 +97,59 @@ pub(crate) enum SwitchOutcome {
     InstallFailed { error: String, restarted: bool },
     /// The install succeeded but the dashboard failed to start afterwards.
     StartFailed(String),
+}
+
+/// Stop prologue shared by the switch flows: report progress and stop the
+/// daemon (which reflects the stop in the tray status line itself). On
+/// failure run `revert` (restores the tray radio checks) and hand back the
+/// [`SwitchOutcome::StopFailed`] for the caller to return. `stop_what` names
+/// what failed to stop in the log line.
+async fn stop_or_revert(
+    state: &Arc<AppState>,
+    progress: Progress<'_>,
+    detail: &str,
+    stop_what: &str,
+    revert: impl FnOnce(),
+) -> Result<(), SwitchOutcome> {
+    progress("stop", detail);
+    if let Err(e) = state.daemon.stop().await {
+        error!("Failed to stop {}: {}", stop_what, e);
+        revert();
+        return Err(SwitchOutcome::StopFailed(e.to_string()));
+    }
+    Ok(())
+}
+
+/// Install-failure epilogue shared by the switch flows: run `revert` to
+/// restore the tray radio checks, then attempt a best-effort restart of the
+/// previous install (`context` feeds the restart-failure log), folding both
+/// into [`SwitchOutcome::InstallFailed`]. Callers log their flow-specific
+/// error line before calling.
+async fn install_failed(
+    state: &Arc<AppState>,
+    error: String,
+    context: &str,
+    revert: impl FnOnce(),
+) -> SwitchOutcome {
+    revert();
+    let restarted = restart_after_failure(state, context).await;
+    SwitchOutcome::InstallFailed { error, restarted }
+}
+
+/// Apply `mutate` to the settings under the write lock and persist them,
+/// downgrading a save failure to a warning (the in-memory value still
+/// stands). `mutate` returns whether anything changed; an unchanged result
+/// skips the save.
+async fn set_and_save<F>(app: &AppHandle, state: &Arc<AppState>, mutate: F)
+where
+    F: FnOnce(&mut crate::settings::Settings) -> bool,
+{
+    let mut settings = state.settings.write().await;
+    if mutate(&mut settings) {
+        if let Err(e) = settings.save(app) {
+            warn!("Failed to save settings: {}", e);
+        }
+    }
 }
 
 /// Switch the ESPHome release channel: stop the dashboard, install the new
@@ -124,13 +170,16 @@ pub(crate) async fn switch_release_channel(
     // Show the new selection immediately; reverted on failure below.
     tray::update_channel_checks(new_channel);
 
-    progress("stop", "stopping the dashboard");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop backend for channel switch: {}", e);
-        tray::update_channel_checks(old_channel);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
+    if let Err(outcome) = stop_or_revert(
+        state,
+        progress,
+        "stopping the dashboard",
+        "backend for channel switch",
+        || tray::update_channel_checks(old_channel),
+    )
+    .await
+    {
+        return outcome;
     }
 
     progress(
@@ -141,13 +190,11 @@ pub(crate) async fn switch_release_channel(
         Ok(()) => {
             info!("Switched to {} channel successfully", new_channel);
 
-            {
-                let mut settings = state.settings.write().await;
+            set_and_save(app, state, |settings| {
                 settings.release_channel = new_channel;
-                if let Err(e) = settings.save(app) {
-                    warn!("Failed to save settings: {}", e);
-                }
-            }
+                true
+            })
+            .await;
 
             refresh_version_display_blocking(app).await;
 
@@ -156,17 +203,14 @@ pub(crate) async fn switch_release_channel(
                 error!("Failed to restart backend after channel switch: {}", e);
                 return SwitchOutcome::StartFailed(e.to_string());
             }
-            tray::update_status(app, true);
             SwitchOutcome::Success
         }
         Err(e) => {
             error!("Channel switch failed: {}", e);
-            tray::update_channel_checks(old_channel);
-            let restarted = restart_after_failure(app, state, "failed channel switch").await;
-            SwitchOutcome::InstallFailed {
-                error: e.to_string(),
-                restarted,
-            }
+            install_failed(state, e.to_string(), "failed channel switch", || {
+                tray::update_channel_checks(old_channel)
+            })
+            .await
         }
     }
 }
@@ -174,19 +218,15 @@ pub(crate) async fn switch_release_channel(
 /// Restart the dashboard backend. With `wait_ready` the call also polls the
 /// dashboard's readiness probe and returns whether it came up within 60s.
 pub(crate) async fn restart_daemon(
-    app: &AppHandle,
     state: &Arc<AppState>,
     wait_ready: bool,
     _guard: &UpdateGuard,
     progress: Progress<'_>,
 ) -> Result<bool, String> {
     progress("restart", "restarting the dashboard");
-    tray::update_status(app, false);
     if let Err(e) = state.daemon.restart().await {
-        show_actual_status(app, state);
         return Err(e.to_string());
     }
-    tray::update_status(app, true);
     if !wait_ready {
         return Ok(true);
     }
@@ -211,15 +251,15 @@ pub(crate) async fn set_launch_at_startup(
     enable: bool,
 ) -> bool {
     let _toggle = STARTUP_TOGGLE.lock().await;
-    {
-        let mut settings = state.settings.write().await;
+    set_and_save(app_handle, state, |settings| {
         if settings.launch_at_startup != enable {
             settings.launch_at_startup = enable;
-            if let Err(e) = settings.save(app_handle) {
-                warn!("Failed to save settings: {}", e);
-            }
+            true
+        } else {
+            false
         }
-    }
+    })
+    .await;
 
     // Always (re)apply the OS call, even when the persisted value already
     // matches, so an already-selected choice retries a registration that
@@ -533,7 +573,6 @@ async fn update_esphome_package(
     progress("esphome", "checking for an ESPHome update");
     let check = esphome_update_available(app, state, channel).await;
     run_package_phase(
-        app,
         state,
         progress,
         report,
@@ -572,7 +611,6 @@ async fn update_device_builder_package(
     progress("device-builder", "checking for a device builder update");
     let check = device_builder_update_available(app, state).await;
     run_package_phase(
-        app,
         state,
         progress,
         report,
@@ -618,7 +656,6 @@ struct PackagePhase<D, F, R> {
 /// on success, and record the outcome. Everything component-specific comes
 /// bundled in the [`PackagePhase`].
 async fn run_package_phase<D, F, Fut, R, RFut>(
-    app: &AppHandle,
     state: &Arc<AppState>,
     progress: Progress<'_>,
     report: &mut UpdateReport,
@@ -663,7 +700,7 @@ async fn run_package_phase<D, F, Fut, R, RFut>(
         labels.step,
         &format!("updating {} {installed} to {label}", labels.display_name),
     );
-    let result = stop_install_start(app, state, || install(target)).await;
+    let result = stop_install_start(state, || install(target)).await;
     match result {
         Ok(()) => {
             refresh().await;
@@ -676,25 +713,16 @@ async fn run_package_phase<D, F, Fut, R, RFut>(
 /// Stop the dashboard, run `install`, then start the dashboard again. The
 /// start is attempted even after a failed install so the user isn't left
 /// without a dashboard.
-async fn stop_install_start<F, Fut>(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    install: F,
-) -> Result<(), String>
+async fn stop_install_start<F, Fut>(state: &Arc<AppState>, install: F) -> Result<(), String>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
-    tray::update_status(app, false);
     if let Err(e) = state.daemon.stop().await {
-        show_actual_status(app, state);
         return Err(format!("failed to stop the dashboard: {e}"));
     }
     let install_result = install().await;
     let start_result = state.daemon.start().await;
-    if start_result.is_ok() {
-        tray::update_status(app, true);
-    }
     match (install_result, start_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(e)) => Err(format!("updated, but the dashboard failed to start: {e}")),
@@ -707,12 +735,9 @@ where
 
 /// Best-effort dashboard restart after a failed install, so the user isn't
 /// left without a backend. Returns whether the restart succeeded.
-async fn restart_after_failure(app: &AppHandle, state: &Arc<AppState>, context: &str) -> bool {
+async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
     match state.daemon.start().await {
-        Ok(()) => {
-            tray::update_status(app, true);
-            true
-        }
+        Ok(()) => true,
         Err(e) => {
             error!("Failed to restart backend after {}: {}", context, e);
             false

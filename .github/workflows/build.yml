@@ -91,19 +91,13 @@ jobs:
         if: matrix.platform == 'linux'
         uses: ./.github/actions/linux-tauri-deps
 
+      # Floating `stable` toolchain (the action's default), unlike the pinned
+      # lint gates in lint-test.yml.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.rust_target }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: src-tauri
-          key: ${{ matrix.target }}
-          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
-          # produces broken cargo/rustc symlinks on the new macOS runner image.
-          cache-bin: false
+          cache-key: ${{ matrix.target }}
 
       # Resolve a tauri-cli version from the locked `tauri` crate version so it
       # tracks Dependabot's cargo bumps automatically (no hardcoded version to go
@@ -264,6 +258,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Locate the built AppImage once. The inject step below repacks it in
+      # place and the re-sign step must sign that same file, so both read this
+      # output rather than repeating the find.
+      - name: Locate AppImage
+        id: appimage
+        if: contains(matrix.bundles, 'appimage')
+        run: |
+          set -euo pipefail
+          mapfile -t APPIMAGES < <(find src-tauri/target/release/bundle/appimage -name "*.AppImage")
+          if [ "${#APPIMAGES[@]}" -ne 1 ]; then
+            echo "expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}" >&2
+            exit 1
+          fi
+          printf 'path=%s\n' "${APPIMAGES[0]}" >> "$GITHUB_OUTPUT"
+
       # The sharun-based AppImage format uses DwarFS and does not include Tauri
       # resources. The build leaves the AppDir intact, so we inject Python into
       # it and repack with mkdwarfs + the uruntime header.
@@ -272,7 +281,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPIMAGE="${{ steps.appimage.outputs.path }}"
           APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Device Builder.AppDir"
           echo "Found AppImage: $APPIMAGE"
           echo "AppDir: $APPDIR"
@@ -353,7 +362,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPIMAGE="${{ steps.appimage.outputs.path }}"
           cargo tauri signer sign \
             --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
             --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
