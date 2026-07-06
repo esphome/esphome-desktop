@@ -49,54 +49,6 @@ impl fmt::Display for ReleaseChannel {
     }
 }
 
-/// Which device-builder channel the daemon should run. The classic ESPHome
-/// dashboard backend was removed in line with ESPHome 2026.6.0 retiring the
-/// legacy in-tree dashboard; the daemon now always launches the device builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum Backend {
-    /// ESPHome device builder, stable release from PyPI.
-    ///
-    /// This is the default so a fresh install (and any legacy/unknown/corrupt
-    /// settings that fall back here) matches the stable-by-default
-    /// [`ReleaseChannel`]: a user on the stable channel must not be silently
-    /// offered a beta device-builder update (#241). Beta is opt-in via the tray
-    /// or the `backend beta` CLI subcommand.
-    #[default]
-    BuilderStable,
-    /// ESPHome device builder, beta/pre-release from PyPI
-    BuilderBeta,
-}
-
-impl fmt::Display for Backend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BuilderStable => write!(f, "ESPHome Device Builder (stable)"),
-            Self::BuilderBeta => write!(f, "ESPHome Device Builder (beta)"),
-        }
-    }
-}
-
-/// Deserialize the backend, tolerating legacy or unknown values by falling back
-/// to the default. An old settings file selecting the removed classic dashboard
-/// (`"backend": "classic"`) must migrate to the default device builder rather
-/// than failing the whole parse, which would discard every other preference via
-/// the corrupt-file recovery path.
-fn deserialize_backend<'de, D>(deserializer: D) -> Result<Backend, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    // Deserialize into a generic value so a non-string `backend` (null, number,
-    // bool from a hand-edited or future file) falls back to the default too,
-    // rather than failing the whole parse and discarding every other preference.
-    let raw = serde_json::Value::deserialize(deserializer)?;
-    Ok(match raw.as_str() {
-        Some("builder_stable") => Backend::BuilderStable,
-        Some("builder_beta") => Backend::BuilderBeta,
-        _ => Backend::default(),
-    })
-}
-
 /// Deserialize the dashboard port, falling back to the default for a zero,
 /// out-of-range, or non-numeric value.
 ///
@@ -169,10 +121,6 @@ pub struct Settings {
     #[serde(default)]
     pub release_channel: ReleaseChannel,
 
-    /// Active device-builder channel (stable or beta)
-    #[serde(default, deserialize_with = "deserialize_backend")]
-    pub backend: Backend,
-
     /// Installed ESPHome version (detected from venv)
     #[serde(skip)]
     pub installed_version: Option<String>,
@@ -195,7 +143,6 @@ impl Default for Settings {
             launch_at_startup: true,
             check_updates: true,
             release_channel: ReleaseChannel::default(),
-            backend: Backend::default(),
             installed_version: None,
         }
     }
@@ -354,16 +301,6 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn default_backend_matches_stable_release_channel() {
-        // The device-builder backend must default to stable so it agrees with
-        // the stable-by-default release channel; a stable-channel user must not
-        // be silently offered a beta device-builder update (#241).
-        assert_eq!(Backend::default(), Backend::BuilderStable);
-        assert_eq!(ReleaseChannel::default(), ReleaseChannel::Stable);
-        assert_eq!(Settings::default().backend, Backend::BuilderStable);
-    }
-
-    #[test]
     fn missing_file_yields_defaults() {
         let dir = unique_temp_dir("missing");
         let path = dir.join("settings.json");
@@ -371,7 +308,6 @@ mod tests {
         let settings = load_settings_file(&path);
 
         assert_eq!(settings.port, DEFAULT_PORT);
-        assert_eq!(settings.backend, Backend::default());
         assert!(!path.exists());
 
         let _ = fs::remove_dir_all(&dir);
@@ -386,7 +322,6 @@ mod tests {
             port: 1234,
             open_on_start: false,
             release_channel: ReleaseChannel::Beta,
-            backend: Backend::BuilderStable,
             ..Default::default()
         };
         let content = serde_json::to_string_pretty(&original).expect("serialize");
@@ -397,7 +332,6 @@ mod tests {
         assert_eq!(loaded.port, 1234);
         assert!(!loaded.open_on_start);
         assert_eq!(loaded.release_channel, ReleaseChannel::Beta);
-        assert_eq!(loaded.backend, Backend::BuilderStable);
         // A successful parse must not move the file aside.
         assert!(path.exists());
         assert!(!path.with_extension("json.corrupt").exists());
@@ -406,23 +340,33 @@ mod tests {
     }
 
     #[test]
-    fn legacy_classic_backend_migrates_to_default() {
-        // An old settings file selecting the removed classic dashboard backend
-        // must migrate to the default device builder (stable), keep its other
-        // fields, and NOT be treated as corrupt (which would discard every
-        // other preference).
-        let dir = unique_temp_dir("classic");
-        let path = dir.join("settings.json");
-        fs::write(&path, r#"{"port":1234,"backend":"classic"}"#).expect("write settings");
+    fn legacy_backend_key_is_ignored() {
+        // Settings files written before the backend setting was removed still
+        // carry a `backend` key (as do older files with the removed classic
+        // dashboard, or hand-edited files with a malformed value). The unknown
+        // key must be ignored — of any JSON type — keeping every other field,
+        // and must NOT be treated as corrupt (which would discard every other
+        // preference).
+        for body in [
+            r#"{"port":1234,"backend":"classic"}"#,
+            r#"{"port":1234,"backend":"builder_beta"}"#,
+            r#"{"port":1234,"backend":null}"#,
+        ] {
+            let dir = unique_temp_dir("legacy_backend");
+            let path = dir.join("settings.json");
+            fs::write(&path, body).expect("write settings");
 
-        let settings = load_settings_file(&path);
+            let settings = load_settings_file(&path);
 
-        assert_eq!(settings.backend, Backend::BuilderStable);
-        assert_eq!(settings.port, 1234);
-        assert!(path.exists());
-        assert!(!path.with_extension("json.corrupt").exists());
+            assert_eq!(settings.port, 1234, "body: {body}");
+            assert!(path.exists(), "body: {body}");
+            assert!(
+                !path.with_extension("json.corrupt").exists(),
+                "body: {body}"
+            );
 
-        let _ = fs::remove_dir_all(&dir);
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -438,7 +382,6 @@ mod tests {
         let settings = load_settings_file(&path);
 
         assert_eq!(settings.port, DEFAULT_PORT);
-        assert_eq!(settings.backend, Backend::BuilderStable);
         assert!(!path.with_extension("json.corrupt").exists());
 
         let _ = fs::remove_dir_all(&dir);
@@ -470,25 +413,6 @@ mod tests {
 
             let _ = fs::remove_dir_all(&dir);
         }
-    }
-
-    #[test]
-    fn non_string_backend_value_falls_back_to_default() {
-        // A malformed (non-string) backend value must fall back to the default
-        // instead of failing the whole parse, which would discard every other
-        // preference via corrupt-file recovery.
-        let dir = unique_temp_dir("bad_backend");
-        let path = dir.join("settings.json");
-        fs::write(&path, r#"{"port":1234,"backend":null}"#).expect("write settings");
-
-        let settings = load_settings_file(&path);
-
-        assert_eq!(settings.backend, Backend::BuilderStable);
-        assert_eq!(settings.port, 1234);
-        assert!(path.exists());
-        assert!(!path.with_extension("json.corrupt").exists());
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

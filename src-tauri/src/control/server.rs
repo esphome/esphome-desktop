@@ -12,9 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::ops::{self, SwitchOutcome, UpdateGuard};
-use super::protocol::{
-    self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, UpdateCheckReply,
-};
+use super::protocol::{self, channel_name, ErrCode, Reply, Request, StatusReply, UpdateCheckReply};
 use crate::AppState;
 
 /// Backoff before retrying a failed accept or pipe re-create, so a
@@ -325,19 +323,6 @@ async fn dispatch(
                 format!("switched to the {} release channel", channel_name(channel)),
             ));
         }
-        Request::GetBackend => {
-            let backend = state.settings.read().await.backend;
-            let _ = tx.send(Reply::ok(backend_name(backend)));
-        }
-        Request::SetBackend { backend } => {
-            let guard = guard_or_busy!();
-            let outcome = ops::switch_backend(app, &state, backend, &guard, &progress).await;
-            let _ = tx.send(switch_reply(
-                outcome,
-                format!("backend is already {}", backend_name(backend)),
-                format!("switched to the {} device builder", backend_name(backend)),
-            ));
-        }
         Request::GetStartup => {
             let fallback = state.settings.read().await.launch_at_startup;
             let enabled = ops::startup_enabled(app, fallback).await;
@@ -424,16 +409,11 @@ async fn dispatch(
     None
 }
 
-/// Map a [`SwitchOutcome`] onto the terminal reply for a set-channel or
-/// set-backend request.
+/// Map a [`SwitchOutcome`] onto the terminal reply for a set-channel request.
 fn switch_reply(outcome: SwitchOutcome, unchanged_msg: String, success_msg: String) -> Reply {
     match outcome {
         SwitchOutcome::Unchanged => Reply::ok(unchanged_msg),
-        SwitchOutcome::Success { ready: true } => Reply::ok(success_msg),
-        SwitchOutcome::Success { ready: false } => Reply::failed(format!(
-            "{success_msg}, but the dashboard {}",
-            ops::not_ready_note()
-        )),
+        SwitchOutcome::Success => Reply::ok(success_msg),
         SwitchOutcome::StopFailed(e) => Reply::failed(format!("failed to stop the dashboard: {e}")),
         SwitchOutcome::InstallFailed { error, restarted } => Reply::failed(if restarted {
             format!("install failed: {error}; the previous version was restarted")
@@ -449,12 +429,11 @@ fn switch_reply(outcome: SwitchOutcome, unchanged_msg: String, success_msg: Stri
 /// Assemble the full status snapshot. Version detection spawns Python
 /// subprocesses, so it runs on blocking threads.
 async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
-    let (port, release_channel, backend, launch_fallback) = {
+    let (port, release_channel, launch_fallback) = {
         let settings = state.settings.read().await;
         (
             settings.port,
             settings.release_channel,
-            settings.backend,
             settings.launch_at_startup,
         )
     };
@@ -478,7 +457,6 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
         esphome_version,
         device_builder_version,
         release_channel,
-        backend,
         launch_at_startup,
         config_dir: state.daemon.config_dir().clone(),
         logs_dir: state.daemon.logs_dir().clone(),
@@ -490,14 +468,11 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
 /// update is in flight. The three checks hit the network (GitHub, PyPI) and
 /// spawn Python for the installed versions, so run them concurrently.
 async fn build_update_check(app: &AppHandle, state: &Arc<AppState>) -> UpdateCheckReply {
-    let (channel, backend) = {
-        let settings = state.settings.read().await;
-        (settings.release_channel, settings.backend)
-    };
+    let channel = state.settings.read().await.release_channel;
     let (app_update, esphome, device_builder) = tokio::join!(
         ops::desktop_update_available(app),
         ops::esphome_update_available(app, state, channel),
-        ops::device_builder_update_available(app, state, backend),
+        ops::device_builder_update_available(app, state),
     );
     UpdateCheckReply {
         any_available: app_update.available || esphome.available || device_builder.available,

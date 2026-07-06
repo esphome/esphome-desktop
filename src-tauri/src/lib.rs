@@ -28,27 +28,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use daemon::DaemonManager;
-use settings::{Backend, Settings};
+use settings::Settings;
 use tray::build_tray_menu;
 use update::UpdateChecker;
-
-/// CLI selector for the device-builder channel.
-/// Maps onto [`Backend::BuilderStable`]/[`Backend::BuilderBeta`].
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
-#[value(rename_all = "lowercase")]
-pub enum BuilderChannelArg {
-    Stable,
-    Beta,
-}
-
-impl From<BuilderChannelArg> for Backend {
-    fn from(arg: BuilderChannelArg) -> Self {
-        match arg {
-            BuilderChannelArg::Stable => Backend::BuilderStable,
-            BuilderChannelArg::Beta => Backend::BuilderBeta,
-        }
-    }
-}
 
 /// CLI selector for the ESPHome release channel.
 /// Maps onto [`settings::ReleaseChannel`].
@@ -86,12 +68,6 @@ pub enum OnOff {
 pub enum CliCommand {
     /// Open the dashboard in the default browser (starts the app if needed)
     Open,
-    /// Show or switch the device-builder backend channel
-    Backend {
-        /// New backend channel; omit to show the current one
-        #[arg(value_enum)]
-        channel: Option<BuilderChannelArg>,
-    },
     /// Show or switch the ESPHome release channel
     ReleaseChannel {
         /// New release channel; omit to show the current one
@@ -166,17 +142,6 @@ pub struct Cli {
     /// Don't open the dashboard in browser on startup
     #[arg(long = "no-open-dashboard")]
     pub no_open_dashboard: bool,
-
-    /// Apply the `--builder-channel` selection (stable or beta) to the device
-    /// builder. Persists to settings — useful as a fallback when the tray menu
-    /// is unavailable.
-    #[arg(long = "use-builder")]
-    pub use_builder: bool,
-
-    /// Channel for the ESPHome Device Builder backend.
-    /// Only takes effect together with `--use-builder`.
-    #[arg(long = "builder-channel", value_enum, default_value_t = BuilderChannelArg::Beta)]
-    pub builder_channel: BuilderChannelArg,
 }
 
 /// Run a control subcommand as a short-lived CLI client and return its exit
@@ -188,8 +153,8 @@ pub fn run_cli(command: CliCommand) -> std::process::ExitCode {
 /// Whether this is a bare `esphome-desktop` run from a terminal — no
 /// subcommand and no flags at all, just the program name — which should print
 /// the command list instead of launching another app instance. Any explicit
-/// argument is a deliberate invocation and launches as before: a launch flag
-/// like `--no-open-dashboard`, or even the no-op `--builder-channel`, so the
+/// argument is a deliberate invocation and launches as before (e.g. the
+/// `--no-open-dashboard` launch flag), so the
 /// rule needs no per-flag list and stays correct as flags are added.
 /// Non-terminal launches (Finder, the applications menu, a `.desktop` file,
 /// autostart, `open`'s detached spawn) also take the normal app-start path.
@@ -224,7 +189,7 @@ pub struct AppState {
     pub settings: RwLock<Settings>,
     pub update_checker: UpdateChecker,
     /// Guards the multi-step stop→install→start sequences — the tray's
-    /// Check for Updates / Switch Channel / Switch Backend arms, their CLI
+    /// Check for Updates / Switch Channel arms, their CLI
     /// counterparts, and the initial daemon start — so only one runs at a
     /// time. Each runs as an independent async task; while
     /// `daemon.start()`/`stop()` are individually mutex-serialized, the
@@ -365,11 +330,6 @@ pub fn run(cli: Cli) {
 
     // Capture CLI flags before closure
     let no_open_dashboard = cli.no_open_dashboard;
-    let cli_backend_override = if cli.use_builder {
-        Some(Backend::from(cli.builder_channel))
-    } else {
-        None
-    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -466,30 +426,6 @@ pub fn run(cli: Cli) {
                     warn!("Failed to persist backend migration: {}", e);
                 }
             }
-
-            // Apply CLI backend override (persists to settings).
-            // This runs before the daemon starts so the new backend takes
-            // effect immediately, and before the tray menu is built so the
-            // radio buttons reflect the override.
-            let cli_override_needs_install = if let Some(new_backend) = cli_backend_override {
-                let mut settings = async_runtime::block_on(state.settings.write());
-                if settings.backend != new_backend {
-                    info!(
-                        "CLI override: switching backend from {} to {}",
-                        settings.backend, new_backend
-                    );
-                    settings.backend = new_backend;
-                    if let Err(e) = settings.save(app.handle()) {
-                        warn!("Failed to save settings after CLI override: {}", e);
-                    }
-                    // Changing the channel needs a (re)install of the package.
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
 
             // Reconcile the OS login item to the persisted preference. This
             // applies the on-by-default on first run and re-asserts a user's
@@ -594,20 +530,6 @@ pub fn run(cli: Cli) {
                     control::ops::UpdateGuard::acquire_wait(daemon_state.update_in_flight.clone())
                         .await;
 
-                // If a CLI override switched us into a builder backend, ensure
-                // the package is installed/upgraded before starting the daemon.
-                if cli_override_needs_install {
-                    let backend = daemon_state.settings.read().await.backend;
-                    info!("Installing/upgrading esphome-device-builder for CLI override");
-                    if let Err(e) = daemon_state
-                        .update_checker
-                        .install_device_builder(&daemon_app, backend)
-                        .await
-                    {
-                        error!("Failed to install esphome-device-builder: {}", e);
-                    }
-                }
-
                 let start_result = daemon_state.daemon.start().await;
                 drop(startup_guard);
                 match start_result {
@@ -648,8 +570,7 @@ pub fn run(cli: Cli) {
             // directory, so any pip-installed ESPHome / device-builder bump
             // we'd do now would be wiped by the next launch. Skip the Python
             // checks while an app update is pending.
-            // The dev channel skips automatic update checks entirely. When
-            // the active backend is a builder variant, the
+            // The dev channel skips automatic update checks entirely. The
             // `esphome-device-builder` package is checked on the same schedule.
             let update_state = state.clone();
             let update_app = app.handle().clone();
@@ -668,21 +589,14 @@ pub fn run(cli: Cli) {
                         // App update pending — leave the Python packages alone.
                         continue;
                     }
-                    let (channel, backend) = {
-                        let settings = update_state.settings.read().await;
-                        (settings.release_channel, settings.backend)
-                    };
+                    let channel = update_state.settings.read().await.release_channel;
                     update_state
                         .update_checker
                         .check_and_notify(&update_app, channel, update_tray_available)
                         .await;
                     update_state
                         .update_checker
-                        .check_and_notify_device_builder(
-                            &update_app,
-                            backend,
-                            update_tray_available,
-                        )
+                        .check_and_notify_device_builder(&update_app, update_tray_available)
                         .await;
                 }
             });
@@ -817,10 +731,10 @@ mod tests {
 
     #[test]
     fn any_argument_launches_even_in_a_terminal() {
-        // A launch flag, a subcommand, or even the no-op `--builder-channel`
-        // is a deliberate invocation: arg_count > 1, so never bare.
+        // A launch flag or a subcommand is a deliberate invocation:
+        // arg_count > 1, so never bare.
         assert!(!is_bare_terminal_launch(true, 2)); // e.g. --no-open-dashboard
-        assert!(!is_bare_terminal_launch(true, 3)); // e.g. --builder-channel stable
+        assert!(!is_bare_terminal_launch(true, 3)); // e.g. release-channel stable
     }
 
     #[test]

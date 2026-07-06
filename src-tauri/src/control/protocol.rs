@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::settings::{Backend, ReleaseChannel};
+use crate::settings::ReleaseChannel;
 
 /// Upper bound on a single protocol line. Requests and replies are tiny; a
 /// line this long means a confused peer, not a real client.
@@ -26,7 +26,12 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024;
 /// fields — ARE this public contract, not merely internal types.
 /// Renaming/removing a field or changing a tag on them is a breaking change to
 /// the dashboard and must bump this version. Do not refactor them casually.
-pub const API_SCHEMA_VERSION: u32 = 1;
+///
+/// Version history:
+/// - 2: removed the `backend` field from [`StatusReply`] along with the
+///   device-builder backend channel switching feature.
+/// - 1: initial contract.
+pub const API_SCHEMA_VERSION: u32 = 2;
 
 /// Name of the control pipe on Windows, where unix sockets are unavailable.
 #[cfg(windows)]
@@ -43,10 +48,6 @@ pub const STEP_APP_RESTARTING: &str = "app_restarting";
 pub enum Request {
     /// Open the dashboard in the default browser.
     Open,
-    /// Report the active device-builder backend channel.
-    GetBackend,
-    /// Switch the device-builder backend channel.
-    SetBackend { backend: Backend },
     /// Report the ESPHome release channel.
     GetChannel,
     /// Switch the ESPHome release channel.
@@ -122,7 +123,6 @@ pub struct StatusReply {
     pub esphome_version: Option<String>,
     pub device_builder_version: Option<String>,
     pub release_channel: ReleaseChannel,
-    pub backend: Backend,
     pub launch_at_startup: bool,
     pub config_dir: PathBuf,
     pub logs_dir: PathBuf,
@@ -214,15 +214,6 @@ pub fn channel_name(channel: ReleaseChannel) -> &'static str {
     }
 }
 
-/// Short lowercase backend channel name used on the CLI surface (matches the
-/// `backend` argument values).
-pub fn backend_name(backend: Backend) -> &'static str {
-    match backend {
-        Backend::BuilderStable => "stable",
-        Backend::BuilderBeta => "beta",
-    }
-}
-
 /// Path of the control socket, resolvable from both the app and the CLI
 /// client (no `AppHandle`).
 #[cfg(unix)]
@@ -281,10 +272,6 @@ mod tests {
     fn request_round_trips() {
         let requests = vec![
             Request::Open,
-            Request::GetBackend,
-            Request::SetBackend {
-                backend: Backend::BuilderStable,
-            },
             Request::GetChannel,
             Request::SetChannel {
                 channel: ReleaseChannel::Dev,
@@ -330,7 +317,6 @@ mod tests {
                 esphome_version: Some("2026.6.2".into()),
                 device_builder_version: None,
                 release_channel: ReleaseChannel::Beta,
-                backend: Backend::BuilderBeta,
                 launch_at_startup: true,
                 config_dir: PathBuf::from("/home/x/esphome"),
                 logs_dir: PathBuf::from("/home/x/.local/share/io.esphome.builder/logs"),

@@ -11,11 +11,10 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::MessageDialogKind;
-use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
 use crate::control::ops::{self, SwitchOutcome, UpdateGuard};
-use crate::settings::{Backend, ReleaseChannel};
+use crate::settings::ReleaseChannel;
 use crate::AppState;
 
 /// Menu item IDs
@@ -36,10 +35,6 @@ mod ids {
     pub const CHANNEL_STABLE: &str = "channel_stable";
     pub const CHANNEL_BETA: &str = "channel_beta";
     pub const CHANNEL_DEV: &str = "channel_dev";
-
-    // Backend submenu items
-    pub const BACKEND_BUILDER_STABLE: &str = "backend_builder_stable";
-    pub const BACKEND_BUILDER_BETA: &str = "backend_builder_beta";
 
     // Startup submenu items
     pub const STARTUP_ENABLE: &str = "startup_enable";
@@ -123,28 +118,10 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&channel_dev)
         .build()?;
 
-    // Backend submenu items
-    let current_backend = settings.backend;
-    // TODO: use `build` once a stable release of esphome-device-builder is out
-    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build_disabled(
-        app_handle,
-        ids::BACKEND_BUILDER_STABLE,
-        current_backend == Backend::BuilderStable,
-    )?;
-    let backend_builder_beta = BACKEND_BUILDER_BETA_ITEM.build(
-        app_handle,
-        ids::BACKEND_BUILDER_BETA,
-        current_backend == Backend::BuilderBeta,
-    )?;
-
-    let backend_submenu = SubmenuBuilder::with_id(app_handle, "backend", "Backend")
-        .item(&backend_builder_stable)
-        .item(&backend_builder_beta)
-        .build()?;
-
-    // Startup submenu items (radio group, mirroring Backend). Label from the
-    // actual OS login-item state so a failed startup reconcile doesn't show a
-    // lie; fall back to the persisted intent only if the query itself errors.
+    // Startup submenu items (radio group, mirroring Release Channel). Label
+    // from the actual OS login-item state so a failed startup reconcile
+    // doesn't show a lie; fall back to the persisted intent only if the query
+    // itself errors.
     let launch_at_startup = app_handle
         .autolaunch()
         .is_enabled()
@@ -176,7 +153,6 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
                 .build(app_handle)?,
         )
         .separator()
-        .item(&backend_submenu)
         .item(&channel_submenu)
         .item(&startup_submenu)
         .item(
@@ -236,36 +212,14 @@ impl RadioItem {
         id: &str,
         selected: bool,
     ) -> Result<MenuItem<tauri::Wry>> {
-        self.build_impl(app_handle, id, selected, true)
-    }
-
-    /// Like [`RadioItem::build`], but the item is greyed out.
-    fn build_disabled(
-        &self,
-        app_handle: &AppHandle,
-        id: &str,
-        selected: bool,
-    ) -> Result<MenuItem<tauri::Wry>> {
-        self.build_impl(app_handle, id, selected, false)
-    }
-
-    fn build_impl(
-        &self,
-        app_handle: &AppHandle,
-        id: &str,
-        selected: bool,
-        enabled: bool,
-    ) -> Result<MenuItem<tauri::Wry>> {
         // If a previous build already registered an item, reuse it so
         // `refresh` keeps targeting the item that is live in the menu.
         if let Some(item) = self.item.get() {
             item.set_text(radio_label(self.label, selected))?;
-            item.set_enabled(enabled)?;
             return Ok(item.clone());
         }
-        let item = MenuItemBuilder::with_id(id, radio_label(self.label, selected))
-            .enabled(enabled)
-            .build(app_handle)?;
+        let item =
+            MenuItemBuilder::with_id(id, radio_label(self.label, selected)).build(app_handle)?;
         let _ = self.item.set(item.clone());
         Ok(item)
     }
@@ -284,10 +238,6 @@ impl RadioItem {
 static CHANNEL_STABLE_ITEM: RadioItem = RadioItem::new("Stable");
 static CHANNEL_BETA_ITEM: RadioItem = RadioItem::new("Beta");
 static CHANNEL_DEV_ITEM: RadioItem = RadioItem::new("Dev");
-
-/// Backend menu items stored globally for radio-button behavior
-static BACKEND_BUILDER_STABLE_ITEM: RadioItem = RadioItem::new("ESPHome Device Builder (stable)");
-static BACKEND_BUILDER_BETA_ITEM: RadioItem = RadioItem::new("ESPHome Device Builder (beta)");
 
 /// Startup menu items stored globally for radio-button behavior
 static STARTUP_ENABLE_ITEM: RadioItem = RadioItem::new("Launch at Login");
@@ -334,12 +284,6 @@ pub(crate) fn update_channel_checks(channel: ReleaseChannel) {
     CHANNEL_STABLE_ITEM.refresh(channel == ReleaseChannel::Stable);
     CHANNEL_BETA_ITEM.refresh(channel == ReleaseChannel::Beta);
     CHANNEL_DEV_ITEM.refresh(channel == ReleaseChannel::Dev);
-}
-
-/// Update the backend menu item labels to reflect the given backend.
-pub(crate) fn update_backend_checks(backend: Backend) {
-    BACKEND_BUILDER_STABLE_ITEM.refresh(backend == Backend::BuilderStable);
-    BACKEND_BUILDER_BETA_ITEM.refresh(backend == Backend::BuilderBeta);
 }
 
 /// Update the startup menu item labels to reflect whether autostart is enabled.
@@ -433,10 +377,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     return;
                 }
 
-                let (channel, backend) = {
-                    let settings = state.settings.read().await;
-                    (settings.release_channel, settings.backend)
-                };
+                let channel = state.settings.read().await.release_channel;
 
                 // Check for updates and get version if user wants to update
                 if let Some(version) = state.update_checker.check_for_user(&app, channel).await {
@@ -525,7 +466,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 // ESPHome release channel.
                 let Some(builder_version) = state
                     .update_checker
-                    .check_device_builder_for_user(&app, backend)
+                    .check_device_builder_for_user(&app)
                     .await
                 else {
                     return;
@@ -548,11 +489,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     return;
                 }
 
-                match state
-                    .update_checker
-                    .install_device_builder(&app, backend)
-                    .await
-                {
+                match state.update_checker.install_device_builder(&app).await {
                     Ok(()) => {
                         info!("Device builder updated successfully to {}", builder_version);
 
@@ -661,7 +598,7 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     .await
                 {
                     SwitchOutcome::Unchanged => {}
-                    SwitchOutcome::Success { .. } => {
+                    SwitchOutcome::Success => {
                         let msg = format!(
                             "Successfully switched to the {} release channel.",
                             new_channel
@@ -707,96 +644,6 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 }
             });
         }
-        ids::BACKEND_BUILDER_STABLE | ids::BACKEND_BUILDER_BETA => {
-            let new_backend = match id {
-                ids::BACKEND_BUILDER_STABLE => Backend::BuilderStable,
-                ids::BACKEND_BUILDER_BETA => Backend::BuilderBeta,
-                _ => unreachable!(),
-            };
-
-            let state = state.clone();
-            let app = app_handle.clone();
-            async_runtime::spawn(async move {
-                let guard = guard_or_return!(state, "backend switch");
-                let old_backend = {
-                    let settings = state.settings.read().await;
-                    settings.backend
-                };
-
-                if new_backend == old_backend {
-                    return;
-                }
-
-                // Confirm the switch with the user.
-                let msg = format!(
-                    "Switch to {}?\n\n\
-                     This will install the `esphome-device-builder` Python package, \
-                     stop the current backend, and restart with the new one.",
-                    new_backend
-                );
-                let confirmed =
-                    crate::dialog::confirm(&app, "Switch Backend", msg, "Switch", "Cancel").await;
-
-                if !confirmed {
-                    update_backend_checks(old_backend);
-                    return;
-                }
-
-                // The stop→install→persist→start→wait sequence (including
-                // label updates and their failure-path reverts) lives in ops
-                // so the CLI drives the exact same code; the tray adds the
-                // dialogs and the readiness notification.
-                match ops::switch_backend(&app, &state, new_backend, &guard, &|_, _| {}).await {
-                    SwitchOutcome::Unchanged => {}
-                    SwitchOutcome::Success { ready } => {
-                        let body = if ready {
-                            format!("{} is ready.", new_backend)
-                        } else {
-                            format!(
-                                "Switched to {}, but it didn't become ready in time. Check the logs.",
-                                new_backend
-                            )
-                        };
-                        if let Err(e) = app
-                            .notification()
-                            .builder()
-                            .title("Backend Switched")
-                            .body(body)
-                            .show()
-                        {
-                            warn!("Failed to show backend-switch notification: {}", e);
-                        }
-                    }
-                    SwitchOutcome::StopFailed(e) => {
-                        crate::dialog::notice(
-                            &app,
-                            "Backend Switch Failed",
-                            format!("Failed to stop backend: {}", e),
-                            MessageDialogKind::Error,
-                        )
-                        .await;
-                    }
-                    SwitchOutcome::InstallFailed { error, .. } => {
-                        crate::dialog::notice(
-                            &app,
-                            "Backend Switch Failed",
-                            format!("Failed to install esphome-device-builder: {}", error),
-                            MessageDialogKind::Error,
-                        )
-                        .await;
-                    }
-                    SwitchOutcome::StartFailed(e) => {
-                        crate::dialog::notice(
-                            &app,
-                            "Backend Switch Failed",
-                            format!("Failed to start backend: {}", e),
-                            MessageDialogKind::Error,
-                        )
-                        .await;
-                    }
-                }
-            });
-        }
         ids::VIEW_LOGS => {
             let logs_dir = state.daemon.logs_dir();
             if let Err(e) = open::that_detached(logs_dir) {
@@ -814,9 +661,9 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
             let app = app_handle.clone();
             async_runtime::spawn(async move {
                 // restart() is a stop()->start() sequence, so it must hold the
-                // same re-entrancy guard as the channel/backend switch arms.
+                // same re-entrancy guard as the channel switch arm.
                 // Without it a Restart click during an in-flight switch can run
-                // start() with the OLD backend before the switch persists the
+                // start() with the OLD version before the switch persists the
                 // new one, leaving the running process out of sync with the
                 // saved settings and tray radio state.
                 let guard = guard_or_return!(state, "restart");

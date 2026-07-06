@@ -1,7 +1,7 @@
 //! Shared control operations.
 //!
 //! The multi-step stop→install→start sequences behind the tray's Switch
-//! Channel / Switch Backend / Restart Dashboard items and their CLI
+//! Channel / Restart Dashboard items and their CLI
 //! equivalents. The tray arms wrap these with confirmation dialogs; the
 //! control server wraps them with streamed progress replies. Keeping the
 //! sequences here means both surfaces stay in lockstep, including the tray
@@ -26,7 +26,7 @@ pub(crate) type Progress<'a> = &'a (dyn Fn(&str, &str) + Send + Sync);
 
 /// RAII guard ensuring only one update/switch sequence runs at a time.
 ///
-/// The "Check for Updates", "Switch Channel", and "Switch Backend" tray arms —
+/// The "Check for Updates" and "Switch Channel" tray arms —
 /// and their CLI counterparts — each perform a multi-step
 /// stop→install/update→start sequence. `DaemonManager::start()`/`stop()` are
 /// individually mutex-serialized, but those *sequences* are not mutually
@@ -90,15 +90,13 @@ fn show_actual_status(app: &AppHandle, state: &AppState) {
     tray::update_status(app, state.daemon.is_running());
 }
 
-/// How a channel/backend switch ended. The tray maps these onto dialogs, the
+/// How a channel switch ended. The tray maps these onto dialogs, the
 /// control server onto terminal replies.
 pub(crate) enum SwitchOutcome {
     /// The requested value was already active; nothing was done.
     Unchanged,
-    /// Switched and restarted. `ready` is whether the dashboard answered the
-    /// readiness probe (only probed by the backend switch; the channel switch
-    /// reports `true` without probing, matching the previous tray behavior).
-    Success { ready: bool },
+    /// Switched and restarted.
+    Success,
     /// The dashboard could not be stopped; nothing was installed.
     StopFailed(String),
     /// The install failed; `restarted` is whether the previous version's
@@ -159,7 +157,7 @@ pub(crate) async fn switch_release_channel(
                 return SwitchOutcome::StartFailed(e.to_string());
             }
             tray::update_status(app, true);
-            SwitchOutcome::Success { ready: true }
+            SwitchOutcome::Success
         }
         Err(e) => {
             error!("Channel switch failed: {}", e);
@@ -171,76 +169,6 @@ pub(crate) async fn switch_release_channel(
             }
         }
     }
-}
-
-/// Switch the device-builder backend channel: stop the dashboard, install the
-/// package for the new channel, persist the setting, restart, and wait for the
-/// dashboard to become reachable.
-pub(crate) async fn switch_backend(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    new_backend: crate::settings::Backend,
-    _guard: &UpdateGuard,
-    progress: Progress<'_>,
-) -> SwitchOutcome {
-    let old_backend = state.settings.read().await.backend;
-    if new_backend == old_backend {
-        return SwitchOutcome::Unchanged;
-    }
-
-    tray::update_backend_checks(new_backend);
-
-    progress("stop", "stopping the backend");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop daemon for backend switch: {}", e);
-        tray::update_backend_checks(old_backend);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
-    }
-
-    // Install/upgrade the package for the selected channel first.
-    progress(
-        "install",
-        &format!("installing esphome-device-builder ({new_backend})"),
-    );
-    if let Err(e) = state
-        .update_checker
-        .install_device_builder(app, new_backend)
-        .await
-    {
-        error!("Failed to install esphome-device-builder: {}", e);
-        tray::update_backend_checks(old_backend);
-        let restarted = restart_after_failure(app, state, "failed backend switch").await;
-        return SwitchOutcome::InstallFailed {
-            error: e.to_string(),
-            restarted,
-        };
-    }
-    // Install succeeded — refresh the tray version display.
-    tray::refresh_builder_version_display(app).await;
-
-    // Persist the new backend channel.
-    {
-        let mut settings = state.settings.write().await;
-        settings.backend = new_backend;
-        if let Err(e) = settings.save(app) {
-            warn!("Failed to save settings: {}", e);
-        }
-    }
-
-    progress("start", "starting the backend");
-    if let Err(e) = state.daemon.start().await {
-        error!("Failed to start daemon after backend switch: {}", e);
-        return SwitchOutcome::StartFailed(e.to_string());
-    }
-    tray::update_status(app, true);
-    info!("Switched backend to {}", new_backend);
-
-    progress("wait", "waiting for the backend to become ready");
-    let port = state.daemon.port();
-    let ready = crate::wait_for_dashboard_ready(port, READY_TIMEOUT_SECS).await;
-    SwitchOutcome::Success { ready }
 }
 
 /// Restart the dashboard backend. With `wait_ready` the call also polls the
@@ -423,7 +351,6 @@ pub(crate) async fn esphome_update_available(
 pub(crate) async fn device_builder_update_available(
     app: &AppHandle,
     state: &Arc<AppState>,
-    backend: crate::settings::Backend,
 ) -> ComponentUpdate {
     let installed =
         match detect_installed_or_report(app, crate::update::get_installed_device_builder_version)
@@ -432,7 +359,7 @@ pub(crate) async fn device_builder_update_available(
             Ok(v) => v,
             Err(early) => return early,
         };
-    match state.update_checker.check_device_builder(backend).await {
+    match state.update_checker.check_device_builder().await {
         Ok(latest) => compare(installed, latest),
         Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
     }
@@ -587,13 +514,10 @@ pub(crate) async fn run_full_update(
         Err(e) => report.fail(format!("desktop updater not available: {e}")),
     }
 
-    let (channel, backend) = {
-        let settings = state.settings.read().await;
-        (settings.release_channel, settings.backend)
-    };
+    let channel = state.settings.read().await.release_channel;
 
     update_esphome_package(app, state, channel, progress, &mut report).await;
-    update_device_builder_package(app, state, backend, progress, &mut report).await;
+    update_device_builder_package(app, state, progress, &mut report).await;
 
     report
 }
@@ -642,12 +566,11 @@ async fn update_esphome_package(
 async fn update_device_builder_package(
     app: &AppHandle,
     state: &Arc<AppState>,
-    backend: crate::settings::Backend,
     progress: Progress<'_>,
     report: &mut UpdateReport,
 ) {
     progress("device-builder", "checking for a device builder update");
-    let check = device_builder_update_available(app, state, backend).await;
+    let check = device_builder_update_available(app, state).await;
     run_package_phase(
         app,
         state,
@@ -661,12 +584,7 @@ async fn update_device_builder_package(
                 display_name: "device builder",
             },
             display_target: |latest: &str| latest.to_string(),
-            install: |_target| async move {
-                state
-                    .update_checker
-                    .install_device_builder(app, backend)
-                    .await
-            },
+            install: |_target| async move { state.update_checker.install_device_builder(app).await },
             refresh: || tray::refresh_builder_version_display(app),
         },
     )

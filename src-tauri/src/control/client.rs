@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use super::protocol::{
-    self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
+    self, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
 };
 use crate::{ApiMethod, CliCommand, OnOff};
 
@@ -43,15 +43,6 @@ const TAIL_WINDOW_BYTES: u64 = 64 * 1024;
 pub(crate) fn run(command: CliCommand) -> ExitCode {
     match command {
         CliCommand::Open => open_cmd(),
-        CliCommand::Backend { channel } => match channel {
-            None => simple(Request::GetBackend, DEFAULT_TIMEOUT),
-            Some(channel) => simple(
-                Request::SetBackend {
-                    backend: channel.into(),
-                },
-                UPDATE_TIMEOUT,
-            ),
-        },
         CliCommand::ReleaseChannel { channel } => match channel {
             None => simple(Request::GetChannel, DEFAULT_TIMEOUT),
             Some(channel) => simple(
@@ -505,12 +496,11 @@ fn print_status(status: &StatusReply) {
         channel_name(status.release_channel)
     );
     println!(
-        "Device builder:  {} ({} channel)",
+        "Device builder:  {}",
         status
             .device_builder_version
             .as_deref()
-            .unwrap_or("not installed"),
-        backend_name(status.backend)
+            .unwrap_or("not installed")
     );
     println!(
         "Launch at login: {}",
@@ -544,7 +534,6 @@ fn offline_status(json: bool) -> ExitCode {
                     "app_running": false,
                     "port": settings.port,
                     "release_channel": settings.release_channel,
-                    "backend": settings.backend,
                     "config_dir": config_dir,
                     "logs_dir": data_dir.join("logs"),
                 })
@@ -561,10 +550,6 @@ fn offline_status(json: bool) -> ExitCode {
         println!(
             "Release channel: {}",
             channel_name(settings.release_channel)
-        );
-        println!(
-            "Backend:         {} channel",
-            backend_name(settings.backend)
         );
         let config_dir = settings
             .config_dir
@@ -849,7 +834,7 @@ fn file_identity(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Backend, ReleaseChannel};
+    use crate::settings::ReleaseChannel;
     use std::io::Cursor;
     use std::path::PathBuf;
 
@@ -1012,7 +997,6 @@ mod tests {
             esphome_version: None,
             device_builder_version: None,
             release_channel: ReleaseChannel::Stable,
-            backend: Backend::BuilderBeta,
             launch_at_startup: false,
             config_dir: PathBuf::from("/tmp/esphome"),
             logs_dir: PathBuf::from("/tmp/logs"),
