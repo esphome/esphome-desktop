@@ -784,16 +784,16 @@ const DEVICE_BUILDER_MAINT_PY: &str = include_str!("../../scripts/device_builder
 pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
     // Enumerate all device-builder distributions and take the highest version,
     // which is robust to the duplicate dist-info pileup that makes a plain
     // `importlib.metadata.version(...)` return None or an older version (#190).
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so detection only ever sees the managed bundled install.
-    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run python")?;
+    let output = platform::run_python_capture(
+        &python_path,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"],
+    )
+    .context("Failed to run python")?;
 
     if output.status.success() {
         // `detect` logs skipped/unreadable distributions to stderr; surface it so
@@ -836,14 +836,14 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so this destructive prune can only ever touch the managed bundled
     // install, never a user-site or externally-injected tree.
-    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "dedupe"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run dist-info dedup")?;
+    let output = platform::run_python_capture(
+        &python_path,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "dedupe"],
+    )
+    .context("Failed to run dist-info dedup")?;
 
     if output.status.success() {
         // The helper logs dist-info it couldn't read or remove to stderr;
@@ -1036,16 +1036,12 @@ where
 pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run esphome version")?;
-
-    if !output.status.success() {
+    let Some(version) =
+        platform::run_python_capture_stdout(&python_path, ["-m", "esphome", "version"])
+            .context("Failed to run esphome version")?
+    else {
         return Ok(None);
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    };
     // Extract just the version number
     let version = version
         .strip_prefix("Version: ")
