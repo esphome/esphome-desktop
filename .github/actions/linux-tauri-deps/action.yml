@@ -1,0 +1,20 @@
+name: Install Linux Tauri deps
+description: >-
+  Installs the system packages the Tauri crate needs on Linux runners.
+  webkit2gtk/rsvg/appindicator are required just to compile; patchelf is only
+  used when bundling, but it is tiny, so every caller gets the same set to
+  keep the workflows from drifting apart again.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwebkit2gtk-4.1-dev \
+          librsvg2-dev \
+          patchelf \
+          libayatana-appindicator3-dev

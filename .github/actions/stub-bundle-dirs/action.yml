@@ -1,0 +1,16 @@
+name: Stub bundle resource dirs
+description: >-
+  Creates empty stubs for the gitignored `python`, `git` and `ccache` dirs
+  that `tauri.conf.json` lists as bundle resources. They're populated by
+  prepare_bundle.sh only for real bundling; a plain `cargo test`/`clippy`
+  never bundles, but the stubs keep config parsing from tripping on the
+  missing paths. Keep the list in sync with tauri.conf.json and
+  prepare_bundle.sh.
+
+runs:
+  using: composite
+  steps:
+    - name: Stub bundle resource dirs
+      # `bash` so `mkdir -p` works on the Windows runner too.
+      shell: bash
+      run: mkdir -p src-tauri/python src-tauri/git src-tauri/ccache

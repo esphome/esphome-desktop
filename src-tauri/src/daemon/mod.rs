@@ -105,8 +105,21 @@ impl DaemonManager {
         })
     }
 
-    /// Start the ESPHome device builder
+    /// Start the ESPHome device builder.
+    ///
+    /// Emits the tray status itself — "Running" on success, "Stopped" on
+    /// failure — so callers don't have to pair every start with a
+    /// `tray::update_status` call (a forgotten pairing leaves the tray
+    /// stale). The status reflects the actual post-call state, not the
+    /// intent.
     pub async fn start(&self) -> Result<()> {
+        let result = self.start_inner().await;
+        crate::tray::update_status(&self.app_handle, self.is_running());
+        result
+    }
+
+    /// The start sequence proper; see [`Self::start`] for the tray wrapper.
+    async fn start_inner(&self) -> Result<()> {
         // Hold the process lock for the entire start sequence (check ->
         // spawn -> store) so two concurrent start() calls can't both pass
         // the running check and each spawn a child. Without this, the
@@ -381,8 +394,24 @@ impl DaemonManager {
         Ok(())
     }
 
-    /// Stop the ESPHome dashboard
+    /// Stop the ESPHome dashboard.
+    ///
+    /// Emits the tray status itself: "Stopped" optimistically up front (the
+    /// graceful drain below can take up to 30s, during which the tray should
+    /// not claim the backend is running), restored to the actual state if the
+    /// stop fails — after a failed stop the backend may well still be
+    /// running, so the optimistic label must not stand.
     pub async fn stop(&self) -> Result<()> {
+        crate::tray::update_status(&self.app_handle, false);
+        let result = self.stop_inner().await;
+        if result.is_err() {
+            crate::tray::update_status(&self.app_handle, self.is_running());
+        }
+        result
+    }
+
+    /// The stop sequence proper; see [`Self::stop`] for the tray wrapper.
+    async fn stop_inner(&self) -> Result<()> {
         // Acquire the process lock *before* reading/mutating `running` so the
         // check-and-act is fully atomic against start(), which also reads
         // `running` under this lock. The check is done post-lock (no lockless
@@ -603,15 +632,16 @@ impl DaemonManager {
     }
 }
 
-/// Build the health-check URL for the dashboard.
+/// Build the loopback URL used to probe the dashboard (both the startup
+/// readiness poll and the periodic health check).
 ///
 /// The backend is spawned with `--address 127.0.0.1` / `--host 127.0.0.1`
-/// (see `start()`), so it only listens on the IPv4 loopback. Probing the
-/// literal `127.0.0.1` rather than the `localhost` hostname avoids a
-/// resolver detour: on IPv6-first hosts `localhost` resolves to `::1`
-/// first, where nothing is listening, producing spurious health-check
-/// failures (and a 5s connect stall per cycle before the IPv4 fallback).
-fn health_check_url(port: u16) -> String {
+/// (see `DaemonManager::start()`), so it only listens on the IPv4 loopback.
+/// Probing the literal `127.0.0.1` rather than the `localhost` hostname
+/// avoids a resolver detour: on IPv6-first hosts `localhost` resolves to
+/// `::1` first, where nothing is listening, producing spurious probe
+/// failures (and a connect stall per attempt before the IPv4 fallback).
+pub(crate) fn loopback_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/", port)
 }
 
@@ -622,7 +652,7 @@ pub(crate) async fn health_check(port: u16) -> Result<bool> {
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
 
-    let url = health_check_url(port);
+    let url = loopback_url(port);
     match client.get(&url).send().await {
         Ok(response) => Ok(response.status().is_success()),
         Err(_) => Ok(false),
@@ -631,14 +661,15 @@ pub(crate) async fn health_check(port: u16) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::health_check_url;
+    use super::loopback_url;
 
     #[test]
-    fn health_check_url_targets_ipv4_loopback() {
+    fn loopback_url_targets_ipv4_loopback() {
         // Must match the address the backend binds (`127.0.0.1`), not the
         // `localhost` hostname, so the probe doesn't get steered to `::1`
         // on IPv6-first hosts where the daemon isn't listening.
-        assert_eq!(health_check_url(6052), "http://127.0.0.1:6052/");
-        assert!(!health_check_url(6052).contains("localhost"));
+        let url = loopback_url(6052);
+        assert_eq!(url, "http://127.0.0.1:6052/");
+        assert!(!url.contains("localhost"));
     }
 }

@@ -354,21 +354,9 @@ pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::unique_temp_dir;
     use std::fs;
     use std::path::{Path, PathBuf};
-
-    /// Create a unique, empty temp directory for a test and return its path.
-    /// The process id plus a per-test tag keeps both intra-process parallelism
-    /// and two concurrent `cargo test` binaries on the same host from
-    /// colliding.
-    fn unique_temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("esphome_git_check_{}_{tag}", std::process::id()));
-        // Start from a clean slate in case a previous run left it behind.
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
 
     fn touch_git_executable(dir: &Path) -> PathBuf {
         let path = dir.join(GIT_EXECUTABLES[0]);

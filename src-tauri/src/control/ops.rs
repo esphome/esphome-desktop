@@ -83,13 +83,6 @@ pub(crate) fn not_ready_note() -> String {
     format!("did not become ready within {READY_TIMEOUT_SECS}s; check the logs")
 }
 
-/// Show the daemon's actual state in the tray. The switch/restart sequences
-/// optimistically set "stopped" before stopping; after a failed stop the
-/// backend may well still be running, so the optimistic label must not stand.
-fn show_actual_status(app: &AppHandle, state: &AppState) {
-    tray::update_status(app, state.daemon.is_running());
-}
-
 /// How a channel/backend switch ended. The tray maps these onto dialogs, the
 /// control server onto terminal replies.
 pub(crate) enum SwitchOutcome {
@@ -106,6 +99,59 @@ pub(crate) enum SwitchOutcome {
     InstallFailed { error: String, restarted: bool },
     /// The install succeeded but the dashboard failed to start afterwards.
     StartFailed(String),
+}
+
+/// Stop prologue shared by the switch flows: report progress and stop the
+/// daemon (which reflects the stop in the tray status line itself). On
+/// failure run `revert` (restores the tray radio checks) and hand back the
+/// [`SwitchOutcome::StopFailed`] for the caller to return. `stop_what` names
+/// what failed to stop in the log line.
+async fn stop_or_revert(
+    state: &Arc<AppState>,
+    progress: Progress<'_>,
+    detail: &str,
+    stop_what: &str,
+    revert: impl FnOnce(),
+) -> Result<(), SwitchOutcome> {
+    progress("stop", detail);
+    if let Err(e) = state.daemon.stop().await {
+        error!("Failed to stop {}: {}", stop_what, e);
+        revert();
+        return Err(SwitchOutcome::StopFailed(e.to_string()));
+    }
+    Ok(())
+}
+
+/// Install-failure epilogue shared by the switch flows: run `revert` to
+/// restore the tray radio checks, then attempt a best-effort restart of the
+/// previous install (`context` feeds the restart-failure log), folding both
+/// into [`SwitchOutcome::InstallFailed`]. Callers log their flow-specific
+/// error line before calling.
+async fn install_failed(
+    state: &Arc<AppState>,
+    error: String,
+    context: &str,
+    revert: impl FnOnce(),
+) -> SwitchOutcome {
+    revert();
+    let restarted = restart_after_failure(state, context).await;
+    SwitchOutcome::InstallFailed { error, restarted }
+}
+
+/// Apply `mutate` to the settings under the write lock and persist them,
+/// downgrading a save failure to a warning (the in-memory value still
+/// stands). `mutate` returns whether anything changed; an unchanged result
+/// skips the save.
+async fn set_and_save<F>(app: &AppHandle, state: &Arc<AppState>, mutate: F)
+where
+    F: FnOnce(&mut crate::settings::Settings) -> bool,
+{
+    let mut settings = state.settings.write().await;
+    if mutate(&mut settings) {
+        if let Err(e) = settings.save(app) {
+            warn!("Failed to save settings: {}", e);
+        }
+    }
 }
 
 /// Switch the ESPHome release channel: stop the dashboard, install the new
@@ -126,13 +172,16 @@ pub(crate) async fn switch_release_channel(
     // Show the new selection immediately; reverted on failure below.
     tray::update_channel_checks(new_channel);
 
-    progress("stop", "stopping the dashboard");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop backend for channel switch: {}", e);
-        tray::update_channel_checks(old_channel);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
+    if let Err(outcome) = stop_or_revert(
+        state,
+        progress,
+        "stopping the dashboard",
+        "backend for channel switch",
+        || tray::update_channel_checks(old_channel),
+    )
+    .await
+    {
+        return outcome;
     }
 
     progress(
@@ -143,13 +192,11 @@ pub(crate) async fn switch_release_channel(
         Ok(()) => {
             info!("Switched to {} channel successfully", new_channel);
 
-            {
-                let mut settings = state.settings.write().await;
+            set_and_save(app, state, |settings| {
                 settings.release_channel = new_channel;
-                if let Err(e) = settings.save(app) {
-                    warn!("Failed to save settings: {}", e);
-                }
-            }
+                true
+            })
+            .await;
 
             refresh_version_display_blocking(app).await;
 
@@ -158,17 +205,14 @@ pub(crate) async fn switch_release_channel(
                 error!("Failed to restart backend after channel switch: {}", e);
                 return SwitchOutcome::StartFailed(e.to_string());
             }
-            tray::update_status(app, true);
             SwitchOutcome::Success { ready: true }
         }
         Err(e) => {
             error!("Channel switch failed: {}", e);
-            tray::update_channel_checks(old_channel);
-            let restarted = restart_after_failure(app, state, "failed channel switch").await;
-            SwitchOutcome::InstallFailed {
-                error: e.to_string(),
-                restarted,
-            }
+            install_failed(state, e.to_string(), "failed channel switch", || {
+                tray::update_channel_checks(old_channel)
+            })
+            .await
         }
     }
 }
@@ -190,13 +234,16 @@ pub(crate) async fn switch_backend(
 
     tray::update_backend_checks(new_backend);
 
-    progress("stop", "stopping the backend");
-    tray::update_status(app, false);
-    if let Err(e) = state.daemon.stop().await {
-        error!("Failed to stop daemon for backend switch: {}", e);
-        tray::update_backend_checks(old_backend);
-        show_actual_status(app, state);
-        return SwitchOutcome::StopFailed(e.to_string());
+    if let Err(outcome) = stop_or_revert(
+        state,
+        progress,
+        "stopping the backend",
+        "daemon for backend switch",
+        || tray::update_backend_checks(old_backend),
+    )
+    .await
+    {
+        return outcome;
     }
 
     // Install/upgrade the package for the selected channel first.
@@ -210,31 +257,26 @@ pub(crate) async fn switch_backend(
         .await
     {
         error!("Failed to install esphome-device-builder: {}", e);
-        tray::update_backend_checks(old_backend);
-        let restarted = restart_after_failure(app, state, "failed backend switch").await;
-        return SwitchOutcome::InstallFailed {
-            error: e.to_string(),
-            restarted,
-        };
+        return install_failed(state, e.to_string(), "failed backend switch", || {
+            tray::update_backend_checks(old_backend)
+        })
+        .await;
     }
     // Install succeeded — refresh the tray version display.
     tray::refresh_builder_version_display(app).await;
 
     // Persist the new backend channel.
-    {
-        let mut settings = state.settings.write().await;
+    set_and_save(app, state, |settings| {
         settings.backend = new_backend;
-        if let Err(e) = settings.save(app) {
-            warn!("Failed to save settings: {}", e);
-        }
-    }
+        true
+    })
+    .await;
 
     progress("start", "starting the backend");
     if let Err(e) = state.daemon.start().await {
         error!("Failed to start daemon after backend switch: {}", e);
         return SwitchOutcome::StartFailed(e.to_string());
     }
-    tray::update_status(app, true);
     info!("Switched backend to {}", new_backend);
 
     progress("wait", "waiting for the backend to become ready");
@@ -246,19 +288,15 @@ pub(crate) async fn switch_backend(
 /// Restart the dashboard backend. With `wait_ready` the call also polls the
 /// dashboard's readiness probe and returns whether it came up within 60s.
 pub(crate) async fn restart_daemon(
-    app: &AppHandle,
     state: &Arc<AppState>,
     wait_ready: bool,
     _guard: &UpdateGuard,
     progress: Progress<'_>,
 ) -> Result<bool, String> {
     progress("restart", "restarting the dashboard");
-    tray::update_status(app, false);
     if let Err(e) = state.daemon.restart().await {
-        show_actual_status(app, state);
         return Err(e.to_string());
     }
-    tray::update_status(app, true);
     if !wait_ready {
         return Ok(true);
     }
@@ -283,15 +321,15 @@ pub(crate) async fn set_launch_at_startup(
     enable: bool,
 ) -> bool {
     let _toggle = STARTUP_TOGGLE.lock().await;
-    {
-        let mut settings = state.settings.write().await;
+    set_and_save(app_handle, state, |settings| {
         if settings.launch_at_startup != enable {
             settings.launch_at_startup = enable;
-            if let Err(e) = settings.save(app_handle) {
-                warn!("Failed to save settings: {}", e);
-            }
+            true
+        } else {
+            false
         }
-    }
+    })
+    .await;
 
     // Always (re)apply the OS call, even when the persisted value already
     // matches, so an already-selected choice retries a registration that
@@ -347,6 +385,23 @@ where
     }
 }
 
+/// Detect a component's installed version via [`detect`], mapping the two
+/// non-detected outcomes onto the [`ComponentUpdate`] early exits the check
+/// replies carry: absent is a normal state ("nothing to update"), reported as
+/// `not_installed()` rather than an error, and a detection failure is
+/// `errored` with `installed: None` — the encoding [`install_action`] relies
+/// on to tell detection failures from update-check failures.
+async fn detect_installed_or_report<F>(app: &AppHandle, f: F) -> Result<String, ComponentUpdate>
+where
+    F: FnOnce(&AppHandle) -> anyhow::Result<Option<String>> + Send + 'static,
+{
+    match detect(app, f).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(ComponentUpdate::not_installed()),
+        Err(e) => Err(ComponentUpdate::errored(None, e)),
+    }
+}
+
 /// Whether `latest` is a newer version than `installed`, mapped onto the
 /// [`ComponentUpdate`] the check reply carries. The install sequences derive
 /// their decision from this same result via [`install_action`], so on the
@@ -383,13 +438,11 @@ pub(crate) async fn esphome_update_available(
     state: &Arc<AppState>,
     channel: ReleaseChannel,
 ) -> ComponentUpdate {
-    let installed = match detect(app, crate::update::installed_esphome_version).await {
-        Ok(Some(v)) => v,
-        // ESPHome absent is a normal state ("nothing to update"), not an error —
-        // mirrors the device-builder not-installed path below.
-        Ok(None) => return ComponentUpdate::not_installed(),
-        Err(e) => return ComponentUpdate::errored(None, e),
-    };
+    let installed =
+        match detect_installed_or_report(app, crate::update::installed_esphome_version).await {
+            Ok(v) => v,
+            Err(early) => return early,
+        };
     // The dev channel has no version-based check: `update` always reinstalls the
     // latest dev commit, so a passive check can't call it "newer". Report it as
     // current so the dashboard banner doesn't nag on every dev build.
@@ -410,11 +463,13 @@ pub(crate) async fn device_builder_update_available(
     state: &Arc<AppState>,
     backend: crate::settings::Backend,
 ) -> ComponentUpdate {
-    let installed = match detect(app, crate::update::get_installed_device_builder_version).await {
-        Ok(Some(v)) => v,
-        Ok(None) => return ComponentUpdate::not_installed(),
-        Err(e) => return ComponentUpdate::errored(None, e),
-    };
+    let installed =
+        match detect_installed_or_report(app, crate::update::get_installed_device_builder_version)
+            .await
+        {
+            Ok(v) => v,
+            Err(early) => return early,
+        };
     match state.update_checker.check_device_builder(backend).await {
         Ok(latest) => compare(installed, latest),
         Err(e) => ComponentUpdate::errored(Some(installed), e.to_string()),
@@ -591,46 +646,33 @@ async fn update_esphome_package(
 ) {
     progress("esphome", "checking for an ESPHome update");
     let check = esphome_update_available(app, state, channel).await;
-    let (installed, target) = match esphome_install_action(check, channel) {
-        InstallAction::Install { installed, target } => (installed, target),
-        InstallAction::UpToDate { installed } => {
-            report.note(format!("esphome {installed} is up to date"));
-            return;
-        }
-        InstallAction::NotInstalled => {
-            report.note("esphome is not installed; skipping".to_string());
-            return;
-        }
-        InstallAction::DetectionFailed(e) => {
-            report.fail(format!("esphome version detection failed: {e}"));
-            return;
-        }
-        InstallAction::CheckFailed(e) => {
-            report.fail(format!("esphome update check failed: {e}"));
-            return;
-        }
-    };
-
-    let label = if target == "dev" {
-        "the latest dev commit".to_string()
-    } else {
-        target.clone()
-    };
-    progress(
-        "esphome",
-        &format!("updating ESPHome {installed} to {label}"),
-    );
-    let result = stop_install_start(app, state, || async {
-        state.update_checker.update_to(app, &target, channel).await
-    })
+    run_package_phase(
+        state,
+        progress,
+        report,
+        esphome_install_action(check, channel),
+        PackagePhase {
+            labels: PackageLabels {
+                step: "esphome",
+                component: "esphome",
+                display_name: "ESPHome",
+            },
+            // The dev "target" is a channel keyword, not a version; quote it
+            // as prose in the progress and report lines.
+            display_target: |target: &str| {
+                if target == "dev" {
+                    "the latest dev commit".to_string()
+                } else {
+                    target.to_string()
+                }
+            },
+            install: |target: String| async move {
+                state.update_checker.update_to(app, &target, channel).await
+            },
+            refresh: || refresh_version_display_blocking(app),
+        },
+    )
     .await;
-    match result {
-        Ok(()) => {
-            refresh_version_display_blocking(app).await;
-            report.note(format!("esphome updated to {label}"));
-        }
-        Err(e) => report.fail(format!("esphome update failed: {e}")),
-    }
 }
 
 /// Device-builder phase of [`run_full_update`].
@@ -643,68 +685,124 @@ async fn update_device_builder_package(
 ) {
     progress("device-builder", "checking for a device builder update");
     let check = device_builder_update_available(app, state, backend).await;
-    let (installed, latest) = match install_action(check) {
+    run_package_phase(
+        state,
+        progress,
+        report,
+        install_action(check),
+        PackagePhase {
+            labels: PackageLabels {
+                step: "device-builder",
+                component: "device builder",
+                display_name: "device builder",
+            },
+            display_target: |latest: &str| latest.to_string(),
+            install: |_target| async move {
+                state
+                    .update_checker
+                    .install_device_builder(app, backend)
+                    .await
+            },
+            refresh: || tray::refresh_builder_version_display(app),
+        },
+    )
+    .await;
+}
+
+/// Wording knobs for [`run_package_phase`]: the progress `step` key, the
+/// lowercase `component` noun the report lines start with, and the
+/// `display_name` quoted in the "updating …" progress detail.
+struct PackageLabels {
+    step: &'static str,
+    component: &'static str,
+    display_name: &'static str,
+}
+
+/// Component-specific configuration for [`run_package_phase`]: the wording
+/// [`PackageLabels`], `display_target` mapping the raw install target onto
+/// the label quoted in progress and report lines, the `install` future
+/// (receives the raw target), and the version-display `refresh` run after a
+/// successful install.
+struct PackagePhase<D, F, R> {
+    labels: PackageLabels,
+    display_target: D,
+    install: F,
+    refresh: R,
+}
+
+/// Shared skeleton of the per-package phases of [`run_full_update`]: map the
+/// [`InstallAction`] onto the report for the no-op and failure arms, and for
+/// an actual install run [`stop_install_start`], refresh the version display
+/// on success, and record the outcome. Everything component-specific comes
+/// bundled in the [`PackagePhase`].
+async fn run_package_phase<D, F, Fut, R, RFut>(
+    state: &Arc<AppState>,
+    progress: Progress<'_>,
+    report: &mut UpdateReport,
+    action: InstallAction,
+    phase: PackagePhase<D, F, R>,
+) where
+    D: FnOnce(&str) -> String,
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = ()>,
+{
+    let PackagePhase {
+        labels,
+        display_target,
+        install,
+        refresh,
+    } = phase;
+    let component = labels.component;
+    let (installed, target) = match action {
         InstallAction::Install { installed, target } => (installed, target),
         InstallAction::UpToDate { installed } => {
-            report.note(format!("device builder {installed} is up to date"));
+            report.note(format!("{component} {installed} is up to date"));
             return;
         }
         InstallAction::NotInstalled => {
-            report.note("device builder is not installed; skipping".to_string());
+            report.note(format!("{component} is not installed; skipping"));
             return;
         }
         InstallAction::DetectionFailed(e) => {
-            report.fail(format!("device builder version detection failed: {e}"));
+            report.fail(format!("{component} version detection failed: {e}"));
             return;
         }
         InstallAction::CheckFailed(e) => {
-            report.fail(format!("device builder update check failed: {e}"));
+            report.fail(format!("{component} update check failed: {e}"));
             return;
         }
     };
 
+    let label = display_target(&target);
     progress(
-        "device-builder",
-        &format!("updating device builder {installed} to {latest}"),
+        labels.step,
+        &format!("updating {} {installed} to {label}", labels.display_name),
     );
-    let result = stop_install_start(app, state, || async {
-        state
-            .update_checker
-            .install_device_builder(app, backend)
-            .await
-    })
-    .await;
+    let result = stop_install_start(state, || install(target)).await;
     match result {
         Ok(()) => {
-            tray::refresh_builder_version_display(app).await;
-            report.note(format!("device builder updated to {latest}"));
+            refresh().await;
+            report.note(format!("{component} updated to {label}"));
         }
-        Err(e) => report.fail(format!("device builder update failed: {e}")),
+        Err(e) => report.fail(format!("{component} update failed: {e}")),
     }
 }
 
 /// Stop the dashboard, run `install`, then start the dashboard again. The
 /// start is attempted even after a failed install so the user isn't left
 /// without a dashboard.
-async fn stop_install_start<F, Fut>(
-    app: &AppHandle,
-    state: &Arc<AppState>,
-    install: F,
-) -> Result<(), String>
+async fn stop_install_start<F, Fut>(state: &Arc<AppState>, install: F) -> Result<(), String>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
-    tray::update_status(app, false);
     if let Err(e) = state.daemon.stop().await {
-        show_actual_status(app, state);
         return Err(format!("failed to stop the dashboard: {e}"));
     }
     let install_result = install().await;
     let start_result = state.daemon.start().await;
-    if start_result.is_ok() {
-        tray::update_status(app, true);
-    }
     match (install_result, start_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(e)) => Err(format!("updated, but the dashboard failed to start: {e}")),
@@ -717,12 +815,9 @@ where
 
 /// Best-effort dashboard restart after a failed install, so the user isn't
 /// left without a backend. Returns whether the restart succeeded.
-async fn restart_after_failure(app: &AppHandle, state: &Arc<AppState>, context: &str) -> bool {
+async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
     match state.daemon.start().await {
-        Ok(()) => {
-            tray::update_status(app, true);
-            true
-        }
+        Ok(()) => true,
         Err(e) => {
             error!("Failed to restart backend after {}: {}", context, e);
             false

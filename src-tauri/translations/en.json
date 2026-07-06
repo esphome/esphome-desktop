@@ -45,10 +45,10 @@
     "esphome_updated": "ESPHome has been updated to version {version}.",
     "esphome_updated_dev": "ESPHome has been updated to the latest dev version.",
     "esphome_partial": "ESPHome updated to {version}, but failed to restart dashboard: {error}",
-    "esphome_latest": "ESPHome {version} is the latest version.",
-    "esphome_notification_title": "ESPHome Update Available",
-    "esphome_notification_body": "ESPHome {latest} ({channel}) is available (you have {installed}). {hint}",
-    "available_prompt": "ESPHome {latest} ({channel}) is available.\n\nYou currently have version {installed}.\n\nWould you like to update now?",
+    "latest": "{component} {installed} is the latest version.",
+    "notification_title": "{component} Update Available",
+    "notification_body": "{subject} is available (you have {installed}). {hint}",
+    "available_prompt": "{subject} is available.\n\nYou currently have version {installed}.\n\nWould you like to update now?",
     "dev_channel_title": "Dev Channel Update",
     "dev_channel_prompt": "You are on the dev channel.\n\nCurrently installed: {version}\n\nThis will reinstall ESPHome from the latest commit on GitHub.\n\nWould you like to update now?",
     "not_installed": "ESPHome is not installed",
@@ -58,10 +58,7 @@
     "builder_update_failed": "Failed to update ESPHome Device Builder: {error}",
     "builder_updated": "ESPHome Device Builder has been updated to version {version}.",
     "builder_partial": "Device builder updated to {version}, but failed to restart backend: {error}",
-    "builder_notification_title": "ESPHome Device Builder Update Available",
-    "builder_notification_body": "ESPHome Device Builder {latest} is available (you have {installed}). {hint}",
-    "builder_available_title": "Device Builder Update Available",
-    "builder_available_prompt": "ESPHome Device Builder {latest} is available.\n\nYou currently have version {installed}.\n\nWould you like to update now?"
+    "builder_available_title": "Device Builder Update Available"
   },
   "app_update": {
     "available_title": "Desktop Update Available",
@@ -70,7 +67,7 @@
     "latest": "ESPHome Device Builder {version} is the latest version.",
     "updater_unavailable": "Updater not available: {error}",
     "update_failed": "Failed to update: {error}",
-    "notification_body": "Version {latest} is available (you have {current}). {hint}",
+    "notification_subject": "Version {version}",
     "installed_title": "Update Installed",
     "installed_body": "ESPHome Device Builder {version} has been installed.\n\nIt will now restart to apply the update."
   },

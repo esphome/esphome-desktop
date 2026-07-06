@@ -8,10 +8,11 @@ use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tauri::AppHandle;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
 
+use crate::control::protocol::channel_name;
 use crate::i18n::{t, t_with};
 use crate::platform;
 use crate::settings::{Backend, ReleaseChannel};
@@ -54,6 +55,20 @@ impl UpdateChecker {
         }
     }
 
+    /// Fetch and parse the PyPI JSON metadata for `package`.
+    ///
+    /// Callers pass fixed internal package names, so no URL encoding is needed.
+    async fn fetch_pypi(&self, package: &str) -> Result<PyPIResponse> {
+        self.client
+            .get(format!("https://pypi.org/pypi/{package}/json"))
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch PyPI info for {package}"))?
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse PyPI response for {package}"))
+    }
+
     /// Check for updates and return the latest version string for the given channel.
     ///
     /// - Stable: returns the latest stable version from PyPI
@@ -63,15 +78,7 @@ impl UpdateChecker {
         match channel {
             ReleaseChannel::Stable => {
                 debug!("Checking for stable ESPHome updates on PyPI");
-                let response: PyPIResponse = self
-                    .client
-                    .get("https://pypi.org/pypi/esphome/json")
-                    .send()
-                    .await
-                    .context("Failed to fetch PyPI info")?
-                    .json()
-                    .await
-                    .context("Failed to parse PyPI response")?;
+                let response = self.fetch_pypi("esphome").await?;
 
                 let latest = response.info.version;
                 info!("Latest stable ESPHome version on PyPI: {}", latest);
@@ -79,15 +86,7 @@ impl UpdateChecker {
             }
             ReleaseChannel::Beta => {
                 debug!("Checking for beta ESPHome updates on PyPI");
-                let response: PyPIResponse = self
-                    .client
-                    .get("https://pypi.org/pypi/esphome/json")
-                    .send()
-                    .await
-                    .context("Failed to fetch PyPI info")?
-                    .json()
-                    .await
-                    .context("Failed to parse PyPI response")?;
+                let response = self.fetch_pypi("esphome").await?;
 
                 // Pick the version to offer on the beta channel. We want the
                 // newest beta (e.g. "2025.4.0b1"), but only when it is actually
@@ -118,25 +117,17 @@ impl UpdateChecker {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
             let installed = installed_esphome_version(app_handle).ok().flatten();
-            let installed_str = installed.unwrap_or_else(|| t("version.unknown"));
+            let unknown = t("version.unknown");
+            let installed_str = installed.as_deref().unwrap_or(&unknown);
 
-            let dialog_app = app_handle.clone();
-            let should_update = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(t_with(
-                        "update.dev_channel_prompt",
-                        &[("version", &installed_str)],
-                    ))
-                    .title(t("update.dev_channel_title"))
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        t("common.update_now"),
-                        t("common.cancel"),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
+            let should_update = crate::dialog::confirm(
+                app_handle,
+                &t("update.dev_channel_title"),
+                t_with("update.dev_channel_prompt", &[("version", installed_str)]),
+                &t("common.update_now"),
+                &t("common.cancel"),
+            )
+            .await;
 
             if should_update {
                 // Return a sentinel value that update_to will recognize
@@ -149,30 +140,23 @@ impl UpdateChecker {
         let installed = match installed_esphome_version(app_handle) {
             Ok(Some(v)) => v,
             Ok(None) => {
-                let dialog_app = app_handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(t("update.not_installed"))
-                        .kind(MessageDialogKind::Error)
-                        .title(t("update.check_failed_title"))
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    &t("update.check_failed_title"),
+                    t("update.not_installed"),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
             Err(e) => {
                 warn!("Could not detect installed version: {}", e);
-                let dialog_app = app_handle.clone();
-                let msg = t_with("update.detect_failed", &[("error", &e.to_string())]);
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .kind(MessageDialogKind::Error)
-                        .title(t("update.check_failed_title"))
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    &t("update.check_failed_title"),
+                    t_with("update.detect_failed", &[("error", &e.to_string())]),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
@@ -182,93 +166,50 @@ impl UpdateChecker {
         let latest = match self.check(channel).await {
             Ok(Some(v)) => v,
             Ok(None) => {
-                let dialog_app = app_handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(t("update.latest_unknown"))
-                        .kind(MessageDialogKind::Error)
-                        .title(t("update.check_failed_title"))
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    &t("update.check_failed_title"),
+                    t("update.latest_unknown"),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
             Err(e) => {
                 warn!("Update check failed: {}", e);
-                let dialog_app = app_handle.clone();
-                let msg = t_with("update.check_failed", &[("error", &e.to_string())]);
-                let _ = tokio::task::spawn_blocking(move || {
-                    dialog_app
-                        .dialog()
-                        .message(msg)
-                        .kind(MessageDialogKind::Error)
-                        .title(t("update.check_failed_title"))
-                        .blocking_show();
-                })
+                crate::dialog::notice(
+                    app_handle,
+                    &t("update.check_failed_title"),
+                    t_with("update.check_failed", &[("error", &e.to_string())]),
+                    MessageDialogKind::Error,
+                )
                 .await;
                 return None;
             }
         };
 
-        // Compare versions
-        if is_newer_version(&latest, &installed) {
-            info!(
-                "Update available: {} -> {} (installed: {})",
-                installed, latest, installed
-            );
-
-            // Channel names are deliberately untranslated (product terms).
-            let channel_label = match channel {
-                ReleaseChannel::Stable => "stable",
-                ReleaseChannel::Beta => "beta",
-                ReleaseChannel::Dev => unreachable!(),
-            };
-
-            // Ask user if they want to update
-            let dialog_app = app_handle.clone();
-            let msg = t_with(
-                "update.available_prompt",
-                &[
-                    ("latest", latest.as_str()),
-                    ("channel", channel_label),
-                    ("installed", &installed),
-                ],
-            );
-            let should_update = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .title(t("update.available_title"))
-                    .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                        t("common.update_now"),
-                        t("common.later"),
-                    ))
-                    .blocking_show()
-            })
-            .await
-            .unwrap_or(false);
-
-            if should_update {
-                return Some(latest);
+        // Compare versions and ask the user. Dev is handled at the top of
+        // this function, so channel_name only ever yields "stable" or "beta";
+        // keep that invariant explicit.
+        let channel_label = match channel {
+            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
+            ReleaseChannel::Dev => {
+                unreachable!("dev channel is handled before the shared check tail")
             }
-        } else {
-            info!("ESPHome is up to date ({})", installed);
-
-            let dialog_app = app_handle.clone();
-            let msg = t_with("update.esphome_latest", &[("version", &installed)]);
-            let _ = tokio::task::spawn_blocking(move || {
-                dialog_app
-                    .dialog()
-                    .message(msg)
-                    .kind(MessageDialogKind::Info)
-                    .title(t("update.none_title"))
-                    .blocking_show();
-            })
-            .await;
-        }
-
-        None
+        };
+        prompt_if_newer(
+            app_handle,
+            &UpdateWording {
+                component: "ESPHome",
+                log_prefix: "Update",
+                channel_label: Some(channel_label),
+            },
+            &t("update.available_title"),
+            latest,
+            &installed,
+            true,
+        )
+        .await
     }
 
     /// Check for updates and notify the user if one is available (background check).
@@ -307,41 +248,26 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions
-        if is_newer_version(&latest, &installed) {
-            info!(
-                "Update available: {} -> {} (installed: {})",
-                installed, latest, installed
-            );
-
-            // Channel names are deliberately untranslated (product terms).
-            let channel_label = match channel {
-                ReleaseChannel::Stable => "stable",
-                ReleaseChannel::Beta => "beta",
-                ReleaseChannel::Dev => unreachable!(),
-            };
-
-            // Show notification
-            if let Err(e) = app_handle
-                .notification()
-                .builder()
-                .title(t("update.esphome_notification_title"))
-                .body(t_with(
-                    "update.esphome_notification_body",
-                    &[
-                        ("latest", latest.as_str()),
-                        ("channel", channel_label),
-                        ("installed", &installed),
-                        ("hint", &crate::updates_menu_hint(tray_available)),
-                    ],
-                ))
-                .show()
-            {
-                error!("Failed to show notification: {}", e);
+        // Compare versions and notify. Dev is handled at the top of this
+        // function, so channel_name only ever yields "stable" or "beta";
+        // keep that invariant explicit.
+        let channel_label = match channel {
+            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
+            ReleaseChannel::Dev => {
+                unreachable!("dev channel is handled before the shared check tail")
             }
-        } else {
-            debug!("ESPHome is up to date ({})", installed);
-        }
+        };
+        notify_if_newer(
+            app_handle,
+            &UpdateWording {
+                component: "ESPHome",
+                log_prefix: "Update",
+                channel_label: Some(channel_label),
+            },
+            &latest,
+            &installed,
+            tray_available,
+        );
     }
 
     /// Perform an update to the specified version, or install from git for dev channel.
@@ -374,9 +300,8 @@ impl UpdateChecker {
         } else {
             info!("Updating ESPHome to version {}", version);
 
-            let mut cmd = tokio::process::Command::new(&python_path);
-            cmd.args(["-m", "pip", "install", &format!("esphome=={}", version)]);
-            platform::configure_no_window_tokio_command(&mut cmd);
+            let mut cmd = platform::pip_command(&python_path);
+            cmd.arg(format!("esphome=={}", version));
 
             let output = cmd.output().await.context("Failed to run pip install")?;
 
@@ -458,15 +383,7 @@ impl UpdateChecker {
     /// `Backend::BuilderStable` returns the latest final release; `BuilderBeta`
     /// returns the latest version including pre-releases.
     pub async fn check_device_builder(&self, backend: Backend) -> Result<String> {
-        let response: PyPIResponse = self
-            .client
-            .get("https://pypi.org/pypi/esphome-device-builder/json")
-            .send()
-            .await
-            .context("Failed to fetch PyPI info for esphome-device-builder")?
-            .json()
-            .await
-            .context("Failed to parse PyPI response for esphome-device-builder")?;
+        let response = self.fetch_pypi("esphome-device-builder").await?;
 
         let include_pre = backend == Backend::BuilderBeta;
         let latest = if include_pre {
@@ -509,31 +426,13 @@ impl UpdateChecker {
             }
         };
 
-        if is_newer_version(&latest, &installed) {
-            info!(
-                "Device-builder update available: {} -> {} (installed: {})",
-                installed, latest, installed
-            );
-
-            if let Err(e) = app_handle
-                .notification()
-                .builder()
-                .title(t("update.builder_notification_title"))
-                .body(t_with(
-                    "update.builder_notification_body",
-                    &[
-                        ("latest", latest.as_str()),
-                        ("installed", &installed),
-                        ("hint", &crate::updates_menu_hint(tray_available)),
-                    ],
-                ))
-                .show()
-            {
-                error!("Failed to show notification: {}", e);
-            }
-        } else {
-            debug!("ESPHome Device Builder is up to date ({})", installed);
-        }
+        notify_if_newer(
+            app_handle,
+            &DEVICE_BUILDER_WORDING,
+            &latest,
+            &installed,
+            tray_available,
+        );
     }
 
     /// User-initiated check for esphome-device-builder updates. Returns
@@ -568,40 +467,15 @@ impl UpdateChecker {
             }
         };
 
-        if !is_newer_version(&latest, &installed) {
-            info!("ESPHome Device Builder is up to date ({})", installed);
-            return None;
-        }
-
-        info!(
-            "Device-builder update available: {} -> {} (installed: {})",
-            installed, latest, installed
-        );
-
-        let dialog_app = app_handle.clone();
-        let msg = t_with(
-            "update.builder_available_prompt",
-            &[("latest", latest.as_str()), ("installed", &installed)],
-        );
-        let should_update = tokio::task::spawn_blocking(move || {
-            dialog_app
-                .dialog()
-                .message(msg)
-                .title(t("update.builder_available_title"))
-                .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
-                    t("common.update_now"),
-                    t("common.later"),
-                ))
-                .blocking_show()
-        })
+        prompt_if_newer(
+            app_handle,
+            &DEVICE_BUILDER_WORDING,
+            &t("update.builder_available_title"),
+            latest,
+            &installed,
+            false,
+        )
         .await
-        .unwrap_or(false);
-
-        if should_update {
-            Some(latest)
-        } else {
-            None
-        }
     }
 
     /// Switch to a new release channel by installing the appropriate version.
@@ -638,6 +512,169 @@ impl UpdateChecker {
     }
 }
 
+/// Per-component wording shared by the user-prompt and background-notify
+/// update-check tails, so the strings cannot drift between the two flows.
+struct UpdateWording<'a> {
+    /// Component display name, e.g. "ESPHome" or "ESPHome Device Builder".
+    component: &'a str,
+    /// Leading words of the "<log_prefix> available: a -> b" info log.
+    log_prefix: &'a str,
+    /// Release-channel label appended to the offered version, when shown.
+    channel_label: Option<&'a str>,
+}
+
+/// Wording for the `esphome-device-builder` check tails (no channel label;
+/// the backend channel is implied by which backend is configured).
+const DEVICE_BUILDER_WORDING: UpdateWording<'static> = UpdateWording {
+    component: "ESPHome Device Builder",
+    log_prefix: "Device-builder update",
+    channel_label: None,
+};
+
+impl UpdateWording<'_> {
+    /// "<component> <version>" with the channel label appended when present,
+    /// e.g. "ESPHome 2025.1.0 (stable)" or "ESPHome Device Builder 1.2.3".
+    fn subject(&self, version: &str) -> String {
+        match self.channel_label {
+            Some(label) => format!("{} {} ({})", self.component, version, label),
+            None => format!("{} {}", self.component, version),
+        }
+    }
+
+    /// Full body of the "would you like to update now?" confirm dialog shown
+    /// by [`prompt_if_newer`].
+    fn prompt_message(&self, latest: &str, installed: &str) -> String {
+        t_with(
+            "update.available_prompt",
+            &[("subject", &self.subject(latest)), ("installed", installed)],
+        )
+    }
+
+    /// Title of the background "update available" notification shown by
+    /// [`notify_if_newer`].
+    fn notification_title(&self) -> String {
+        t_with(
+            "update.notification_title",
+            &[("component", self.component)],
+        )
+    }
+}
+
+/// Shared tail of the user-initiated update checks: compare versions and, when
+/// `latest` is newer, log it and ask the user whether to update now. Returns
+/// `Some(latest)` only when an update is available and the user confirms.
+/// When already up to date, logs that at info level and, if
+/// `dialog_when_up_to_date` is set, also shows the "No Updates Available"
+/// notice (the device-builder flow stays silent; its caller owns that UX).
+async fn prompt_if_newer(
+    app_handle: &AppHandle,
+    wording: &UpdateWording<'_>,
+    title: &str,
+    latest: String,
+    installed: &str,
+    dialog_when_up_to_date: bool,
+) -> Option<String> {
+    if !is_newer_version(&latest, installed) {
+        info!("{} is up to date ({})", wording.component, installed);
+        if dialog_when_up_to_date {
+            crate::dialog::notice(
+                app_handle,
+                &t("update.none_title"),
+                t_with(
+                    "update.latest",
+                    &[("component", wording.component), ("installed", installed)],
+                ),
+                MessageDialogKind::Info,
+            )
+            .await;
+        }
+        return None;
+    }
+
+    info!(
+        "{} available: {} -> {} (installed: {})",
+        wording.log_prefix, installed, latest, installed
+    );
+
+    let msg = wording.prompt_message(&latest, installed);
+    if crate::dialog::confirm(
+        app_handle,
+        title,
+        msg,
+        &t("common.update_now"),
+        &t("common.later"),
+    )
+    .await
+    {
+        Some(latest)
+    } else {
+        None
+    }
+}
+
+/// Shared tail of the background update checks: compare versions and, when
+/// `latest` is newer, log it and show the "<component> Update Available"
+/// notification pointing at the updates menu. Logs the up-to-date state at
+/// debug level otherwise.
+fn notify_if_newer(
+    app_handle: &AppHandle,
+    wording: &UpdateWording<'_>,
+    latest: &str,
+    installed: &str,
+    tray_available: bool,
+) {
+    if !is_newer_version(latest, installed) {
+        debug!("{} is up to date ({})", wording.component, installed);
+        return;
+    }
+
+    info!(
+        "{} available: {} -> {} (installed: {})",
+        wording.log_prefix, installed, latest, installed
+    );
+
+    if let Err(e) = notify_update_available(
+        app_handle,
+        &wording.notification_title(),
+        &wording.subject(latest),
+        installed,
+        tray_available,
+    ) {
+        error!("Failed to show notification: {}", e);
+    }
+}
+
+/// Build and show the standard "update available" notification:
+/// "<subject> is available (you have <installed>). <updates menu hint>".
+/// Returns the show error so each caller keeps its own failure log wording.
+pub(crate) fn notify_update_available(
+    app_handle: &AppHandle,
+    title: &str,
+    subject: &str,
+    installed: &str,
+    tray_available: bool,
+) -> tauri_plugin_notification::Result<()> {
+    app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(update_notification_body(subject, installed, tray_available))
+        .show()
+}
+
+/// Body of the standard "update available" notification, shared by every
+/// caller of [`notify_update_available`].
+fn update_notification_body(subject: &str, installed: &str, tray_available: bool) -> String {
+    t_with(
+        "update.notification_body",
+        &[
+            ("subject", subject),
+            ("installed", installed),
+            ("hint", &crate::updates_menu_hint(tray_available)),
+        ],
+    )
+}
+
 /// Choose the version to offer on the beta channel.
 ///
 /// Returns the latest beta only when it is strictly newer than the latest
@@ -653,17 +690,21 @@ fn select_beta_target(releases: &HashMap<String, Vec<PyPIRelease>>, stable: &str
     }
 }
 
-/// Find the latest beta/pre-release version from PyPI releases.
+/// Find the highest version among PyPI releases whose version string matches
+/// `predicate`.
 ///
-/// Beta versions on PyPI look like "2025.4.0b1", "2025.4.0b2", etc.
-/// We find the highest version that contains a beta suffix.
-fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+/// Skips version strings that don't start with a digit (not a valid-looking
+/// version) and versions with no installable files (fully yanked or files
+/// removed): PyPI keeps the version key with an empty/all-yanked file list,
+/// and offering it would download nothing or install a pulled release.
+fn highest_version(
+    releases: &HashMap<String, Vec<PyPIRelease>>,
+    predicate: impl Fn(&str) -> bool,
+) -> Option<String> {
     let mut best: Option<String> = None;
 
     for (version_str, files) in releases {
-        // Only consider versions with a beta suffix (e.g. "2025.4.0b1").
-        // ESPHome beta releases always use bN naming.
-        if !has_beta_suffix(version_str) {
+        if !predicate(version_str) {
             continue;
         }
 
@@ -676,10 +717,7 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
             continue;
         }
 
-        // Skip versions with no installable files (fully yanked or files
-        // removed). PyPI keeps the version key with an empty/all-yanked
-        // file list; offering it would download nothing or install a
-        // pulled release.
+        // Skip versions with no installable files (fully yanked or removed).
         if !has_active_files(files) {
             continue;
         }
@@ -695,6 +733,15 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
     }
 
     best
+}
+
+/// Find the latest beta/pre-release version from PyPI releases.
+///
+/// Beta versions on PyPI look like "2025.4.0b1", "2025.4.0b2", etc.
+/// We find the highest version that contains a beta suffix; ESPHome beta
+/// releases always use bN naming.
+fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+    highest_version(releases, has_beta_suffix)
 }
 
 /// Check whether a version string has a beta suffix like "b1", "b2", etc.
@@ -725,25 +772,7 @@ fn has_active_files(files: &[PyPIRelease]) -> bool {
 /// pre-releases. Used for the "beta" device-builder channel where any
 /// pre-release counts (a/b/rc/dev), not just `bN` like ESPHome itself.
 fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
-    let mut best: Option<String> = None;
-    for (v, files) in releases {
-        if !v.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        // Skip versions with no installable files (fully yanked or removed).
-        if !has_active_files(files) {
-            continue;
-        }
-        match &best {
-            None => best = Some(v.clone()),
-            Some(curr) => {
-                if is_newer_version(v, curr) {
-                    best = Some(v.clone());
-                }
-            }
-        }
-    }
-    best
+    highest_version(releases, |_| true)
 }
 
 /// Maintenance helper run with the bundled interpreter as `python -c <src>
@@ -766,16 +795,16 @@ const DEVICE_BUILDER_MAINT_PY: &str = include_str!("../../scripts/device_builder
 pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
     // Enumerate all device-builder distributions and take the highest version,
     // which is robust to the duplicate dist-info pileup that makes a plain
     // `importlib.metadata.version(...)` return None or an older version (#190).
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so detection only ever sees the managed bundled install.
-    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run python")?;
+    let output = platform::run_python_capture(
+        &python_path,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"],
+    )
+    .context("Failed to run python")?;
 
     if output.status.success() {
         // `detect` logs skipped/unreadable distributions to stderr; surface it so
@@ -818,14 +847,14 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so this destructive prune can only ever touch the managed bundled
     // install, never a user-site or externally-injected tree.
-    cmd.args(["-I", "-c", DEVICE_BUILDER_MAINT_PY, "dedupe"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run dist-info dedup")?;
+    let output = platform::run_python_capture(
+        &python_path,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "dedupe"],
+    )
+    .context("Failed to run dist-info dedup")?;
 
     if output.status.success() {
         // The helper logs dist-info it couldn't read or remove to stderr;
@@ -868,7 +897,8 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
     get_installed_device_builder_version(app_handle)
 }
 
-/// Build the `pip` argument list for installing/upgrading
+/// Build the `pip install` argument list (appended after the `-m pip install`
+/// prefix supplied by [`crate::platform::pip_command`]) for installing/upgrading
 /// `esphome-device-builder`.
 ///
 /// When `ignore_installed` is false this is a plain `pip install --upgrade`,
@@ -900,12 +930,7 @@ fn device_builder_install_args(
     ignore_installed: bool,
     version: Option<&str>,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "-m".to_string(),
-        "pip".to_string(),
-        "install".to_string(),
-        "--upgrade".to_string(),
-    ];
+    let mut args: Vec<String> = vec!["--upgrade".to_string()];
     if ignore_installed {
         args.push("--ignore-installed".to_string());
     }
@@ -927,16 +952,17 @@ async fn run_device_builder_install(
     version: Option<&str>,
 ) -> Result<std::process::Output> {
     let args = device_builder_install_args(backend, ignore_installed, version);
-    let mut cmd = tokio::process::Command::new(python_path);
+    let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
-    platform::configure_no_window_tokio_command(&mut cmd);
     cmd.output().await.context("Failed to run pip install")
 }
 
 /// URL of the ESPHome dev-branch source archive installed on the Dev channel.
 const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/dev.zip";
 
-/// Build the `pip` argument list for installing ESPHome from the dev GitHub zip.
+/// Build the `pip install` argument list (appended after the `-m pip install`
+/// prefix supplied by [`crate::platform::pip_command`]) for installing ESPHome from
+/// the dev GitHub zip.
 ///
 /// When `ignore_installed` is false this is a plain `--force-reinstall`, which
 /// uninstalls the existing copy of each affected package first. Pass `true`
@@ -947,7 +973,7 @@ const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/de
 /// over the top — pip's own documented recovery — at the cost of leaving stale
 /// files orphaned, so it is limited to the genuinely-broken RECORD case.
 fn dev_install_args(ignore_installed: bool) -> Vec<&'static str> {
-    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--force-reinstall"];
+    let mut args: Vec<&'static str> = vec!["--force-reinstall"];
     if ignore_installed {
         args.push("--ignore-installed");
     }
@@ -961,9 +987,8 @@ async fn run_dev_install(
     ignore_installed: bool,
 ) -> Result<std::process::Output> {
     let args = dev_install_args(ignore_installed);
-    let mut cmd = tokio::process::Command::new(python_path);
+    let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
-    platform::configure_no_window_tokio_command(&mut cmd);
     cmd.output().await.context("Failed to run pip install")
 }
 
@@ -1022,16 +1047,12 @@ where
 pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run esphome version")?;
-
-    if !output.status.success() {
+    let Some(version) =
+        platform::run_python_capture_stdout(&python_path, ["-m", "esphome", "version"])
+            .context("Failed to run esphome version")?
+    else {
         return Ok(None);
-    }
-    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    };
     // Extract just the version number
     let version = version
         .strip_prefix("Version: ")
@@ -1163,6 +1184,83 @@ mod tests {
     /// True if the owned-`String` arg list contains the given flag.
     fn has(args: &[String], flag: &str) -> bool {
         args.iter().any(|a| a == flag)
+    }
+
+    /// The ESPHome wording as built by the check tails (channel label present).
+    fn esphome_wording() -> UpdateWording<'static> {
+        UpdateWording {
+            component: "ESPHome",
+            log_prefix: "Update",
+            channel_label: Some("stable"),
+        }
+    }
+
+    #[test]
+    fn subject_appends_channel_label_when_present() {
+        assert_eq!(
+            esphome_wording().subject("2025.1.0"),
+            "ESPHome 2025.1.0 (stable)"
+        );
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.subject("1.2.3"),
+            "ESPHome Device Builder 1.2.3"
+        );
+    }
+
+    #[test]
+    fn prompt_message_pins_exact_dialog_text() {
+        assert_eq!(
+            esphome_wording().prompt_message("2025.1.0", "2024.12.2"),
+            "ESPHome 2025.1.0 (stable) is available.\n\n\
+             You currently have version 2024.12.2.\n\n\
+             Would you like to update now?"
+        );
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.prompt_message("1.2.3", "1.2.2"),
+            "ESPHome Device Builder 1.2.3 is available.\n\n\
+             You currently have version 1.2.2.\n\n\
+             Would you like to update now?"
+        );
+    }
+
+    #[test]
+    fn notification_title_pins_exact_text() {
+        assert_eq!(
+            esphome_wording().notification_title(),
+            "ESPHome Update Available"
+        );
+        assert_eq!(
+            DEVICE_BUILDER_WORDING.notification_title(),
+            "ESPHome Device Builder Update Available"
+        );
+    }
+
+    #[test]
+    fn notification_body_pins_exact_text_for_both_tray_states() {
+        // With a tray, the hint points at the tray menu.
+        assert_eq!(
+            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", true),
+            "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
+             Open the tray menu and choose \"Check for Updates...\" to update."
+        );
+        assert_eq!(
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", true),
+            "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
+             Open the tray menu and choose \"Check for Updates...\" to update."
+        );
+        // Without a tray, the hint falls back to the CLI.
+        assert_eq!(
+            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", false),
+            "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
+             No system tray was detected. Run `esphome-desktop update` from a \
+             terminal to update."
+        );
+        assert_eq!(
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", false),
+            "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
+             No system tray was detected. Run `esphome-desktop update` from a \
+             terminal to update."
+        );
     }
 
     /// One non-yanked file — a normally installable release.

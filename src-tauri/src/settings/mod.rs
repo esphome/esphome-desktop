@@ -102,8 +102,8 @@ where
 ///
 /// Port `0` is the dangerous case: a server reads it as "pick any free
 /// ephemeral port," but this app uses the configured value verbatim for the
-/// health check (`health_check_url`) and the dashboard URL it opens, never the
-/// port the backend actually bound. A persisted `{"port": 0}` (hand-edited
+/// health check (`daemon::loopback_url`) and the dashboard URL it opens, never
+/// the port the backend actually bound. A persisted `{"port": 0}` (hand-edited
 /// file) would therefore leave the dashboard permanently unreachable with no
 /// visible error. A non-number (null, string, bool from a hand-edited or future
 /// file) likewise falls back here rather than failing the whole parse and
@@ -215,7 +215,13 @@ impl Settings {
         let settings_path = Self::settings_path(app_handle)?;
 
         let mut settings = load_settings_file(&settings_path);
-        settings.installed_version = detect_installed_version(app_handle).ok();
+        settings.installed_version = match crate::update::installed_esphome_version(app_handle) {
+            Ok(version) => version,
+            Err(e) => {
+                debug!("Could not detect installed ESPHome version: {e}");
+                None
+            }
+        };
         Ok(settings)
     }
 
@@ -341,46 +347,11 @@ fn unique_backup_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Detect the installed ESPHome version from the venv
-fn detect_installed_version(app_handle: &AppHandle) -> Result<String> {
-    let python_path = platform::get_python_path(app_handle)?;
-
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    platform::configure_no_window_command(&mut cmd);
-
-    let output = cmd.output().context("Failed to run esphome version")?;
-
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Extract just the version number (e.g., "2024.1.0" from "Version: 2024.1.0")
-        let version = version
-            .strip_prefix("Version: ")
-            .unwrap_or(&version)
-            .to_string();
-        Ok(version)
-    } else {
-        anyhow::bail!("ESPHome not installed")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::unique_temp_dir;
     use std::fs;
-    use std::path::PathBuf;
-
-    /// Create a unique, empty temp directory for a test and return its path.
-    /// The process id plus a per-test tag keeps both intra-process parallelism
-    /// and two concurrent `cargo test` binaries on the same host from
-    /// colliding.
-    fn unique_temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("esphome_settings_{}_{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
 
     #[test]
     fn default_backend_matches_stable_release_channel() {

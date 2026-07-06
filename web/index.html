@@ -537,6 +537,57 @@
         return { set, get: () => value };
       }
 
+      // ---- Release manifest ----
+      // The deploy workflow publishes latest.json next to this page; its
+      // `downloads` block carries the real release-asset URLs. Prefer those
+      // over hand-built filenames so the page can't drift from the actual
+      // asset naming; the template-built fallbacks below only apply when the
+      // fetch fails (offline, manifest missing, etc).
+      let manifestDownloads = null;
+      const onManifest = [];
+
+      // Resolve the download URL for a Tauri platform target + installer
+      // kind, falling back to a hand-built release-asset filename.
+      function urlFor(target, kind, fallbackFilename) {
+        if (manifestDownloads) {
+          // Tolerate a malformed manifest: only trust a well-formed entry,
+          // otherwise fall back to the template-built URL.
+          const list = manifestDownloads[target];
+          const entry = Array.isArray(list) ? list.find((d) => d && d.kind === kind) : undefined;
+          if (entry && typeof entry.url === 'string') return entry.url;
+          // A loaded manifest without this pair means the asset naming
+          // drifted; that is exactly what this page must not hide.
+          console.warn('latest.json has no ' + kind + ' entry for ' + target + '; using template-built URL');
+        }
+        return asset(fallbackFilename);
+      }
+
+      // no-cache revalidates on each load but still allows conditional 304s.
+      fetch('latest.json', { cache: 'no-cache' })
+        .then((r) => {
+          if (!r.ok) {
+            console.warn('latest.json returned ' + r.status + '; using template-built download URLs');
+            return null;
+          }
+          return r.json();
+        })
+        .then((manifest) => {
+          if (manifest && manifest.downloads) {
+            manifestDownloads = manifest.downloads;
+            onManifest.forEach((refresh) => {
+              // One failing refresh must not keep the rest on fallback URLs.
+              try { refresh(); } catch (e) { console.warn('manifest refresh failed', e); }
+            });
+          } else if (manifest) {
+            console.warn('latest.json has no downloads block; using template-built download URLs');
+          }
+        })
+        .catch((e) => {
+          // Keep the template-built fallback URLs, but leave a trail so a
+          // broken manifest deploy is diagnosable from the console.
+          console.warn('latest.json fetch failed; using template-built download URLs', e);
+        });
+
       // ---- Tabs ----
       const TAB_ORDER = ['windows', 'macos', 'linux'];
       const tabs = document.querySelectorAll('[role="tab"]');
@@ -566,20 +617,30 @@
 
       // ---- Windows ----
       function setupWindows() {
-        document.getElementById('windows-download').href = asset(`ESPHome.Device.Builder_${VERSION}_x64-setup.exe`);
+        function refresh() {
+          document.getElementById('windows-download').href =
+            urlFor('windows-x86_64', 'nsis', `ESPHome.Device.Builder_${VERSION}_x64-setup.exe`);
+        }
+        refresh();
+        onManifest.push(refresh);
       }
 
       // ---- macOS ----
       function setupMacOS(detected) {
         const files = {
-          arm64: asset(`ESPHome.Device.Builder_${VERSION}_aarch64.dmg`),
-          x64: asset(`ESPHome.Device.Builder_${VERSION}_x64.dmg`),
+          arm64: () => urlFor('darwin-aarch64', 'dmg', `ESPHome.Device.Builder_${VERSION}_aarch64.dmg`),
+          x64: () => urlFor('darwin-x86_64', 'dmg', `ESPHome.Device.Builder_${VERSION}_x64.dmg`),
         };
         const btn = document.getElementById('mac-download');
-        const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', (a) => {
-          btn.href = files[a];
-        });
-        btn.href = files[arch.get()];
+
+        function refresh(a) {
+          // A stale persisted arch value must not break the page.
+          btn.href = (files[a] || files.arm64)();
+        }
+
+        const arch = segmented('#panel-macos .segmented button', 'arch', 'arm64', refresh);
+        refresh(arch.get());
+        onManifest.push(() => refresh(arch.get()));
 
         if (detected === 'macos') {
           detectArchAsync().then((a) => { if (a) arch.set(a); });
@@ -588,19 +649,19 @@
 
       // ---- Linux ----
       function setupLinux(detected) {
-        const AUR = { url: 'https://aur.archlinux.org/packages/esphome-desktop-bin', label: 'View on AUR' };
+        const AUR = { url: () => 'https://aur.archlinux.org/packages/esphome-desktop-bin', label: 'View on AUR' };
         const files = {
           x64: {
-            deb: { url: asset(`ESPHome.Device.Builder_${VERSION}_amd64.deb`), label: 'Download .deb' },
-            rpm: { url: asset(`ESPHome.Device.Builder-${VERSION}-1.x86_64.rpm`), label: 'Download .rpm' },
+            deb: { url: () => urlFor('linux-x86_64', 'deb', `ESPHome.Device.Builder_${VERSION}_amd64.deb`), label: 'Download .deb' },
+            rpm: { url: () => urlFor('linux-x86_64', 'rpm', `ESPHome.Device.Builder-${VERSION}-1.x86_64.rpm`), label: 'Download .rpm' },
             aur: AUR,
-            appimage: { url: asset(`ESPHome.Device.Builder_${VERSION}_amd64.AppImage`), label: 'Download AppImage' },
+            appimage: { url: () => urlFor('linux-x86_64', 'appimage', `ESPHome.Device.Builder_${VERSION}_amd64.AppImage`), label: 'Download AppImage' },
           },
           arm64: {
-            deb: { url: asset(`ESPHome.Device.Builder_${VERSION}_arm64.deb`), label: 'Download .deb' },
-            rpm: { url: asset(`ESPHome.Device.Builder-${VERSION}-1.aarch64.rpm`), label: 'Download .rpm' },
+            deb: { url: () => urlFor('linux-aarch64', 'deb', `ESPHome.Device.Builder_${VERSION}_arm64.deb`), label: 'Download .deb' },
+            rpm: { url: () => urlFor('linux-aarch64', 'rpm', `ESPHome.Device.Builder-${VERSION}-1.aarch64.rpm`), label: 'Download .rpm' },
             aur: AUR,
-            appimage: { url: asset(`ESPHome.Device.Builder_${VERSION}_aarch64.AppImage`), label: 'Download AppImage' },
+            appimage: { url: () => urlFor('linux-aarch64', 'appimage', `ESPHome.Device.Builder_${VERSION}_aarch64.AppImage`), label: 'Download AppImage' },
           },
         };
         const btn = document.getElementById('linux-download');
@@ -613,8 +674,11 @@
         };
 
         function refresh() {
-          const entry = files[arch.get()][format.get()];
-          btn.href = entry.url;
+          // Same guard as macOS: stale persisted arch or format values fall
+          // back to the defaults instead of throwing.
+          const perArch = files[arch.get()] || files.x64;
+          const entry = perArch[format.get()] || perArch.deb;
+          btn.href = entry.url();
           label.textContent = entry.label;
           Object.keys(installBlocks).forEach((k) => {
             installBlocks[k].hidden = k !== format.get();
@@ -624,6 +688,7 @@
         const format = segmented('#panel-linux [aria-label="Linux package format"] button', 'format', 'deb', refresh);
         const arch = segmented('#panel-linux [aria-label="Linux architecture"] button', 'arch', 'x64', refresh);
         refresh();
+        onManifest.push(refresh);
 
         if (detected === 'linux') {
           if (/aarch64|arm64/i.test(`${platform} ${ua}`)) arch.set('arm64');

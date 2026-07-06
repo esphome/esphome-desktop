@@ -286,6 +286,38 @@ fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
     Ok(true)
 }
 
+/// Put a bundled tool's directory at the front of this process's `PATH`
+/// (Windows only).
+///
+/// If `dir` contains `exe_name`, ensures `dir` is at the front of `PATH`
+/// (prepending it unless it is already present, per [`insert_dir_into_path`]),
+/// logs it, and returns `true`; `true` means the tool exists and its directory
+/// is on `PATH`, not that `PATH` was necessarily modified. If the exe is
+/// missing, warns with `missing_consequence` and returns `false` without
+/// touching `PATH`, leaving the caller to decide whether to bail out or
+/// continue.
+#[cfg(target_os = "windows")]
+fn prepend_bundled_tool(
+    dir: &Path,
+    exe_name: &str,
+    human_name: &str,
+    missing_consequence: &str,
+) -> Result<bool> {
+    use tracing::{info, warn};
+
+    let exe = dir.join(exe_name);
+    if !exe.exists() {
+        warn!(
+            "Bundled {} missing at {:?}; {}",
+            human_name, exe, missing_consequence
+        );
+        return Ok(false);
+    }
+    insert_dir_into_path(dir, PathInsert::Front)?;
+    info!("Using bundled {} at {:?}", human_name, exe);
+    Ok(true)
+}
+
 /// Ensure a usable `git` is on `PATH` for the ESPHome backend we spawn.
 ///
 /// ESPHome / PlatformIO / esphome-device-builder shell out to `git` for
@@ -308,35 +340,28 @@ fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
 pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use tracing::{info, warn};
-
         let git_dir = get_bundled_git_dir(app_handle)?;
-        let git_exe = git_dir.join("git.exe");
-        if !git_exe.exists() {
-            warn!(
-                "Bundled MinGit missing at {:?}; git-dependent features will \
-                 fail until git is on PATH",
-                git_exe
-            );
+        if !prepend_bundled_tool(
+            &git_dir,
+            "git.exe",
+            "MinGit",
+            "git-dependent features will fail until git is on PATH",
+        )? {
             return Ok(());
         }
-
-        // Prepend the bundled git dir so it wins over anything already on PATH.
-        insert_dir_into_path(&git_dir, PathInsert::Front)?;
 
         // Also expose the bundled GNU patch (issue #189) when present. Prepended
         // after git so it too sits ahead of the inherited PATH; only this
         // dedicated dir goes on PATH, not MinGit's full usr/bin, so the build
         // doesn't pick up MSYS sh/find/sort that shadow Windows built-ins.
+        // A missing patch.exe is log-and-continue: git alone is still useful.
         let patch_dir = get_bundled_patch_dir(app_handle)?;
-        if patch_dir.join("patch.exe").exists() {
-            insert_dir_into_path(&patch_dir, PathInsert::Front)?;
-            info!("Using bundled patch at {:?}", patch_dir);
-        } else {
-            warn!("Bundled patch.exe missing at {:?}; micro-opus and other components that need `patch` will fail to build", patch_dir);
-        }
-
-        info!("Using bundled MinGit at {:?}", git_exe);
+        prepend_bundled_tool(
+            &patch_dir,
+            "patch.exe",
+            "patch",
+            "micro-opus and other components that need `patch` will fail to build",
+        )?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -407,25 +432,16 @@ pub fn ensure_homebrew_on_path(app_handle: &AppHandle) -> Result<()> {
 pub fn ensure_ccache_on_path(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use tracing::{info, warn};
-
+        // There is no system ccache on Windows to shadow, so prepend vs append
+        // is immaterial; prepend keeps it consistent with the bundled git/patch
+        // handling above.
         let ccache_dir = get_bundled_ccache_dir(app_handle)?;
-        let ccache_exe = ccache_dir.join("ccache.exe");
-        if !ccache_exe.exists() {
-            warn!(
-                "Bundled ccache missing at {:?}; ESP-IDF builds will run without \
-                 compiler caching",
-                ccache_exe
-            );
-            return Ok(());
-        }
-
-        // Prepend the bundled ccache dir so it wins over anything already on
-        // PATH. There is no system ccache on Windows to shadow, so prepend vs
-        // append is immaterial; prepend keeps it consistent with the bundled
-        // git/patch handling above.
-        insert_dir_into_path(&ccache_dir, PathInsert::Front)?;
-        info!("Using bundled ccache at {:?}", ccache_exe);
+        prepend_bundled_tool(
+            &ccache_dir,
+            "ccache.exe",
+            "ccache",
+            "ESP-IDF builds will run without compiler caching",
+        )?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -666,10 +682,10 @@ fn snapshot_preserved_versions(
 /// gutted stdlib still executes it cleanly while every import fails.
 #[cfg(not(target_os = "windows"))]
 fn interpreter_is_usable(python_bin: &Path) -> bool {
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-c", "import importlib.metadata"]);
-    configure_no_window_command(&mut cmd);
-    matches!(cmd.output(), Ok(o) if o.status.success())
+    matches!(
+        run_python_capture(python_bin, ["-c", "import importlib.metadata"]),
+        Ok(o) if o.status.success()
+    )
 }
 
 /// Read the consecutive-defer counter, returning 0 when the marker is missing
@@ -775,11 +791,7 @@ fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<Strin
         "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
     );
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-c", &script]);
-    configure_no_window_command(&mut cmd);
-    let output = cmd
-        .output()
+    let output = run_python_capture(python_bin, ["-c", &script])
         .with_context(|| format!("Failed to run version probe for {package} via {python_bin:?}"))?;
     parse_probe_output(
         package,
@@ -1014,11 +1026,41 @@ pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
     };
 
     // Try to run esphome version
-    let mut cmd = std::process::Command::new(&python_path);
-    cmd.args(["-m", "esphome", "version"]);
-    configure_no_window_command(&mut cmd);
+    run_python_capture(&python_path, ["-m", "esphome", "version"])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+/// Spawn the given Python interpreter with `args`, suppress the console
+/// window on Windows, and capture its output. This only removes the
+/// spawn/capture boilerplate: it adds no flags of its own (callers pass
+/// exactly the flags they need, `-I` included or not), and callers keep their
+/// own policy for exit status, logging, and stdout/stderr interpretation.
+pub fn run_python_capture<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::io::Result<std::process::Output> {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(args);
+    configure_no_window_command(&mut cmd);
+    cmd.output()
+}
+
+/// [`run_python_capture`], returning the trimmed stdout on a successful exit
+/// and `None` on a non-zero exit. stderr is captured but not returned, so
+/// callers that need it (or the exit status) should use
+/// [`run_python_capture`] directly.
+pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::io::Result<Option<String>> {
+    let output = run_python_capture(python, args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
 }
 
 /// Configure std::process::Command to not create a console window on Windows
@@ -1045,6 +1087,16 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
     {
         let _ = cmd;
     }
+}
+
+/// Build a tokio `pip install` command for the given Python interpreter,
+/// prefilled with `-m pip install` and the Windows no-window flag. Callers
+/// append their own package specs and flags before running it.
+pub fn pip_command(python: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(python);
+    cmd.args(["-m", "pip", "install"]);
+    configure_no_window_tokio_command(&mut cmd);
+    cmd
 }
 
 /// Configure the daemon child's creation flags on Windows: no console window
@@ -1454,17 +1506,9 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::util::unique_temp_dir;
         use std::fs;
         use std::path::Path;
-
-        /// Fresh temp dir per test; process id + tag avoids collisions.
-        fn unique_temp_dir(tag: &str) -> PathBuf {
-            let dir =
-                std::env::temp_dir().join(format!("esphome_cli_cmd_{}_{tag}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).expect("create temp dir");
-            dir
-        }
 
         fn bin_dir(dir: &Path) -> PathBuf {
             let bin = dir.join("bin");
@@ -1842,20 +1886,8 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::util::unique_temp_dir;
         use std::fs;
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        /// Unique temp dir per call so parallel tests never collide.
-        fn unique_temp_dir(tag: &str) -> PathBuf {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            std::env::temp_dir().join(format!(
-                "koan-appindicator-{}-{}-{}",
-                tag,
-                std::process::id(),
-                n
-            ))
-        }
 
         #[test]
         fn candidate_paths_are_all_rooted_in_appdir() {
@@ -2033,6 +2065,8 @@ pub fn is_tray_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::util::unique_temp_dir;
 
     #[test]
     fn path_with_prepended_puts_dir_first() {
@@ -2151,22 +2185,6 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(entries[0].as_os_str().as_bytes(), b"/weird\xffdir");
         assert_eq!(entries[1], PathBuf::from("/opt/homebrew/bin"));
-    }
-
-    /// Unique temp dir per call. Combines the process id with a monotonic
-    /// counter so tests running in parallel within the same process can never
-    /// collide on (or delete) each other's directories.
-    #[cfg(unix)]
-    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "koan-copytest-{}-{}-{}",
-            tag,
-            std::process::id(),
-            n
-        ))
     }
 
     #[cfg(unix)]

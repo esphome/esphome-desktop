@@ -31,15 +31,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Tauri links against the system webkit/appindicator stack on Linux, so
-      # even a plain `cargo test` needs these to compile. Mirror the dependency
-      # set used by the Build workflow's Linux jobs.
+      # even a plain `cargo test` needs these to compile. Same dependency set
+      # as the Build workflow's Linux jobs (shared composite action).
       - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            librsvg2-dev \
-            libayatana-appindicator3-dev
+        uses: ./.github/actions/linux-tauri-deps
 
       # Pin the toolchain version (unlike the Build workflow, which floats
       # `stable`). clippy and rustfmt are *required* gates below, so a floating
@@ -49,24 +44,17 @@ jobs:
       # adopt newer lints. 1.96.0 is the version that established the green
       # clippy/fmt baseline this workflow enforces.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, pinned via toolchain: below
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
+          cache-key: lint-test
+          # The rust-cache#341 workaround (the action's default) only matters
+          # on macOS; this job has always cached ~/.cargo/bin, so keep doing so.
+          cache-bin: "true"
 
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: src-tauri
-          key: lint-test
-
-      # `tauri.conf.json` lists `python`, `git` and `ccache` as bundle
-      # resources. Those directories are gitignored and absent on a fresh
-      # checkout (they're populated by prepare_bundle.sh only for real
-      # bundling). A plain `cargo test`/`clippy` never bundles, but create empty
-      # stubs so config parsing can't trip on the missing paths.
       - name: Stub bundle resource dirs
-        run: mkdir -p src-tauri/python src-tauri/git src-tauri/ccache
+        uses: ./.github/actions/stub-bundle-dirs
 
       # Required gates. clippy and rustfmt were introduced as advisory in the
       # first iteration of this workflow because they had never run in CI and the
@@ -121,29 +109,17 @@ jobs:
       # deps are needed: Tauri uses the system WebView2 (Windows) / WKWebView
       # (macOS), not the GTK/webkit stack.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, pinned via toolchain: below
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
+          cache-key: lint-test-${{ matrix.os }}
 
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: src-tauri
-          key: lint-test-${{ matrix.os }}
-          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
-          # produces broken cargo/rustc symlinks on the new macOS runner image
-          # (matches build.yml). Harmless on Windows.
-          cache-bin: false
-
-      # Stub the gitignored `python`, `git` and `ccache` bundle resources (see
-      # the Linux job). `tauri.conf.json` declares all three at the top-level
-      # `bundle` block, so they're resources on macOS/Windows too (git = MinGit,
-      # ccache = bundled ccache on Windows). `bash` is forced so `mkdir -p` works
-      # on the Windows runner too.
+      # `tauri.conf.json` declares `python`, `git` and `ccache` at the
+      # top-level `bundle` block, so they're resources on macOS/Windows too
+      # (git = MinGit, ccache = bundled ccache on Windows).
       - name: Stub bundle resource dirs
-        shell: bash
-        run: mkdir -p src-tauri/python src-tauri/git src-tauri/ccache
+        uses: ./.github/actions/stub-bundle-dirs
 
       # fmt is cfg-agnostic and already green on Linux; advisory here only to
       # guard against a Windows newline quirk on this first run.
