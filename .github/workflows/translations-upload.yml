@@ -1,0 +1,58 @@
+name: Upload translations
+
+# Push the English source strings to Lokalise whenever en.json lands on
+# main, so translators always see the latest keys. New keys are added and
+# the English copy of existing keys is updated; keys removed from en.json
+# are left in the project (so a moved key keeps its translations for reuse)
+# and translated locales are left untouched (see
+# .github/scripts/translations.py).
+#
+# Automated pushes never prune. To delete keys no longer in en.json (stale
+# keys orphaned by a rename or migration), run this workflow manually from
+# the Actions tab with the `cleanup` input checked.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/translations/en.json"
+      - ".github/scripts/translations.py"
+      - ".github/workflows/translations-upload.yml"
+  workflow_dispatch:
+    inputs:
+      cleanup:
+        description: "Delete Lokalise keys no longer in en.json (prunes stale keys)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Serialize uploads so two quick pushes can't race the same project.
+concurrency:
+  group: lokalise-upload
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload base strings to Lokalise
+    runs-on: ubuntu-22.04
+    # The Lokalise credentials live in the `lokalise` environment.
+    environment: lokalise
+    # Forks can't read the secret; skip there so the job doesn't fail noisily.
+    if: github.repository == 'esphome/esphome-desktop'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Upload to Lokalise
+        env:
+          LOKALISE_API_TOKEN: ${{ secrets.LOKALISE_API_TOKEN }}
+          LOKALISE_PROJECT_ID: ${{ secrets.LOKALISE_PROJECT_ID }}
+          CLEANUP: ${{ inputs.cleanup && '--cleanup' || '' }}
+        run: python3 .github/scripts/translations.py upload $CLEANUP

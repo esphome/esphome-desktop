@@ -17,6 +17,8 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
+use crate::i18n::{t, t_with};
+
 /// Candidate file names for the git executable, most-specific first.
 ///
 /// On Windows git may be installed as `git.exe` (the usual Git-for-Windows
@@ -26,26 +28,6 @@ const GIT_EXECUTABLES: &[&str] = &["git.exe", "git.cmd"];
 
 #[cfg(not(target_os = "windows"))]
 const GIT_EXECUTABLES: &[&str] = &["git"];
-
-const GIT_MISSING_TITLE: &str = "Git is not installed";
-
-/// Body for platforms where the user installs git themselves. macOS has its own
-/// body (we trigger the Command Line Tools installer there instead).
-#[cfg(not(target_os = "macos"))]
-const GIT_MISSING_BODY: &str = "ESPHome uses Git to download external components, remote \
-(github://) packages, voice models, and other dependencies, so many configurations won't \
-compile without it. Install Git, then restart ESPHome Device Builder so it can detect it.";
-
-/// macOS-specific body. We trigger Apple's Command Line Tools installer (which
-/// includes git) via `xcode-select --install`, so point the user at that
-/// dialog rather than the daunting git-scm.com download.
-#[cfg(target_os = "macos")]
-const GIT_MISSING_BODY_MACOS: &str = "ESPHome uses Git to download external components, remote \
-(github://) packages, voice models, and other dependencies, so many configurations won't \
-compile without it. macOS is opening its Command Line Tools installer, which includes Git \u{2014} \
-finish that install, then restart ESPHome Device Builder so it can detect it.";
-
-const PARENT_GIT_REPO_TITLE: &str = "A parent folder is a Git repository";
 
 /// Iterate over every git executable found on a PATH-style value, in
 /// left-to-right order.
@@ -167,11 +149,11 @@ fn command_line_tools_installed() -> bool {
 }
 
 /// Show the git-missing notification with the given body.
-fn show_git_missing_notification(app_handle: &AppHandle, body: &str) {
+fn show_git_missing_notification(app_handle: &AppHandle, body: String) {
     if let Err(e) = app_handle
         .notification()
         .builder()
-        .title(GIT_MISSING_TITLE)
+        .title(t("git_check.missing_title"))
         .body(body)
         .show()
     {
@@ -231,15 +213,18 @@ pub fn notify_if_git_missing(app_handle: &AppHandle) {
          components will fail until git is installed (see issue #113)"
     );
 
+    // macOS has its own body: we trigger Apple's Command Line Tools installer
+    // (which includes git) via `xcode-select --install`, so point the user at
+    // that dialog rather than the daunting git-scm.com download.
     #[cfg(target_os = "macos")]
     {
         trigger_command_line_tools_install();
-        show_git_missing_notification(app_handle, GIT_MISSING_BODY_MACOS);
+        show_git_missing_notification(app_handle, t("git_check.missing_body_macos"));
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        show_git_missing_notification(app_handle, GIT_MISSING_BODY);
+        show_git_missing_notification(app_handle, t("git_check.missing_body"));
     }
 }
 
@@ -347,20 +332,18 @@ pub fn notify_if_config_dir_in_git_repo(app_handle: &AppHandle, config_dir: &Pat
         repo_root.display()
     );
 
-    let body = format!(
-        "Your ESPHome configuration ({}) sits inside a Git repository rooted at \
-         {}. ESP-IDF builds can pick up that repository and fail to compile with \
-         an opaque CMake \"head-ref\" error. If your devices fail to build, \
-         remove the stray .git entry (file or folder) from that repository root, \
-         or move your ESPHome configuration outside that repository.",
-        config_dir.display(),
-        repo_root.display()
+    let body = t_with(
+        "git_check.parent_repo_body",
+        &[
+            ("config_dir", &config_dir.display().to_string()),
+            ("repo_root", &repo_root.display().to_string()),
+        ],
     );
 
     if let Err(e) = app_handle
         .notification()
         .builder()
-        .title(PARENT_GIT_REPO_TITLE)
+        .title(t("git_check.parent_repo_title"))
         .body(body)
         .show()
     {

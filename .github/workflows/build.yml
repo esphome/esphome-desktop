@@ -20,11 +20,72 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    # Only run release builds when the Release Drafter workflow succeeded.
+  # Release builds embed every translated locale (src-tauri/build.rs picks up
+  # whatever JSON files sit in src-tauri/translations/ at compile time). The
+  # download runs in its own small job so the Lokalise API token is only ever
+  # exposed here — never to the build matrix, which runs pip installs and the
+  # full bundler. PR builds skip this and build English-only.
+  translations:
+    name: Download translations from Lokalise
     if: >-
-      github.event_name != 'workflow_run' ||
+      github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    # The Lokalise credentials live in the `lokalise` environment.
+    environment: lokalise
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      - name: Download from Lokalise
+        # Non-English locales are gitignored, so pull them before building to
+        # ship fully-translated binaries. Unset secrets downgrade the release
+        # to English-only with a warning rather than failing it, so releases
+        # keep flowing while the Lokalise project is being bootstrapped (and
+        # on forks, where the secrets are unreachable). Once translations are
+        # established, tighten this to a hard failure on the canonical repo
+        # like device-builder-frontend does.
+        env:
+          LOKALISE_API_TOKEN: ${{ secrets.LOKALISE_API_TOKEN }}
+          LOKALISE_PROJECT_ID: ${{ secrets.LOKALISE_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LOKALISE_API_TOKEN}" ] || [ -z "${LOKALISE_PROJECT_ID}" ]; then
+            echo "::warning::Lokalise secrets unset; building English-only."
+            exit 0
+          fi
+          python3 .github/scripts/translations.py download
+
+      - name: Upload translations artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: translations
+          # en.json is always present, so the artifact stays non-empty even
+          # when no locales were downloaded — the build job's restore step
+          # then never fails on a missing artifact.
+          path: src-tauri/translations/
+
+  build:
+    # Only run release builds when the Release Drafter workflow succeeded AND
+    # the translations job delivered its artifact — a failed Lokalise download
+    # must block the release rather than silently shipping English-only
+    # binaries. PR/dispatch builds run regardless (translations is skipped
+    # there, hence the `always()`).
+    needs: translations
+    if: >-
+      always() && (
+        (github.event_name != 'workflow_run' && needs.translations.result == 'skipped') ||
+        (github.event.workflow_run.conclusion == 'success' && needs.translations.result == 'success')
+      )
     permissions:
       contents: read
     strategy:
@@ -85,6 +146,19 @@ jobs:
           # For workflow_run events, check out the commit that triggered the
           # Release Drafter workflow (the latest push to main).
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      # Locale files come from the `translations` job (which holds the
+      # Lokalise credentials); this job never sees the API token. The
+      # artifact always carries en.json, so this overwrites the checked-out
+      # copy with itself and adds any downloaded locales, which
+      # src-tauri/build.rs then embeds into the binary. PR builds skip this
+      # and build English-only.
+      - name: Restore translations
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: translations
+          path: src-tauri/translations/
 
       # Linux-specific dependencies
       - name: Install Linux dependencies

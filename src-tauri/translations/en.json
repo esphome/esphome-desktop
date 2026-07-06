@@ -1,0 +1,119 @@
+{
+  "tray": {
+    "status_running": "Status: Running",
+    "status_starting": "Status: Starting...",
+    "status_stopped": "Status: Stopped",
+    "desktop_version": "Desktop: {version}",
+    "esphome_version": "ESPHome: {version}",
+    "builder_version": "Device Builder: {version}",
+    "port": "Port: {port}",
+    "open_dashboard": "Open Dashboard",
+    "release_channel": "Release Channel",
+    "backend": "Backend",
+    "startup": "Startup",
+    "launch_at_login": "Launch at Login",
+    "dont_launch_at_login": "Don't Launch at Login",
+    "check_updates": "Check for Updates...",
+    "view_logs": "View Logs...",
+    "open_config": "Open Config Folder...",
+    "restart_dashboard": "Restart Dashboard",
+    "quit": "Quit ESPHome"
+  },
+  "version": {
+    "detecting": "detecting…",
+    "not_installed": "not installed",
+    "unknown": "unknown"
+  },
+  "common": {
+    "update_now": "Update Now",
+    "later": "Later",
+    "cancel": "Cancel",
+    "switch": "Switch"
+  },
+  "errors": {
+    "stop_dashboard_failed": "Failed to stop dashboard: {error}",
+    "stop_backend_failed": "Failed to stop backend: {error}"
+  },
+  "update": {
+    "update_failed_title": "Update Failed",
+    "update_partial_title": "Update Partially Complete",
+    "update_complete_title": "Update Complete",
+    "check_failed_title": "Update Check Failed",
+    "none_title": "No Updates Available",
+    "available_title": "Update Available",
+    "esphome_update_failed": "Failed to update ESPHome: {error}",
+    "esphome_updated": "ESPHome has been updated to version {version}.",
+    "esphome_updated_dev": "ESPHome has been updated to the latest dev version.",
+    "esphome_partial": "ESPHome updated to {version}, but failed to restart dashboard: {error}",
+    "esphome_latest": "ESPHome {version} is the latest version.",
+    "esphome_notification_title": "ESPHome Update Available",
+    "esphome_notification_body": "ESPHome {latest} ({channel}) is available (you have {installed}). {hint}",
+    "available_prompt": "ESPHome {latest} ({channel}) is available.\n\nYou currently have version {installed}.\n\nWould you like to update now?",
+    "dev_channel_title": "Dev Channel Update",
+    "dev_channel_prompt": "You are on the dev channel.\n\nCurrently installed: {version}\n\nThis will reinstall ESPHome from the latest commit on GitHub.\n\nWould you like to update now?",
+    "not_installed": "ESPHome is not installed",
+    "detect_failed": "Could not detect installed version: {error}",
+    "latest_unknown": "Could not determine latest version",
+    "check_failed": "Failed to check for updates: {error}",
+    "builder_update_failed": "Failed to update ESPHome Device Builder: {error}",
+    "builder_updated": "ESPHome Device Builder has been updated to version {version}.",
+    "builder_partial": "Device builder updated to {version}, but failed to restart backend: {error}",
+    "builder_notification_title": "ESPHome Device Builder Update Available",
+    "builder_notification_body": "ESPHome Device Builder {latest} is available (you have {installed}). {hint}",
+    "builder_available_title": "Device Builder Update Available",
+    "builder_available_prompt": "ESPHome Device Builder {latest} is available.\n\nYou currently have version {installed}.\n\nWould you like to update now?"
+  },
+  "app_update": {
+    "available_title": "Desktop Update Available",
+    "prompt": "ESPHome Device Builder {new} is available.\n\nYou currently have version {current}.\n\nWould you like to download and install it now?",
+    "prompt_with_notes": "ESPHome Device Builder {new} is available.\n\nYou currently have version {current}.\n\nRelease notes:\n{notes}\n\nWould you like to download and install it now?",
+    "latest": "ESPHome Device Builder {version} is the latest version.",
+    "updater_unavailable": "Updater not available: {error}",
+    "update_failed": "Failed to update: {error}",
+    "notification_body": "Version {latest} is available (you have {current}). {hint}",
+    "installed_title": "Update Installed",
+    "installed_body": "ESPHome Device Builder {version} has been installed.\n\nIt will now restart to apply the update."
+  },
+  "switch_channel": {
+    "title": "Switch Release Channel",
+    "dev_warning": "Warning: The dev channel installs ESPHome directly from GitHub and does NOT support automatic updates. You will need to manually check for updates.",
+    "prompt": "Switch ESPHome from {old} to {new} channel?\n\nThis will stop the dashboard, install the appropriate version, and restart.",
+    "switched_title": "Channel Switched",
+    "switched": "Successfully switched to the {channel} release channel.",
+    "failed_title": "Channel Switch Failed",
+    "failed": "Failed to switch channel: {error}",
+    "partial_title": "Channel Switch Partially Complete",
+    "partial": "Switched to {channel} channel, but failed to restart dashboard: {error}"
+  },
+  "switch_backend": {
+    "title": "Switch Backend",
+    "prompt": "Switch to {backend}?\n\nThis will install the `esphome-device-builder` Python package, stop the current backend, and restart with the new one.",
+    "switched_title": "Backend Switched",
+    "ready": "{backend} is ready.",
+    "not_ready": "Switched to {backend}, but it didn't become ready in time. Check the logs.",
+    "failed_title": "Backend Switch Failed",
+    "install_failed": "Failed to install esphome-device-builder: {error}",
+    "start_failed": "Failed to start backend: {error}"
+  },
+  "daemon": {
+    "stopped_title": "{backend} stopped",
+    "stopped_body": "{backend} exited unexpectedly ({status}). Open the tray menu and choose \"View Logs...\" for details."
+  },
+  "git_check": {
+    "missing_title": "Git is not installed",
+    "missing_body": "ESPHome uses Git to download external components, remote (github://) packages, voice models, and other dependencies, so many configurations won't compile without it. Install Git, then restart ESPHome Device Builder so it can detect it.",
+    "missing_body_macos": "ESPHome uses Git to download external components, remote (github://) packages, voice models, and other dependencies, so many configurations won't compile without it. macOS is opening its Command Line Tools installer, which includes Git — finish that install, then restart ESPHome Device Builder so it can detect it.",
+    "parent_repo_title": "A parent folder is a Git repository",
+    "parent_repo_body": "Your ESPHome configuration ({config_dir}) sits inside a Git repository rooted at {repo_root}. ESP-IDF builds can pick up that repository and fail to compile with an opaque CMake \"head-ref\" error. If your devices fail to build, remove the stray .git entry (file or folder) from that repository root, or move your ESPHome configuration outside that repository."
+  },
+  "platform": {
+    "remove_legacy_title": "Remove old ESPHome Builder",
+    "remove_legacy_prompt": "An older version of this app named “ESPHome Builder” was found in your Applications folder. Move it to the Trash?\n\nYour settings and configs are not affected.",
+    "move_to_trash": "Move to Trash",
+    "keep": "Keep"
+  },
+  "hint": {
+    "updates_menu": "Open the tray menu and choose \"Check for Updates...\" to update.",
+    "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update."
+  }
+}

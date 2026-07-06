@@ -15,6 +15,7 @@ use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
 use crate::control::ops::{self, SwitchOutcome, UpdateGuard};
+use crate::i18n::{t, t_with};
 use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
@@ -50,9 +51,9 @@ mod ids {
 pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<Menu<tauri::Wry>> {
     let settings = async_runtime::block_on(state.settings.read());
     let status_text = if state.daemon.is_running() {
-        "Status: Running"
+        t("tray.status_running")
     } else {
-        "Status: Starting..."
+        t("tray.status_starting")
     };
 
     // Create status item and store it for later updates
@@ -63,16 +64,25 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Create desktop app version display item (Tauri app version from
     // tauri.conf.json — fixed for the lifetime of the process, never updated).
-    let app_version_text = format!("Desktop: {}", app_handle.package_info().version);
+    let app_version_text = t_with(
+        "tray.desktop_version",
+        &[("version", &app_handle.package_info().version.to_string())],
+    );
     let app_version_item = MenuItemBuilder::with_id(ids::APP_VERSION, app_version_text)
         .enabled(false)
         .build(app_handle)?;
 
     // Create ESPHome version display item
-    let version_text = match &settings.installed_version {
-        Some(v) => format!("ESPHome: {}", v),
-        None => "ESPHome: unknown".to_string(),
-    };
+    let version_text = t_with(
+        "tray.esphome_version",
+        &[(
+            "version",
+            settings
+                .installed_version
+                .as_deref()
+                .unwrap_or(&t("version.unknown")),
+        )],
+    );
     let version_item = MenuItemBuilder::with_id(ids::VERSION, version_text)
         .enabled(false)
         .build(app_handle)?;
@@ -83,10 +93,15 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     // too slow / too risky (could hang) to run synchronously in the setup
     // path, so we start with a "detecting…" placeholder and refresh from a
     // background task immediately below.
-    let builder_version_item =
-        MenuItemBuilder::with_id(ids::BUILDER_VERSION, "Device Builder: detecting…")
-            .enabled(false)
-            .build(app_handle)?;
+    let builder_version_item = MenuItemBuilder::with_id(
+        ids::BUILDER_VERSION,
+        t_with(
+            "tray.builder_version",
+            &[("version", &t("version.detecting"))],
+        ),
+    )
+    .enabled(false)
+    .build(app_handle)?;
     let _ = BUILDER_VERSION_ITEM.set(builder_version_item.clone());
 
     // Kick off async detection of the installed `esphome-device-builder`
@@ -122,11 +137,12 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let _ = CHANNEL_BETA_ITEM.set(channel_beta.clone());
     let _ = CHANNEL_DEV_ITEM.set(channel_dev.clone());
 
-    let channel_submenu = SubmenuBuilder::with_id(app_handle, "release_channel", "Release Channel")
-        .item(&channel_stable)
-        .item(&channel_beta)
-        .item(&channel_dev)
-        .build()?;
+    let channel_submenu =
+        SubmenuBuilder::with_id(app_handle, "release_channel", t("tray.release_channel"))
+            .item(&channel_stable)
+            .item(&channel_beta)
+            .item(&channel_dev)
+            .build()?;
 
     // Backend submenu items
     let current_backend = settings.backend;
@@ -151,7 +167,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let _ = BACKEND_BUILDER_STABLE_ITEM.set(backend_builder_stable.clone());
     let _ = BACKEND_BUILDER_BETA_ITEM.set(backend_builder_beta.clone());
 
-    let backend_submenu = SubmenuBuilder::with_id(app_handle, "backend", "Backend")
+    let backend_submenu = SubmenuBuilder::with_id(app_handle, "backend", t("tray.backend"))
         .item(&backend_builder_stable)
         .item(&backend_builder_beta)
         .build()?;
@@ -165,26 +181,26 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .unwrap_or(settings.launch_at_startup);
     let startup_enable = MenuItemBuilder::with_id(
         ids::STARTUP_ENABLE,
-        radio_label("Launch at Login", launch_at_startup),
+        radio_label(&t("tray.launch_at_login"), launch_at_startup),
     )
     .build(app_handle)?;
     let startup_disable = MenuItemBuilder::with_id(
         ids::STARTUP_DISABLE,
-        radio_label("Don't Launch at Login", !launch_at_startup),
+        radio_label(&t("tray.dont_launch_at_login"), !launch_at_startup),
     )
     .build(app_handle)?;
 
     let _ = STARTUP_ENABLE_ITEM.set(startup_enable.clone());
     let _ = STARTUP_DISABLE_ITEM.set(startup_disable.clone());
 
-    let startup_submenu = SubmenuBuilder::with_id(app_handle, "startup", "Startup")
+    let startup_submenu = SubmenuBuilder::with_id(app_handle, "startup", t("tray.startup"))
         .item(&startup_enable)
         .item(&startup_disable)
         .build()?;
 
     let menu = MenuBuilder::new(app_handle)
         .item(
-            &MenuItemBuilder::with_id(ids::OPEN_DASHBOARD, "Open Dashboard")
+            &MenuItemBuilder::with_id(ids::OPEN_DASHBOARD, t("tray.open_dashboard"))
                 .accelerator("CmdOrCtrl+O")
                 .build(app_handle)?,
         )
@@ -194,27 +210,30 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
         .item(&version_item)
         .item(&builder_version_item)
         .item(
-            &MenuItemBuilder::with_id(ids::PORT, format!("Port: {}", settings.port))
-                .enabled(false)
-                .build(app_handle)?,
+            &MenuItemBuilder::with_id(
+                ids::PORT,
+                t_with("tray.port", &[("port", &settings.port.to_string())]),
+            )
+            .enabled(false)
+            .build(app_handle)?,
         )
         .separator()
         .item(&backend_submenu)
         .item(&channel_submenu)
         .item(&startup_submenu)
         .item(
-            &MenuItemBuilder::with_id(ids::CHECK_UPDATES, "Check for Updates...")
+            &MenuItemBuilder::with_id(ids::CHECK_UPDATES, t("tray.check_updates"))
                 .build(app_handle)?,
         )
         .separator()
-        .item(&MenuItemBuilder::with_id(ids::VIEW_LOGS, "View Logs...").build(app_handle)?)
+        .item(&MenuItemBuilder::with_id(ids::VIEW_LOGS, t("tray.view_logs")).build(app_handle)?)
+        .item(&MenuItemBuilder::with_id(ids::OPEN_CONFIG, t("tray.open_config")).build(app_handle)?)
         .item(
-            &MenuItemBuilder::with_id(ids::OPEN_CONFIG, "Open Config Folder...")
+            &MenuItemBuilder::with_id(ids::RESTART, t("tray.restart_dashboard"))
                 .build(app_handle)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::RESTART, "Restart Dashboard").build(app_handle)?)
         .separator()
-        .item(&MenuItemBuilder::with_id(ids::QUIT, "Quit ESPHome").build(app_handle)?)
+        .item(&MenuItemBuilder::with_id(ids::QUIT, t("tray.quit")).build(app_handle)?)
         .build()?;
 
     // Set up menu event handler
@@ -253,9 +272,9 @@ static STARTUP_DISABLE_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sy
 /// Update the tray status text
 pub fn update_status(_app_handle: &AppHandle, running: bool) {
     let status_text = if running {
-        "Status: Running"
+        t("tray.status_running")
     } else {
-        "Status: Stopped"
+        t("tray.status_stopped")
     };
 
     if let Some(item) = STATUS_ITEM.get() {
@@ -266,14 +285,14 @@ pub fn update_status(_app_handle: &AppHandle, running: bool) {
 /// Update the version display in the tray menu.
 pub fn update_version(version: &str) {
     if let Some(item) = VERSION_ITEM.get() {
-        let _ = item.set_text(format!("ESPHome: {}", version));
+        let _ = item.set_text(t_with("tray.esphome_version", &[("version", version)]));
     }
 }
 
 /// Update the `esphome-device-builder` version display in the tray menu.
 pub fn update_builder_version(version: &str) {
     if let Some(item) = BUILDER_VERSION_ITEM.get() {
-        let _ = item.set_text(format!("Device Builder: {}", version));
+        let _ = item.set_text(t_with("tray.builder_version", &[("version", version)]));
     }
 }
 
@@ -318,10 +337,10 @@ pub(crate) fn update_backend_checks(backend: Backend) {
 /// Update the startup menu item labels to reflect whether autostart is enabled.
 pub(crate) fn update_startup_checks(enabled: bool) {
     if let Some(item) = STARTUP_ENABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Launch at Login", enabled));
+        let _ = item.set_text(radio_label(&t("tray.launch_at_login"), enabled));
     }
     if let Some(item) = STARTUP_DISABLE_ITEM.get() {
-        let _ = item.set_text(radio_label("Don't Launch at Login", !enabled));
+        let _ = item.set_text(radio_label(&t("tray.dont_launch_at_login"), !enabled));
     }
 }
 
@@ -331,10 +350,10 @@ pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
     // real detection failure ("unknown") instead of collapsing both.
     let version = match crate::update::installed_esphome_version(app_handle) {
         Ok(Some(v)) => v,
-        Ok(None) => "not installed".to_string(),
+        Ok(None) => t("version.not_installed"),
         Err(e) => {
             warn!("Could not detect ESPHome version: {}", e);
-            "unknown".to_string()
+            t("version.unknown")
         }
     };
     update_version(&version);
@@ -349,17 +368,17 @@ pub(crate) async fn refresh_builder_version_display(app_handle: &AppHandle) {
     let label = tokio::task::spawn_blocking(move || {
         match crate::update::get_installed_device_builder_version(&app) {
             Ok(Some(v)) => v,
-            Ok(None) => "not installed".to_string(),
+            Ok(None) => t("version.not_installed"),
             Err(e) => {
                 warn!("Could not detect esphome-device-builder version: {}", e);
-                "unknown".to_string()
+                t("version.unknown")
             }
         }
     })
     .await
     .unwrap_or_else(|e| {
         warn!("Device-builder version detection task failed: {}", e);
-        "unknown".to_string()
+        t("version.unknown")
     });
     update_builder_version(&label);
 }
@@ -425,8 +444,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                         error!("Failed to stop backend for update: {}", e);
                         crate::dialog::notice(
                             &app,
-                            "Update Failed",
-                            format!("Failed to stop dashboard: {}", e),
+                            &t("update.update_failed_title"),
+                            t_with("errors.stop_dashboard_failed", &[("error", &e.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -450,10 +469,10 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                                 error!("Failed to restart backend after update: {}", e);
                                 crate::dialog::notice(
                                     &app,
-                                    "Update Partially Complete",
-                                    format!(
-                                        "ESPHome updated to {}, but failed to restart dashboard: {}",
-                                        version, e
+                                    &t("update.update_partial_title"),
+                                    t_with(
+                                        "update.esphome_partial",
+                                        &[("version", version.as_str()), ("error", &e.to_string())],
                                     ),
                                     MessageDialogKind::Warning,
                                 )
@@ -461,14 +480,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                             } else {
                                 update_status(&app, true);
                                 let msg = if channel == ReleaseChannel::Dev {
-                                    "ESPHome has been updated to the latest dev version."
-                                        .to_string()
+                                    t("update.esphome_updated_dev")
                                 } else {
-                                    format!("ESPHome has been updated to version {}.", version)
+                                    t_with("update.esphome_updated", &[("version", &version)])
                                 };
                                 crate::dialog::notice(
                                     &app,
-                                    "Update Complete",
+                                    &t("update.update_complete_title"),
                                     msg,
                                     MessageDialogKind::Info,
                                 )
@@ -479,8 +497,11 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                             error!("Update failed: {}", e);
                             crate::dialog::notice(
                                 &app,
-                                "Update Failed",
-                                format!("Failed to update ESPHome: {}", e),
+                                &t("update.update_failed_title"),
+                                t_with(
+                                    "update.esphome_update_failed",
+                                    &[("error", &e.to_string())],
+                                ),
                                 MessageDialogKind::Error,
                             )
                             .await;
@@ -517,8 +538,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     error!("Failed to stop backend for device-builder update: {}", e);
                     crate::dialog::notice(
                         &app,
-                        "Update Failed",
-                        format!("Failed to stop backend: {}", e),
+                        &t("update.update_failed_title"),
+                        t_with("errors.stop_backend_failed", &[("error", &e.to_string())]),
                         MessageDialogKind::Error,
                     )
                     .await;
@@ -543,10 +564,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                             );
                             crate::dialog::notice(
                                 &app,
-                                "Update Partially Complete",
-                                format!(
-                                    "Device builder updated to {}, but failed to restart backend: {}",
-                                    builder_version, e
+                                &t("update.update_partial_title"),
+                                t_with(
+                                    "update.builder_partial",
+                                    &[
+                                        ("version", builder_version.as_str()),
+                                        ("error", &e.to_string()),
+                                    ],
                                 ),
                                 MessageDialogKind::Warning,
                             )
@@ -555,11 +579,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                             update_status(&app, true);
                             crate::dialog::notice(
                                 &app,
-                                "Update Complete",
-                                format!(
-                                    "ESPHome Device Builder has been updated to version {}.",
-                                    builder_version
-                                ),
+                                &t("update.update_complete_title"),
+                                t_with("update.builder_updated", &[("version", &builder_version)]),
                                 MessageDialogKind::Info,
                             )
                             .await;
@@ -569,8 +590,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                         error!("Device-builder update failed: {}", e);
                         crate::dialog::notice(
                             &app,
-                            "Update Failed",
-                            format!("Failed to update ESPHome Device Builder: {}", e),
+                            &t("update.update_failed_title"),
+                            t_with("update.builder_update_failed", &[("error", &e.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -611,19 +632,26 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 }
 
                 // Confirm the channel switch with the user.
-                let warning = if new_channel == ReleaseChannel::Dev {
-                    "Warning: The dev channel installs ESPHome directly from GitHub and does NOT support automatic updates. You will need to manually check for updates.\n\n"
-                } else {
-                    ""
-                };
-
-                let msg = format!(
-                    "{}Switch ESPHome from {} to {} channel?\n\nThis will stop the dashboard, install the appropriate version, and restart.",
-                    warning, old_channel, new_channel
+                let prompt = t_with(
+                    "switch_channel.prompt",
+                    &[
+                        ("old", &old_channel.to_string()),
+                        ("new", &new_channel.to_string()),
+                    ],
                 );
-                let confirmed =
-                    crate::dialog::confirm(&app, "Switch Release Channel", msg, "Switch", "Cancel")
-                        .await;
+                let msg = if new_channel == ReleaseChannel::Dev {
+                    format!("{}\n\n{}", t("switch_channel.dev_warning"), prompt)
+                } else {
+                    prompt
+                };
+                let confirmed = crate::dialog::confirm(
+                    &app,
+                    &t("switch_channel.title"),
+                    msg,
+                    &t("common.switch"),
+                    &t("common.cancel"),
+                )
+                .await;
 
                 if !confirmed {
                     // Revert the check marks
@@ -639,13 +667,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 {
                     SwitchOutcome::Unchanged => {}
                     SwitchOutcome::Success { .. } => {
-                        let msg = format!(
-                            "Successfully switched to the {} release channel.",
-                            new_channel
+                        let msg = t_with(
+                            "switch_channel.switched",
+                            &[("channel", &new_channel.to_string())],
                         );
                         crate::dialog::notice(
                             &app,
-                            "Channel Switched",
+                            &t("switch_channel.switched_title"),
                             msg,
                             MessageDialogKind::Info,
                         )
@@ -654,8 +682,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::StopFailed(e) => {
                         crate::dialog::notice(
                             &app,
-                            "Channel Switch Failed",
-                            format!("Failed to stop dashboard: {}", e),
+                            &t("switch_channel.failed_title"),
+                            t_with("errors.stop_dashboard_failed", &[("error", &e.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -663,8 +691,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::InstallFailed { error, .. } => {
                         crate::dialog::notice(
                             &app,
-                            "Channel Switch Failed",
-                            format!("Failed to switch channel: {}", error),
+                            &t("switch_channel.failed_title"),
+                            t_with("switch_channel.failed", &[("error", &error.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -672,10 +700,13 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::StartFailed(e) => {
                         crate::dialog::notice(
                             &app,
-                            "Channel Switch Partially Complete",
-                            format!(
-                                "Switched to {} channel, but failed to restart dashboard: {}",
-                                new_channel, e
+                            &t("switch_channel.partial_title"),
+                            t_with(
+                                "switch_channel.partial",
+                                &[
+                                    ("channel", &new_channel.to_string()),
+                                    ("error", &e.to_string()),
+                                ],
                             ),
                             MessageDialogKind::Warning,
                         )
@@ -705,14 +736,18 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                 }
 
                 // Confirm the switch with the user.
-                let msg = format!(
-                    "Switch to {}?\n\n\
-                     This will install the `esphome-device-builder` Python package, \
-                     stop the current backend, and restart with the new one.",
-                    new_backend
+                let msg = t_with(
+                    "switch_backend.prompt",
+                    &[("backend", &new_backend.to_string())],
                 );
-                let confirmed =
-                    crate::dialog::confirm(&app, "Switch Backend", msg, "Switch", "Cancel").await;
+                let confirmed = crate::dialog::confirm(
+                    &app,
+                    &t("switch_backend.title"),
+                    msg,
+                    &t("common.switch"),
+                    &t("common.cancel"),
+                )
+                .await;
 
                 if !confirmed {
                     update_backend_checks(old_backend);
@@ -727,17 +762,20 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::Unchanged => {}
                     SwitchOutcome::Success { ready } => {
                         let body = if ready {
-                            format!("{} is ready.", new_backend)
+                            t_with(
+                                "switch_backend.ready",
+                                &[("backend", &new_backend.to_string())],
+                            )
                         } else {
-                            format!(
-                                "Switched to {}, but it didn't become ready in time. Check the logs.",
-                                new_backend
+                            t_with(
+                                "switch_backend.not_ready",
+                                &[("backend", &new_backend.to_string())],
                             )
                         };
                         if let Err(e) = app
                             .notification()
                             .builder()
-                            .title("Backend Switched")
+                            .title(t("switch_backend.switched_title"))
                             .body(body)
                             .show()
                         {
@@ -747,8 +785,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::StopFailed(e) => {
                         crate::dialog::notice(
                             &app,
-                            "Backend Switch Failed",
-                            format!("Failed to stop backend: {}", e),
+                            &t("switch_backend.failed_title"),
+                            t_with("errors.stop_backend_failed", &[("error", &e.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -756,8 +794,11 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::InstallFailed { error, .. } => {
                         crate::dialog::notice(
                             &app,
-                            "Backend Switch Failed",
-                            format!("Failed to install esphome-device-builder: {}", error),
+                            &t("switch_backend.failed_title"),
+                            t_with(
+                                "switch_backend.install_failed",
+                                &[("error", &error.to_string())],
+                            ),
                             MessageDialogKind::Error,
                         )
                         .await;
@@ -765,8 +806,8 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     SwitchOutcome::StartFailed(e) => {
                         crate::dialog::notice(
                             &app,
-                            "Backend Switch Failed",
-                            format!("Failed to start backend: {}", e),
+                            &t("switch_backend.failed_title"),
+                            t_with("switch_backend.start_failed", &[("error", &e.to_string())]),
                             MessageDialogKind::Error,
                         )
                         .await;

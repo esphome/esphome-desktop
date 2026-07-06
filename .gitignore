@@ -17,6 +17,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Translations: en.json is the committed source of truth; every other locale
+# is downloaded from Lokalise by CI at release time (see
+# .github/scripts/translations.py) and must not be committed.
+src-tauri/translations/*.json
+!src-tauri/translations/en.json
+
 # Python bundles (downloaded by build scripts)
 src-tauri/python/
 # Bundled MinGit on Windows (downloaded by build scripts)
