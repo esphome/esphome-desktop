@@ -91,19 +91,13 @@ jobs:
         if: matrix.platform == 'linux'
         uses: ./.github/actions/linux-tauri-deps
 
+      # Floating `stable` toolchain (the action's default), unlike the pinned
+      # lint gates in lint-test.yml.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.rust_target }}
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: src-tauri
-          key: ${{ matrix.target }}
-          # Workaround for Swatinem/rust-cache#341 — caching ~/.cargo/bin
-          # produces broken cargo/rustc symlinks on the new macOS runner image.
-          cache-bin: false
+          cache-key: ${{ matrix.target }}
 
       # Resolve a tauri-cli version from the locked `tauri` crate version so it
       # tracks Dependabot's cargo bumps automatically (no hardcoded version to go
