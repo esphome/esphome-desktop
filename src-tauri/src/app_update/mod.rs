@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::MessageDialogKind;
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{debug, error, info, warn};
 
@@ -121,18 +120,13 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                 "Desktop update available in background: {} (current: {})",
                 update.version, update.current_version
             );
-            if let Err(e) = app_handle
-                .notification()
-                .builder()
-                .title("ESPHome Device Builder Update Available")
-                .body(format!(
-                    "Version {} is available (you have {}). {}",
-                    update.version,
-                    update.current_version,
-                    crate::updates_menu_hint(tray_available)
-                ))
-                .show()
-            {
+            if let Err(e) = crate::update::notify_update_available(
+                app_handle,
+                "ESPHome Device Builder Update Available",
+                &format!("Version {}", update.version),
+                &update.current_version,
+                tray_available,
+            ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
             NextStep::Skip
