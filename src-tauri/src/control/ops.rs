@@ -622,7 +622,15 @@ async fn update_device_builder_package(
                 display_name: "device builder",
             },
             display_target: |latest: &str| latest.to_string(),
-            install: |_target| async move { state.update_checker.install_device_builder(app).await },
+            // Reuse the version the availability check just resolved: no
+            // second PyPI query, and the "updating … to X" progress line can't
+            // disagree with what actually gets installed.
+            install: |target: String| async move {
+                state
+                    .update_checker
+                    .install_device_builder(app, &target)
+                    .await
+            },
             refresh: || tray::refresh_builder_version_display(app),
         },
     )

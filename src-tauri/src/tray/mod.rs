@@ -484,7 +484,11 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                     return;
                 }
 
-                match state.update_checker.install_device_builder(&app).await {
+                match state
+                    .update_checker
+                    .install_device_builder(&app, &builder_version)
+                    .await
+                {
                     Ok(()) => {
                         info!("Device builder updated successfully to {}", builder_version);
 
@@ -652,11 +656,12 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
             let state = state.clone();
             async_runtime::spawn(async move {
                 // restart() is a stop()->start() sequence, so it must hold the
-                // same re-entrancy guard as the channel switch arm.
-                // Without it a Restart click during an in-flight switch can run
-                // start() with the OLD version before the switch persists the
-                // new one, leaving the running process out of sync with the
-                // saved settings and tray radio state.
+                // same re-entrancy guard as the release-channel switch arm.
+                // Without it a Restart click during an in-flight channel
+                // switch can run start() with the old channel's ESPHome
+                // install before the switch persists the new selection,
+                // leaving the running process out of sync with the saved
+                // settings and tray radio state.
                 let guard = guard_or_return!(state, "restart");
                 info!("Restarting ESPHome backend");
                 if let Err(e) = ops::restart_daemon(&state, false, &guard, &|_, _| {}).await {

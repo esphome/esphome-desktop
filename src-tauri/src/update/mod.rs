@@ -319,41 +319,32 @@ impl UpdateChecker {
         }
     }
 
-    /// Install or upgrade the `esphome-device-builder` package from PyPI
-    /// (stable releases only).
-    pub async fn install_device_builder(&self, app_handle: &AppHandle) -> Result<()> {
+    /// Install or upgrade the `esphome-device-builder` package from PyPI,
+    /// pinned to `version` — the release the caller already resolved via
+    /// [`Self::check_device_builder`] (stable releases only). Taking the
+    /// resolved version avoids a second PyPI query here and guarantees the
+    /// version the caller reported is exactly the one that gets installed,
+    /// even if a new release lands between check and install.
+    pub async fn install_device_builder(
+        &self,
+        app_handle: &AppHandle,
+        version: &str,
+    ) -> Result<()> {
         let python_path = platform::get_python_path(app_handle)?;
 
-        info!("Installing/upgrading esphome-device-builder");
-
-        // Resolve the concrete latest stable version and pin it so pip will
-        // *downgrade* off a newer installed pre-release. A plain `--upgrade`
-        // without a pin never downgrades, so an install that previously
-        // tracked the removed beta channel would otherwise stay on its beta
-        // forever (#200). If the PyPI lookup fails we fall back to the
-        // unpinned upgrade rather than block the install entirely.
-        let version = match self.check_device_builder().await {
-            Ok(v) => Some(v),
-            Err(e) => {
-                warn!(
-                    "Could not resolve latest stable device-builder version; \
-                     falling back to unpinned upgrade (may not downgrade a pre-release): {}",
-                    e
-                );
-                None
-            }
-        };
+        info!("Installing/upgrading esphome-device-builder=={version}");
 
         // Try a clean upgrade first (attempts a normal uninstall of the old
         // copy). Only if pip aborts on a missing RECORD file (#155) do we retry
         // with --ignore-installed, which skips the uninstall but orphans stale
         // files — so we limit that trade-off to the broken-RECORD case.
         let pp = python_path.clone();
+        let version = version.to_string();
         let result = install_with_record_retry(
             move |ignore| {
                 let pp = pp.clone();
                 let version = version.clone();
-                async move { run_device_builder_install(&pp, ignore, version.as_deref()).await }
+                async move { run_device_builder_install(&pp, ignore, &version).await }
             },
             "esphome-device-builder installed/upgraded successfully",
             "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed",
@@ -376,7 +367,13 @@ impl UpdateChecker {
     pub async fn check_device_builder(&self) -> Result<String> {
         let response = self.fetch_pypi("esphome-device-builder").await?;
 
-        let latest = response.info.version;
+        // Don't trust `info.version` blindly: PyPI reports the newest upload
+        // there, which can be a pre-release when the project's finals lag its
+        // betas — and the install path pins `==X` exactly, so a pre-release
+        // here would actually get installed. Select the highest non-yanked
+        // *final* release ourselves; `info.version` is only the fallback when
+        // no installable final release exists at all.
+        let latest = find_latest_final(&response.releases).unwrap_or(response.info.version);
         info!("Latest esphome-device-builder version on PyPI: {}", latest);
         Ok(latest)
     }
@@ -707,6 +704,21 @@ fn find_latest_beta(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Stri
     highest_version(releases, has_beta_suffix)
 }
 
+/// Find the latest final (non-pre-release) version from PyPI releases,
+/// skipping yanked/removed versions. Used for the device builder, which only
+/// ever tracks final releases.
+fn find_latest_final(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<String> {
+    highest_version(releases, is_final_release)
+}
+
+/// Whether a version string is a final release: parseable, with no
+/// pre-release tag (alpha/beta/rc/dev/…) on any segment. [`parse_version`]
+/// marks final segments with the `255` sentinel tier.
+fn is_final_release(version: &str) -> bool {
+    let parts = parse_version(version);
+    !parts.is_empty() && parts.iter().all(|(_, tier, _)| *tier == 255)
+}
+
 /// Check whether a version string has a beta suffix like "b1", "b2", etc.
 /// Matches patterns where a 'b' immediately follows a digit and is followed by
 /// one or more digits (e.g. "2025.4.0b1"), which distinguishes it from versions
@@ -878,19 +890,14 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
 /// `version` pins the package to an exact release (`esphome-device-builder==X`).
 /// A plain `--upgrade` never *downgrades*, so an install still carrying a newer
 /// pre-release from the removed beta channel would otherwise never move to the
-/// older stable (#200). Passing the resolved stable version forces pip to
-/// install exactly that release, downgrading off the newer pre-release. Pass
-/// `None` only when the PyPI lookup failed and an unpinned upgrade is the best
-/// remaining option.
-fn device_builder_install_args(ignore_installed: bool, version: Option<&str>) -> Vec<String> {
+/// older stable (#200). Pinning the resolved stable version forces pip to
+/// install exactly that release, downgrading off the newer pre-release.
+fn device_builder_install_args(ignore_installed: bool, version: &str) -> Vec<String> {
     let mut args: Vec<String> = vec!["--upgrade".to_string()];
     if ignore_installed {
         args.push("--ignore-installed".to_string());
     }
-    match version {
-        Some(v) => args.push(format!("esphome-device-builder=={v}")),
-        None => args.push("esphome-device-builder".to_string()),
-    }
+    args.push(format!("esphome-device-builder=={version}"));
     args
 }
 
@@ -898,7 +905,7 @@ fn device_builder_install_args(ignore_installed: bool, version: Option<&str>) ->
 async fn run_device_builder_install(
     python_path: &std::path::Path,
     ignore_installed: bool,
-    version: Option<&str>,
+    version: &str,
 ) -> Result<std::process::Output> {
     let args = device_builder_install_args(ignore_installed, version);
     let mut cmd = platform::pip_command(python_path);
@@ -1324,13 +1331,13 @@ mod tests {
         // The default (first-attempt) upgrade must NOT pass --ignore-installed,
         // so normal installs still get a clean uninstall of the old copy. The
         // beta channel is gone, so --pre must never appear.
-        let args = device_builder_install_args(false, None);
+        let args = device_builder_install_args(false, "1.2.3");
         assert!(!has(&args, "--ignore-installed"));
         assert!(!has(&args, "--pre"));
         assert!(has(&args, "--upgrade"));
         assert_eq!(
             args.last().map(String::as_str),
-            Some("esphome-device-builder")
+            Some("esphome-device-builder==1.2.3")
         );
     }
 
@@ -1338,24 +1345,24 @@ mod tests {
     fn test_device_builder_install_args_ignore_installed_fallback() {
         // The fallback path adds --ignore-installed so a missing RECORD file in
         // the bundled install can't abort the retry (issue #155).
-        let args = device_builder_install_args(true, None);
+        let args = device_builder_install_args(true, "1.2.3");
         assert!(has(&args, "--ignore-installed"));
         assert!(!has(&args, "--pre"));
         assert!(has(&args, "--upgrade"));
         assert_eq!(
             args.last().map(String::as_str),
-            Some("esphome-device-builder")
+            Some("esphome-device-builder==1.2.3")
         );
     }
 
     #[test]
-    fn test_device_builder_install_args_pins_version_for_downgrade() {
-        // The #200 fix: passing an explicit version pins the package to that
-        // exact release (`==X`). A plain `--upgrade` never downgrades, so the
-        // pin is what forces pip off a newer installed pre-release (from the
-        // removed beta channel) onto the older stable.
+    fn test_device_builder_install_args_always_pin_version() {
+        // The #200 fix: the version pins the package to that exact release
+        // (`==X`). A plain `--upgrade` never downgrades, so the pin is what
+        // forces pip off a newer installed pre-release (from the removed beta
+        // channel) onto the older stable.
         for ignore_installed in [false, true] {
-            let args = device_builder_install_args(ignore_installed, Some("1.2.3"));
+            let args = device_builder_install_args(ignore_installed, "1.2.3");
             assert!(has(&args, "--upgrade"));
             assert!(!has(&args, "--pre"));
             assert_eq!(
@@ -1552,6 +1559,58 @@ mod tests {
 
         let latest = find_latest_beta(&releases);
         assert_eq!(latest, Some("2025.4.0b1".to_string()));
+    }
+
+    #[test]
+    fn test_is_final_release() {
+        assert!(is_final_release("1.1.0"));
+        assert!(is_final_release("2025.4.0"));
+        // Every pre-release kind is non-final, including the PEP 440
+        // dot-separated dev form PyPI reports.
+        assert!(!is_final_release("1.2.0b1"));
+        assert!(!is_final_release("1.2.0a1"));
+        assert!(!is_final_release("1.2.0rc1"));
+        assert!(!is_final_release("1.2.0.dev3"));
+        assert!(!is_final_release("1.2.0-dev"));
+        // Unparseable strings are never offered as a final release.
+        assert!(!is_final_release("abc"));
+        assert!(!is_final_release(""));
+    }
+
+    #[test]
+    fn test_find_latest_final_ignores_prereleases_and_yanked() {
+        // The device builder only ever tracks final releases: a newer beta or
+        // dev upload must not win (the install path pins `==X` exactly, so a
+        // pre-release picked here would actually get installed), and a newer
+        // final whose files were all yanked is not installable.
+        let mut releases = HashMap::new();
+        releases.insert("1.1.0".to_string(), active());
+        releases.insert("1.2.0b1".to_string(), active());
+        releases.insert("1.2.0.dev1".to_string(), active());
+        releases.insert("1.1.1".to_string(), yanked());
+
+        assert_eq!(find_latest_final(&releases), Some("1.1.0".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_final_picks_highest_final() {
+        let mut releases = HashMap::new();
+        releases.insert("1.0.9".to_string(), active());
+        releases.insert("1.1.0".to_string(), active());
+        releases.insert("1.0.30b7".to_string(), active());
+
+        assert_eq!(find_latest_final(&releases), Some("1.1.0".to_string()));
+    }
+
+    #[test]
+    fn test_find_latest_final_none_when_only_prereleases() {
+        // No installable final release at all — the caller falls back to
+        // PyPI's `info.version` rather than failing the check.
+        let mut releases = HashMap::new();
+        releases.insert("1.0.0b1".to_string(), active());
+        releases.insert("1.0.0".to_string(), yanked());
+
+        assert_eq!(find_latest_final(&releases), None);
     }
 
     #[test]
