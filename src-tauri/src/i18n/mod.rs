@@ -82,10 +82,33 @@ pub(crate) fn t_with(key: &str, args: &[(&str, &str)]) -> String {
 /// Replace each `{name}` token with its value. Unknown tokens are left
 /// verbatim so a template/args mismatch stays visible instead of vanishing.
 fn interpolate(template: &str, args: &[(&str, &str)]) -> String {
-    let mut out = template.to_string();
-    for (name, value) in args {
-        out = out.replace(&format!("{{{name}}}"), value);
+    // Single pass over the original template, so substituted values are never
+    // re-scanned — an arg value that happens to contain `{other}` (say, a
+    // brace-y error message) must land verbatim, not trigger a second
+    // substitution.
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            // Unmatched '{' — keep the tail verbatim.
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let name = &after[..end];
+        match args.iter().find(|(arg, _)| *arg == name) {
+            Some((_, value)) => out.push_str(value),
+            None => {
+                // Unknown token: kept verbatim so a mismatch stays visible.
+                out.push('{');
+                out.push_str(name);
+                out.push('}');
+            }
+        }
+        rest = &after[end + 1..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -263,6 +286,23 @@ mod tests {
     #[test]
     fn interpolate_leaves_unknown_tokens() {
         assert_eq!(interpolate("hello {name}", &[]), "hello {name}");
+    }
+
+    #[test]
+    fn interpolate_never_rescans_substituted_values() {
+        // A value that itself looks like a placeholder (e.g. a brace-y error
+        // message) must land verbatim, not trigger a second substitution.
+        assert_eq!(
+            interpolate("{a}", &[("a", "{b}"), ("b", "X")]),
+            "{b}",
+            "substituted value was re-processed as a template"
+        );
+    }
+
+    #[test]
+    fn interpolate_keeps_unmatched_brace_verbatim() {
+        assert_eq!(interpolate("50% {done", &[("done", "X")]), "50% {done");
+        assert_eq!(interpolate("a } b", &[]), "a } b");
     }
 
     #[test]
@@ -468,8 +508,17 @@ mod tests {
     }
 
     /// Collect every translation key referenced from the crate's sources.
+    ///
+    /// Skips this module's own file: it is the only source whose `t(...)`
+    /// literals live in test code (the tests right here), and counting those
+    /// as usage would let a key stay "used" after the last production
+    /// reference is removed, defeating the drift checks below.
     fn used_keys() -> std::collections::BTreeSet<String> {
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let own_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("i18n")
+            .join("mod.rs");
         let mut keys = std::collections::BTreeSet::new();
         let mut stack = vec![src_dir];
         while let Some(dir) = stack.pop() {
@@ -477,7 +526,7 @@ mod tests {
                 let path = entry.expect("read dir entry").path();
                 if path.is_dir() {
                     stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
+                } else if path.extension().is_some_and(|e| e == "rs") && path != own_file {
                     let source = std::fs::read_to_string(&path).expect("read source file");
                     extract_keys(&source, &mut keys);
                 }

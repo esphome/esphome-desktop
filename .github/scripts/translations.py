@@ -143,6 +143,10 @@ class LokaliseClient:
             raise LokaliseError(
                 f"Lokalise {method} {path} failed: HTTP {exc.code} {detail}"
             ) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            # Network-level failures (DNS, refused connection, timeout) must
+            # surface as a single ::error:: CI line, not a stack trace.
+            raise LokaliseError(f"Lokalise {method} {path} failed: {exc}") from exc
 
     def upload_base_file(self, data_b64: str, *, cleanup_mode: bool) -> dict[str, Any]:
         """Upload the base-language file and wait for processing to finish."""
@@ -234,8 +238,13 @@ class LokaliseClient:
 def fetch_bytes(url: str) -> bytes:
     """GET a URL (the signed bundle blob) and return the raw bytes."""
     req = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            return resp.read()
+    except (urllib.error.URLError, TimeoutError) as exc:
+        # HTTPError is a URLError subclass, so an expired/403 signed URL lands
+        # here too — surface one ::error:: CI line instead of a stack trace.
+        raise LokaliseError(f"Failed to download bundle: {exc}") from exc
 
 
 def write_locale_bundle(zip_bytes: bytes, dest_dir: Path) -> list[str]:
@@ -247,12 +256,23 @@ def write_locale_bundle(zip_bytes: bytes, dest_dir: Path) -> list[str]:
     sorted locales written.
     """
     written: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as bundle:
+    try:
+        bundle = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        raise LokaliseError(f"Bundle is not a valid zip archive: {exc}") from exc
+    with bundle:
         for info in bundle.infolist():
             locale = locale_from_zip_entry(info.filename)
             if locale is None or locale == BASE_LANGUAGE:
                 continue
-            data = json.loads(bundle.read(info))
+            try:
+                data = json.loads(bundle.read(info))
+            except json.JSONDecodeError as exc:
+                # A corrupt/partial export must fail as a single ::error:: CI
+                # line, not a stack trace.
+                raise LokaliseError(
+                    f"Bundle entry '{info.filename}' is not valid JSON: {exc}"
+                ) from exc
             path = dest_dir / f"{locale}.json"
             # Re-serialize with the repo's JSON conventions (2-space indent,
             # raw unicode, trailing newline) so a diff only carries genuine

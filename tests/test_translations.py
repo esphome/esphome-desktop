@@ -18,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -205,6 +206,28 @@ def test_request_surfaces_http_errors(fake_lokalise: _FakeLokalise) -> None:
         _client(fake_lokalise).wait_for_process("p1")
 
 
+def _dead_port() -> int:
+    """An ephemeral port with nothing listening on it."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return port
+
+
+def test_request_surfaces_network_errors() -> None:
+    # Connection refused (URLError, not HTTPError) must still land as a
+    # LokaliseError so main() prints one ::error:: line, not a stack trace.
+    client = translations.LokaliseClient(
+        "token",
+        "proj",
+        api_base=f"http://127.0.0.1:{_dead_port()}",
+        poll_interval=0.0,
+        sleep=lambda _s: None,
+    )
+    with pytest.raises(translations.LokaliseError, match="failed"):
+        client.wait_for_process("p1")
+
+
 # --------------------------------------------------------------------------- #
 # Upload.
 # --------------------------------------------------------------------------- #
@@ -348,6 +371,29 @@ def test_run_download_fails_on_empty_bundle(
     _script_download(fake_lokalise, {"en.json": "{}"})
     with pytest.raises(translations.LokaliseError, match="no non-base"):
         translations.run_download(_client(fake_lokalise), tmp_path)
+
+
+def test_fetch_bytes_wraps_http_errors(fake_lokalise: _FakeLokalise) -> None:
+    # An expired/forbidden signed bundle URL (any HTTP error) must land as a
+    # LokaliseError; the fake server 404s unscripted paths.
+    with pytest.raises(translations.LokaliseError, match="Failed to download bundle"):
+        translations.fetch_bytes(f"{_base_url(fake_lokalise)}/missing.zip")
+
+
+def test_fetch_bytes_wraps_network_errors() -> None:
+    with pytest.raises(translations.LokaliseError, match="Failed to download bundle"):
+        translations.fetch_bytes(f"http://127.0.0.1:{_dead_port()}/bundle.zip")
+
+
+def test_write_locale_bundle_rejects_corrupt_zip(tmp_path: Path) -> None:
+    with pytest.raises(translations.LokaliseError, match="not a valid zip"):
+        translations.write_locale_bundle(b"this is not a zip", tmp_path)
+
+
+def test_write_locale_bundle_rejects_invalid_json_entry(tmp_path: Path) -> None:
+    bundle = _zip_bytes({"fr.json": "{truncated"})
+    with pytest.raises(translations.LokaliseError, match="fr.json.*not valid JSON"):
+        translations.write_locale_bundle(bundle, tmp_path)
 
 
 # --------------------------------------------------------------------------- #
