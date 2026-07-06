@@ -1047,8 +1047,9 @@ pub fn run_python_capture<S: AsRef<OsStr>>(
 }
 
 /// [`run_python_capture`], returning the trimmed stdout on a successful exit
-/// and `None` on a non-zero exit. stderr is discarded, so callers that need
-/// it (or the exit status) should use [`run_python_capture`] directly.
+/// and `None` on a non-zero exit. stderr is captured but not returned, so
+/// callers that need it (or the exit status) should use
+/// [`run_python_capture`] directly.
 pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
