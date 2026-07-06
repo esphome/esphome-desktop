@@ -51,9 +51,12 @@ fn embed_translations() {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
         serde_json::from_str::<serde_json::Value>(&contents)
             .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
+        // Reference the file relative to CARGO_MANIFEST_DIR rather than by
+        // the absolute path this build ran from, so the generated source is
+        // stable across machines (reproducible builds, no local paths leaking
+        // into build artifacts). Forward slashes work on Windows here too.
         generated.push_str(&format!(
-            "    ({stem:?}, include_str!({:?})),\n",
-            path.display()
+            "    ({stem:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/translations/{stem}.json\"))),\n",
         ));
     }
     generated.push_str("];\n");

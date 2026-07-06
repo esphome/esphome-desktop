@@ -103,13 +103,16 @@ def test_write_locale_bundle_prints_repo_relative_paths(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # When the destination sits inside the repo root, the log line shows the
-    # repo-relative path (the ValueError fallback is covered by the
-    # tmp_path-outside-repo tests above).
+    # repo-relative path. (The ValueError fallback for a destination outside
+    # the repo is exercised by test_write_locale_bundle_writes_non_base_locales,
+    # whose tmp_path destination is not under REPO_ROOT.)
     monkeypatch.setattr(translations, "REPO_ROOT", tmp_path)
     dest = tmp_path / "src-tauri" / "translations"
     dest.mkdir(parents=True)
     translations.write_locale_bundle(_zip_bytes({"fr.json": "{}"}), dest)
-    assert "src-tauri/translations/fr.json" in capsys.readouterr().out
+    # Compare with native separators so the assertion holds on Windows too.
+    expected = str(Path("src-tauri") / "translations" / "fr.json")
+    assert expected in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
