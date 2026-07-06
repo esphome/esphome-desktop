@@ -1063,6 +1063,16 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Build a tokio `pip install` command for the given Python interpreter,
+/// prefilled with `-m pip install` and the Windows no-window flag. Callers
+/// append their own package specs and flags before running it.
+pub fn pip_command(python: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(python);
+    cmd.args(["-m", "pip", "install"]);
+    configure_no_window_tokio_command(&mut cmd);
+    cmd
+}
+
 /// Configure the daemon child's creation flags on Windows: no console window
 /// AND a new process group. The new process group makes the child its own
 /// group leader (pgid == pid) so we can later deliver a graceful

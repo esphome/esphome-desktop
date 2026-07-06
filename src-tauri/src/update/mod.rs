@@ -331,9 +331,8 @@ impl UpdateChecker {
         } else {
             info!("Updating ESPHome to version {}", version);
 
-            let mut cmd = tokio::process::Command::new(&python_path);
-            cmd.args(["-m", "pip", "install", &format!("esphome=={}", version)]);
-            platform::configure_no_window_tokio_command(&mut cmd);
+            let mut cmd = platform::pip_command(&python_path);
+            cmd.arg(format!("esphome=={}", version));
 
             let output = cmd.output().await.context("Failed to run pip install")?;
 
@@ -801,7 +800,8 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
     get_installed_device_builder_version(app_handle)
 }
 
-/// Build the `pip` argument list for installing/upgrading
+/// Build the `pip install` argument list (appended after the `-m pip install`
+/// prefix supplied by [`crate::platform::pip_command`]) for installing/upgrading
 /// `esphome-device-builder`.
 ///
 /// When `ignore_installed` is false this is a plain `pip install --upgrade`,
@@ -833,12 +833,7 @@ fn device_builder_install_args(
     ignore_installed: bool,
     version: Option<&str>,
 ) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "-m".to_string(),
-        "pip".to_string(),
-        "install".to_string(),
-        "--upgrade".to_string(),
-    ];
+    let mut args: Vec<String> = vec!["--upgrade".to_string()];
     if ignore_installed {
         args.push("--ignore-installed".to_string());
     }
@@ -860,16 +855,17 @@ async fn run_device_builder_install(
     version: Option<&str>,
 ) -> Result<std::process::Output> {
     let args = device_builder_install_args(backend, ignore_installed, version);
-    let mut cmd = tokio::process::Command::new(python_path);
+    let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
-    platform::configure_no_window_tokio_command(&mut cmd);
     cmd.output().await.context("Failed to run pip install")
 }
 
 /// URL of the ESPHome dev-branch source archive installed on the Dev channel.
 const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/dev.zip";
 
-/// Build the `pip` argument list for installing ESPHome from the dev GitHub zip.
+/// Build the `pip install` argument list (appended after the `-m pip install`
+/// prefix supplied by [`crate::platform::pip_command`]) for installing ESPHome from
+/// the dev GitHub zip.
 ///
 /// When `ignore_installed` is false this is a plain `--force-reinstall`, which
 /// uninstalls the existing copy of each affected package first. Pass `true`
@@ -880,7 +876,7 @@ const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/de
 /// over the top — pip's own documented recovery — at the cost of leaving stale
 /// files orphaned, so it is limited to the genuinely-broken RECORD case.
 fn dev_install_args(ignore_installed: bool) -> Vec<&'static str> {
-    let mut args: Vec<&'static str> = vec!["-m", "pip", "install", "--force-reinstall"];
+    let mut args: Vec<&'static str> = vec!["--force-reinstall"];
     if ignore_installed {
         args.push("--ignore-installed");
     }
@@ -894,9 +890,8 @@ async fn run_dev_install(
     ignore_installed: bool,
 ) -> Result<std::process::Output> {
     let args = dev_install_args(ignore_installed);
-    let mut cmd = tokio::process::Command::new(python_path);
+    let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
-    platform::configure_no_window_tokio_command(&mut cmd);
     cmd.output().await.context("Failed to run pip install")
 }
 
