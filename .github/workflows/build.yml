@@ -258,6 +258,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # Locate the built AppImage once. The inject step below repacks it in
+      # place and the re-sign step must sign that same file, so both read this
+      # output rather than repeating the find.
+      - name: Locate AppImage
+        id: appimage
+        if: contains(matrix.bundles, 'appimage')
+        run: |
+          set -euo pipefail
+          mapfile -t APPIMAGES < <(find src-tauri/target/release/bundle/appimage -name "*.AppImage")
+          if [ "${#APPIMAGES[@]}" -ne 1 ]; then
+            echo "expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}" >&2
+            exit 1
+          fi
+          printf 'path=%s\n' "${APPIMAGES[0]}" >> "$GITHUB_OUTPUT"
+
       # The sharun-based AppImage format uses DwarFS and does not include Tauri
       # resources. The build leaves the AppDir intact, so we inject Python into
       # it and repack with mkdwarfs + the uruntime header.
@@ -266,7 +281,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPIMAGE="${{ steps.appimage.outputs.path }}"
           APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Device Builder.AppDir"
           echo "Found AppImage: $APPIMAGE"
           echo "AppDir: $APPDIR"
@@ -347,7 +362,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          APPIMAGE="${{ steps.appimage.outputs.path }}"
           cargo tauri signer sign \
             --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
             --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
