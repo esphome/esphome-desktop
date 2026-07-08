@@ -520,14 +520,26 @@ pub fn run(cli: Cli) {
                 // underlying libappindicator-sys crate will panic!() if the
                 // shared library fails to load (e.g. GLIBC version mismatch).
                 let tray_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let icon = app
-                        .default_window_icon()
-                        .cloned()
-                        .ok_or_else(|| anyhow::anyhow!("No default icon available for tray"))?;
+                    // The macOS menu bar expects a monochrome "template" image
+                    // whose alpha channel the system recolors to match the
+                    // light/dark theme; other platforms use the full-color
+                    // bundled icon.
+                    #[cfg(target_os = "macos")]
+                    let (icon, icon_as_template) = (
+                        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-mac.png"))?,
+                        true,
+                    );
+                    #[cfg(not(target_os = "macos"))]
+                    let (icon, icon_as_template) = (
+                        app.default_window_icon()
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("No default icon available for tray"))?,
+                        false,
+                    );
 
                     let tray = TrayIconBuilder::with_id("main")
                         .icon(icon)
-                        .icon_as_template(false)
+                        .icon_as_template(icon_as_template)
                         .tooltip("ESPHome Device Builder")
                         .build(app)?;
 

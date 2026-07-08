@@ -61,6 +61,8 @@ nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
+# "image-png" enables tauri::image::Image::from_bytes for the template tray icon
+tauri = { version = "2.11.2", features = ["image-png"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_Console"] }
