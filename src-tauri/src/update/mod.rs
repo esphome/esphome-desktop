@@ -303,18 +303,26 @@ impl UpdateChecker {
         } else {
             info!("Updating ESPHome to version {}", version);
 
-            let mut cmd = platform::pip_command(&python_path);
-            cmd.arg(format!("esphome=={}", version));
-
-            let output = cmd.output().await.context("Failed to run pip install")?;
-
-            if output.status.success() {
-                info!("ESPHome updated successfully to {}", version);
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("pip install failed: {}", stderr)
-            }
+            // Pin the exact version and route through the shared broken-RECORD
+            // recovery. A stable/beta `pip install esphome==X` uninstalls the
+            // differing installed copy first, and that uninstall aborts with
+            // `error: uninstall-no-record-file` when the bundled tree has a
+            // missing `dist-info/RECORD` — the same failure the dev (#183) and
+            // device-builder (#155) paths already recover from. Without this,
+            // stable/beta was the one install path lacking that parity.
+            let pp = python_path.clone();
+            let version = version.to_string();
+            install_with_record_retry(
+                move |ignore| {
+                    let pp = pp.clone();
+                    let version = version.clone();
+                    async move { run_esphome_install(&pp, &version, ignore).await }
+                },
+                "ESPHome updated successfully",
+                "ESPHome update hit missing RECORD file; retrying with --ignore-installed",
+                "pip install failed",
+            )
+            .await
         }
     }
 
@@ -1010,6 +1018,37 @@ async fn run_dev_install(
     cmd.output().await.context("Failed to run pip install")
 }
 
+/// Build the `pip install` argument list for a pinned stable/beta ESPHome
+/// release (`esphome==X`).
+///
+/// When `ignore_installed` is false this is a plain pinned install, which
+/// uninstalls the differing installed copy first. Pass `true` only as the
+/// missing-RECORD fallback: if the bundled tree has a `dist-info/RECORD` that
+/// is missing, that uninstall aborts with `error: uninstall-no-record-file`
+/// (#155/#183). `--ignore-installed` skips the uninstall and installs over the
+/// top — pip's documented recovery — at the cost of orphaning stale files, so
+/// it is limited to the genuinely-broken RECORD case.
+fn esphome_install_args(version: &str, ignore_installed: bool) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if ignore_installed {
+        args.push("--ignore-installed".to_string());
+    }
+    args.push(format!("esphome=={version}"));
+    args
+}
+
+/// Run `pip install` for a pinned stable/beta ESPHome release with the given flags.
+async fn run_esphome_install(
+    python_path: &std::path::Path,
+    version: &str,
+    ignore_installed: bool,
+) -> Result<std::process::Output> {
+    let args = esphome_install_args(version, ignore_installed);
+    let mut cmd = platform::pip_command(python_path);
+    cmd.args(&args);
+    cmd.output().await.context("Failed to run pip install")
+}
+
 /// Detect pip's missing-RECORD abort, which is the failure that warrants the
 /// `--ignore-installed` retry (issue #155).
 fn is_missing_record_error(stderr: &str) -> bool {
@@ -1504,6 +1543,25 @@ mod tests {
         assert!(args.contains(&"--ignore-installed"));
         assert!(args.contains(&"--force-reinstall"));
         assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
+    }
+
+    #[test]
+    fn test_esphome_install_args_default_no_ignore_installed() {
+        // The default (first-attempt) stable/beta install must NOT pass
+        // --ignore-installed, so a normal update still uninstalls cleanly.
+        let args = esphome_install_args("2025.7.0", false);
+        assert!(!args.iter().any(|a| a == "--ignore-installed"));
+        assert_eq!(args.last(), Some(&"esphome==2025.7.0".to_string()));
+    }
+
+    #[test]
+    fn test_esphome_install_args_ignore_installed_fallback() {
+        // The fallback adds --ignore-installed so a missing RECORD file in the
+        // bundled tree can't abort the retry (#155/#183), while still pinning
+        // the exact version so it can downgrade off a newer installed copy.
+        let args = esphome_install_args("2025.7.0", true);
+        assert!(args.iter().any(|a| a == "--ignore-installed"));
+        assert_eq!(args.last(), Some(&"esphome==2025.7.0".to_string()));
     }
 
     /// Build a canned `Output` with the given success flag and stderr, so the
