@@ -492,8 +492,14 @@ fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
                         Ok(()) => {
                             info!("Update completed successfully");
 
-                            // Update the version display in the tray menu
-                            refresh_version_display(&app);
+                            // Update the version display in the tray menu, off
+                            // the async executor (detection spawns a Python
+                            // subprocess) — mirrors the device-builder arm below.
+                            let refresh_app = app.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                refresh_version_display(&refresh_app)
+                            })
+                            .await;
 
                             // Restart the dashboard
                             if let Err(e) = state.daemon.start().await {
