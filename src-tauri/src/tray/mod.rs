@@ -125,8 +125,7 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
 
     // Backend submenu items
     let current_backend = settings.backend;
-    // TODO: use `build` once a stable release of esphome-device-builder is out
-    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build_disabled(
+    let backend_builder_stable = BACKEND_BUILDER_STABLE_ITEM.build(
         app_handle,
         ids::BACKEND_BUILDER_STABLE,
         current_backend == Backend::BuilderStable,
@@ -240,6 +239,7 @@ impl RadioItem {
     }
 
     /// Like [`RadioItem::build`], but the item is greyed out.
+    #[allow(dead_code)]
     fn build_disabled(
         &self,
         app_handle: &AppHandle,
