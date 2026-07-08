@@ -401,6 +401,12 @@ impl DaemonManager {
     /// not claim the backend is running), restored to the actual state if the
     /// stop fails — after a failed stop the backend may well still be
     /// running, so the optimistic label must not stand.
+    ///
+    /// Returns `Err` when the stop could not be confirmed: on Unix, if the
+    /// backend ignores SIGTERM for the full 30s drain window (we never
+    /// escalate to SIGKILL by design), the process is left running and this
+    /// reports the failure so callers can abort rather than act as if the
+    /// backend were down.
     pub async fn stop(&self) -> Result<()> {
         crate::tray::update_status(&self.app_handle, false);
         let result = self.stop_inner().await;
@@ -470,16 +476,25 @@ impl DaemonManager {
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
                 Err(_) => {
                     // On Unix we do NOT escalate to SIGKILL — force-killing
-                    // corrupts dashboard state; we log and let the child
-                    // finish on its own (it may briefly outlive us as an
-                    // orphan). On Windows there is no gentler hard kill than
-                    // TerminateProcess, so we use it as the last resort.
+                    // corrupts dashboard state. The backend is still alive, so
+                    // we cannot honestly report a successful stop: restore the
+                    // tracking state (the child handle and the `running` flag)
+                    // and return Err. Callers such as the channel/backend
+                    // switch flows depend on this to abort *before* pip-
+                    // installing over a live process; `stop()`'s tray wrapper
+                    // depends on it to keep the running label standing.
                     #[cfg(unix)]
-                    warn!(
-                        "Timeout waiting for {} to honor SIGTERM after 30 s; \
-                         proceeding with exit without force-killing.",
-                        backend_name
-                    );
+                    {
+                        warn!(
+                            "Timeout waiting for {} to honor SIGTERM after 30 s; \
+                             not force-killing (would corrupt dashboard state) — \
+                             reporting stop failure so callers can abort.",
+                            backend_name
+                        );
+                        self.running.store(true, Ordering::SeqCst);
+                        *process = Some(child);
+                        anyhow::bail!("timed out waiting for {} to stop", backend_name);
+                    }
                     #[cfg(windows)]
                     {
                         warn!(
