@@ -2003,16 +2003,12 @@ pub fn cleanup_legacy_macos_app(app_handle: &AppHandle) {
         std::thread::spawn(move || {
             let confirmed = dialog_app
                 .dialog()
-                .message(
-                    "An older version of this app named \u{201C}ESPHome Builder\u{201D} \
-                     was found in your Applications folder. Move it to the Trash?\n\n\
-                     Your settings and configs are not affected.",
-                )
-                .title("Remove old ESPHome Builder")
+                .message(crate::i18n::t("platform.remove_legacy_prompt"))
+                .title(crate::i18n::t("platform.remove_legacy_title"))
                 .kind(MessageDialogKind::Info)
                 .buttons(MessageDialogButtons::OkCancelCustom(
-                    "Move to Trash".to_string(),
-                    "Keep".to_string(),
+                    crate::i18n::t("platform.move_to_trash"),
+                    crate::i18n::t("platform.keep"),
                 ))
                 .blocking_show();
 

@@ -13,6 +13,7 @@ use tauri_plugin_notification::NotificationExt;
 use tracing::{debug, error, info, warn};
 
 use crate::control::protocol::channel_name;
+use crate::i18n::{t, t_with};
 use crate::platform;
 use crate::settings::{Backend, ReleaseChannel};
 
@@ -116,20 +117,15 @@ impl UpdateChecker {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
             let installed = installed_esphome_version(app_handle).ok().flatten();
-            let installed_str = installed.as_deref().unwrap_or("unknown");
+            let unknown = t("version.unknown");
+            let installed_str = installed.as_deref().unwrap_or(&unknown);
 
             let should_update = crate::dialog::confirm(
                 app_handle,
-                "Dev Channel Update",
-                format!(
-                    "You are on the dev channel.\n\n\
-                     Currently installed: {}\n\n\
-                     This will reinstall ESPHome from the latest commit on GitHub.\n\n\
-                     Would you like to update now?",
-                    installed_str
-                ),
-                "Update Now",
-                "Cancel",
+                &t("update.dev_channel_title"),
+                t_with("update.dev_channel_prompt", &[("version", installed_str)]),
+                &t("common.update_now"),
+                &t("common.cancel"),
             )
             .await;
 
@@ -146,8 +142,8 @@ impl UpdateChecker {
             Ok(None) => {
                 crate::dialog::notice(
                     app_handle,
-                    "Update Check Failed",
-                    "ESPHome is not installed".to_string(),
+                    &t("update.check_failed_title"),
+                    t("update.not_installed"),
                     MessageDialogKind::Error,
                 )
                 .await;
@@ -157,8 +153,8 @@ impl UpdateChecker {
                 warn!("Could not detect installed version: {}", e);
                 crate::dialog::notice(
                     app_handle,
-                    "Update Check Failed",
-                    format!("Could not detect installed version: {}", e),
+                    &t("update.check_failed_title"),
+                    t_with("update.detect_failed", &[("error", &e.to_string())]),
                     MessageDialogKind::Error,
                 )
                 .await;
@@ -172,8 +168,8 @@ impl UpdateChecker {
             Ok(None) => {
                 crate::dialog::notice(
                     app_handle,
-                    "Update Check Failed",
-                    "Could not determine latest version".to_string(),
+                    &t("update.check_failed_title"),
+                    t("update.latest_unknown"),
                     MessageDialogKind::Error,
                 )
                 .await;
@@ -183,8 +179,8 @@ impl UpdateChecker {
                 warn!("Update check failed: {}", e);
                 crate::dialog::notice(
                     app_handle,
-                    "Update Check Failed",
-                    format!("Failed to check for updates: {}", e),
+                    &t("update.check_failed_title"),
+                    t_with("update.check_failed", &[("error", &e.to_string())]),
                     MessageDialogKind::Error,
                 )
                 .await;
@@ -208,7 +204,7 @@ impl UpdateChecker {
                 log_prefix: "Update",
                 channel_label: Some(channel_label),
             },
-            "Update Available",
+            &t("update.available_title"),
             latest,
             &installed,
             true,
@@ -474,7 +470,7 @@ impl UpdateChecker {
         prompt_if_newer(
             app_handle,
             &DEVICE_BUILDER_WORDING,
-            "Device Builder Update Available",
+            &t("update.builder_available_title"),
             latest,
             &installed,
             false,
@@ -548,17 +544,19 @@ impl UpdateWording<'_> {
     /// Full body of the "would you like to update now?" confirm dialog shown
     /// by [`prompt_if_newer`].
     fn prompt_message(&self, latest: &str, installed: &str) -> String {
-        format!(
-            "{} is available.\n\nYou currently have version {}.\n\nWould you like to update now?",
-            self.subject(latest),
-            installed
+        t_with(
+            "update.available_prompt",
+            &[("subject", &self.subject(latest)), ("installed", installed)],
         )
     }
 
     /// Title of the background "update available" notification shown by
     /// [`notify_if_newer`].
     fn notification_title(&self) -> String {
-        format!("{} Update Available", self.component)
+        t_with(
+            "update.notification_title",
+            &[("component", self.component)],
+        )
     }
 }
 
@@ -581,8 +579,11 @@ async fn prompt_if_newer(
         if dialog_when_up_to_date {
             crate::dialog::notice(
                 app_handle,
-                "No Updates Available",
-                format!("{} {} is the latest version.", wording.component, installed),
+                &t("update.none_title"),
+                t_with(
+                    "update.latest",
+                    &[("component", wording.component), ("installed", installed)],
+                ),
                 MessageDialogKind::Info,
             )
             .await;
@@ -596,7 +597,15 @@ async fn prompt_if_newer(
     );
 
     let msg = wording.prompt_message(&latest, installed);
-    if crate::dialog::confirm(app_handle, title, msg, "Update Now", "Later").await {
+    if crate::dialog::confirm(
+        app_handle,
+        title,
+        msg,
+        &t("common.update_now"),
+        &t("common.later"),
+    )
+    .await
+    {
         Some(latest)
     } else {
         None
@@ -656,11 +665,13 @@ pub(crate) fn notify_update_available(
 /// Body of the standard "update available" notification, shared by every
 /// caller of [`notify_update_available`].
 fn update_notification_body(subject: &str, installed: &str, tray_available: bool) -> String {
-    format!(
-        "{} is available (you have {}). {}",
-        subject,
-        installed,
-        crate::updates_menu_hint(tray_available)
+    t_with(
+        "update.notification_body",
+        &[
+            ("subject", subject),
+            ("installed", installed),
+            ("hint", &crate::updates_menu_hint(tray_available)),
+        ],
     )
 }
 

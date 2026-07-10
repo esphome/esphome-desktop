@@ -226,6 +226,33 @@ Settings are stored in `settings.json`:
 - `launch_at_startup` - Launch the app automatically at login (default: true; see [Running as a remote builder](#running-as-a-remote-builder))
 - `check_updates` - Check for ESPHome updates automatically
 
+## Translations
+
+The app's UI (tray menu, dialogs, and notifications) is translated on
+[Lokalise](https://lokalise.com). Want to help translate the app into your
+language? Join the project here:
+
+**<https://app.lokalise.com/public/756339856a4b2415a30c62.63256624/>**
+
+The UI language is auto-detected from the system locale, falling back to
+English per string when a translation is missing. Set the
+`ESPHOME_DESKTOP_LANGUAGE` environment variable (e.g. `fr`, `zh-CN`) to
+override the detection.
+
+How it works:
+
+- [`src-tauri/translations/en.json`](src-tauri/translations/en.json) is the
+  in-repo source of truth for the English strings. It is the only committed
+  translation file; edit it via normal pull requests.
+- When a change to it lands on `main`, the
+  [Upload translations](.github/workflows/translations-upload.yml) workflow
+  pushes the keys to Lokalise so translators always see the latest strings.
+- Release builds download every translated locale from Lokalise
+  ([`.github/scripts/translations.py`](.github/scripts/translations.py)) and
+  embed them into the binaries, so a new language added on Lokalise ships
+  with the next release without any code change. Development builds are
+  English-only.
+
 ## Troubleshooting
 
 ### macOS: "App is damaged and can't be opened"

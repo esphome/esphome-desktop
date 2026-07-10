@@ -8,6 +8,7 @@ mod control;
 mod daemon;
 mod dialog;
 mod git_check;
+mod i18n;
 mod platform;
 mod settings;
 mod tray;
@@ -258,12 +259,11 @@ impl AppState {
 /// "open the tray menu" is misleading — there is no menu. Point them at the
 /// CLI instead, which drives the same update flow over the control channel.
 /// See GitHub issue #87.
-pub(crate) fn updates_menu_hint(tray_available: bool) -> &'static str {
+pub(crate) fn updates_menu_hint(tray_available: bool) -> String {
     if tray_available {
-        "Open the tray menu and choose \"Check for Updates...\" to update."
+        i18n::t("hint.updates_menu")
     } else {
-        "No system tray was detected. Run `esphome-desktop update` from a \
-         terminal to update."
+        i18n::t("hint.updates_cli")
     }
 }
 

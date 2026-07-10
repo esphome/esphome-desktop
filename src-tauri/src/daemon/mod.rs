@@ -371,11 +371,16 @@ impl DaemonManager {
                 if let Err(e) = app_handle
                     .notification()
                     .builder()
-                    .title(format!("{} stopped", backend_label))
-                    .body(format!(
-                        "{} exited unexpectedly ({}). \
-                         Open the tray menu and choose \"View Logs...\" for details.",
-                        backend_label, status
+                    .title(crate::i18n::t_with(
+                        "daemon.stopped_title",
+                        &[("backend", &backend_label)],
+                    ))
+                    .body(crate::i18n::t_with(
+                        "daemon.stopped_body",
+                        &[
+                            ("backend", backend_label.as_str()),
+                            ("status", &status.to_string()),
+                        ],
                     ))
                     .show()
                 {

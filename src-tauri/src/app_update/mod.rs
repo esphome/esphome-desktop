@@ -18,6 +18,8 @@ use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{debug, error, info, warn};
 
+use crate::i18n::{t, t_with};
+
 /// Whether the orchestrator should proceed to check the Python packages
 /// (`esphome` / `esphome-device-builder`) after the desktop self-update
 /// check completes.
@@ -40,7 +42,14 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
         Ok(u) => u,
         Err(e) => {
             warn!("Updater not available: {}", e);
-            show_error(app_handle, format!("Updater not available: {}", e)).await;
+            show_error(
+                app_handle,
+                t_with(
+                    "app_update.updater_unavailable",
+                    &[("error", &e.to_string())],
+                ),
+            )
+            .await;
             return NextStep::Continue;
         }
     };
@@ -59,10 +68,10 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             let msg = format_update_prompt(&current_version, &new_version, &notes);
             let confirmed = crate::dialog::confirm(
                 app_handle,
-                "Desktop Update Available",
+                &t("app_update.available_title"),
                 msg,
-                "Update Now",
-                "Later",
+                &t("common.update_now"),
+                &t("common.later"),
             )
             .await;
 
@@ -82,10 +91,10 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
             let current = app_handle.package_info().version.to_string();
             info!("Desktop app is up to date ({})", current);
             if show_no_update_dialog {
-                let msg = format!("ESPHome Device Builder {} is the latest version.", current);
+                let msg = t_with("app_update.latest", &[("version", &current)]);
                 crate::dialog::notice(
                     app_handle,
-                    "No Updates Available",
+                    &t("update.none_title"),
                     msg,
                     MessageDialogKind::Info,
                 )
@@ -95,7 +104,11 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
         }
         Err(e) => {
             warn!("Desktop update check failed: {}", e);
-            show_error(app_handle, format!("Failed to check for updates: {}", e)).await;
+            show_error(
+                app_handle,
+                t_with("update.check_failed", &[("error", &e.to_string())]),
+            )
+            .await;
             NextStep::Continue
         }
     }
@@ -122,8 +135,14 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
             );
             if let Err(e) = crate::update::notify_update_available(
                 app_handle,
-                "ESPHome Device Builder Update Available",
-                &format!("Version {}", update.version),
+                &t_with(
+                    "update.notification_title",
+                    &[("component", "ESPHome Device Builder")],
+                ),
+                &t_with(
+                    "app_update.notification_subject",
+                    &[("version", &update.version)],
+                ),
                 &update.current_version,
                 tray_available,
             ) {
@@ -158,18 +177,24 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             // backend child it spawns) keeps the Local Network grant mDNS
             // discovery needs — see `platform::relaunch_for_update`. The dialog is
             // informational (single OK) just to explain the restart.
-            let msg = format!(
-                "ESPHome Device Builder {} has been installed.\n\nIt will now restart to apply the update.",
-                new_version
-            );
-            crate::dialog::notice(app_handle, "Update Installed", msg, MessageDialogKind::Info)
-                .await;
+            let msg = t_with("app_update.installed_body", &[("version", &new_version)]);
+            crate::dialog::notice(
+                app_handle,
+                &t("app_update.installed_title"),
+                msg,
+                MessageDialogKind::Info,
+            )
+            .await;
 
             info!("Relaunching to apply desktop update");
             crate::platform::relaunch_for_update(app_handle);
         }
         Err(e) => {
-            show_error(app_handle, format!("Failed to update: {}", e)).await;
+            show_error(
+                app_handle,
+                t_with("app_update.update_failed", &[("error", &e)]),
+            )
+            .await;
         }
     }
 }
@@ -283,7 +308,7 @@ async fn restore_backend(app_handle: &AppHandle) {
 async fn show_error(app_handle: &AppHandle, msg: String) {
     crate::dialog::notice(
         app_handle,
-        "Update Check Failed",
+        &t("update.check_failed_title"),
         msg,
         MessageDialogKind::Error,
     )
@@ -293,21 +318,16 @@ async fn show_error(app_handle: &AppHandle, msg: String) {
 fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
     let trimmed_notes = notes.trim();
     if trimmed_notes.is_empty() {
-        format!(
-            "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nWould you like to download and install it now?",
-            new, current
-        )
+        t_with("app_update.prompt", &[("new", new), ("current", current)])
     } else {
         // Keep release notes short in the dialog so it doesn't grow off-screen.
-        let preview: String = trimmed_notes.chars().take(800).collect();
-        let elided = if trimmed_notes.chars().count() > 800 {
-            "\n…"
-        } else {
-            ""
-        };
-        format!(
-            "ESPHome Device Builder {} is available.\n\nYou currently have version {}.\n\nRelease notes:\n{}{}\n\nWould you like to download and install it now?",
-            new, current, preview, elided
+        let mut preview: String = trimmed_notes.chars().take(800).collect();
+        if trimmed_notes.chars().count() > 800 {
+            preview.push_str("\n…");
+        }
+        t_with(
+            "app_update.prompt_with_notes",
+            &[("new", new), ("current", current), ("notes", &preview)],
         )
     }
 }
