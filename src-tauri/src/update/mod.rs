@@ -116,7 +116,10 @@ impl UpdateChecker {
     ) -> Option<String> {
         // Dev channel: offer to reinstall from git HEAD
         if channel == ReleaseChannel::Dev {
-            let installed = installed_esphome_version(app_handle).ok().flatten();
+            let installed = installed_esphome_version_async(app_handle)
+                .await
+                .ok()
+                .flatten();
             let unknown = t("version.unknown");
             let installed_str = installed.as_deref().unwrap_or(&unknown);
 
@@ -137,7 +140,7 @@ impl UpdateChecker {
         }
 
         // Get installed version
-        let installed = match installed_esphome_version(app_handle) {
+        let installed = match installed_esphome_version_async(app_handle).await {
             Ok(Some(v)) => v,
             Ok(None) => {
                 crate::dialog::notice(
@@ -226,7 +229,7 @@ impl UpdateChecker {
         }
 
         // Get installed version
-        let installed = match installed_esphome_version(app_handle) {
+        let installed = match installed_esphome_version_async(app_handle).await {
             Ok(Some(v)) => v,
             Ok(None) => {
                 debug!("ESPHome not installed; skipping update notification");
@@ -406,7 +409,7 @@ impl UpdateChecker {
         backend: Backend,
         tray_available: bool,
     ) {
-        let installed = match detect_device_builder_version_with_heal(app_handle) {
+        let installed = match detect_device_builder_version_with_heal_async(app_handle).await {
             Ok(Some(v)) => v,
             Ok(None) => {
                 debug!("esphome-device-builder is not installed; skipping update check");
@@ -444,7 +447,7 @@ impl UpdateChecker {
         app_handle: &AppHandle,
         backend: Backend,
     ) -> Option<String> {
-        let installed = match detect_device_builder_version_with_heal(app_handle) {
+        let installed = match detect_device_builder_version_with_heal_async(app_handle).await {
             Ok(Some(v)) => v,
             Ok(None) => {
                 warn!("esphome-device-builder is not installed");
@@ -897,6 +900,21 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
     get_installed_device_builder_version(app_handle)
 }
 
+/// Async wrapper around the blocking [`detect_device_builder_version_with_heal`].
+///
+/// The underlying detection shells out to pip/Python (and may spawn a second
+/// process for the dist-info heal), so calling it directly from an async task
+/// would block a tokio worker thread. The update-check flows dispatch it via
+/// `spawn_blocking` instead.
+async fn detect_device_builder_version_with_heal_async(
+    app_handle: &AppHandle,
+) -> Result<Option<String>> {
+    let app = app_handle.clone();
+    tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app))
+        .await
+        .context("device-builder version detection task panicked or was cancelled")?
+}
+
 /// Build the `pip install` argument list (appended after the `-m pip install`
 /// prefix supplied by [`crate::platform::pip_command`]) for installing/upgrading
 /// `esphome-device-builder`.
@@ -1059,6 +1077,19 @@ pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String
         .unwrap_or(&version)
         .to_string();
     Ok(Some(version))
+}
+
+/// Async wrapper around the blocking [`installed_esphome_version`] detection.
+///
+/// `installed_esphome_version` runs `python -m esphome version`, whose esphome
+/// import can take several seconds. Calling it directly from an async task
+/// blocks a tokio worker thread for that whole time, so the update-check flows
+/// dispatch it via `spawn_blocking` instead.
+async fn installed_esphome_version_async(app_handle: &AppHandle) -> Result<Option<String>> {
+    let app = app_handle.clone();
+    tokio::task::spawn_blocking(move || installed_esphome_version(&app))
+        .await
+        .context("esphome version detection task panicked or was cancelled")?
 }
 
 /// Pre-release precedence for a version's tag, following PEP 440 ordering:
