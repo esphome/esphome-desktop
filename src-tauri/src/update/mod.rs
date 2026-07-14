@@ -1023,8 +1023,8 @@ async fn run_dev_install(
 ///
 /// When `ignore_installed` is false this is a plain pinned install, which
 /// uninstalls the differing installed copy first. Pass `true` only as the
-/// missing-RECORD fallback: if the bundled tree has a `dist-info/RECORD` that
-/// is missing, that uninstall aborts with `error: uninstall-no-record-file`
+/// missing-RECORD fallback: if the bundled tree is missing its
+/// `dist-info/RECORD` file, that uninstall aborts with `error: uninstall-no-record-file`
 /// (#155/#183). `--ignore-installed` skips the uninstall and installs over the
 /// top — pip's documented recovery — at the cost of orphaning stale files, so
 /// it is limited to the genuinely-broken RECORD case.
