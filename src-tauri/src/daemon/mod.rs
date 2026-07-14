@@ -481,6 +481,10 @@ impl DaemonManager {
 
             match timeout.await {
                 Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
+                // A wait() error on Unix almost always means the child was
+                // already reaped (ECHILD) — i.e. it exited before we waited —
+                // so we treat this as a confirmed stop and fall through to
+                // clear state below, unlike the timeout arm which bail!s.
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
                 Err(_) => {
                     // On Unix we do NOT escalate to SIGKILL — force-killing
