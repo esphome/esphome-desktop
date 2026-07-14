@@ -1018,19 +1018,6 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check if ESPHome is available (bundled Python has it pre-installed)
-pub fn is_esphome_ready(app_handle: &AppHandle) -> bool {
-    let python_path = match get_python_path(app_handle) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    // Try to run esphome version
-    run_python_capture(&python_path, ["-m", "esphome", "version"])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Spawn the given Python interpreter with `args`, suppress the console
 /// window on Windows, and capture its output. This only removes the
 /// spawn/capture boilerplate: it adds no flags of its own (callers pass
