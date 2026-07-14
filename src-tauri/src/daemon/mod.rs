@@ -437,7 +437,15 @@ impl DaemonManager {
         let backend_name = BACKEND_NAME;
         info!("Stopping {}", backend_name);
 
-        self.running.store(false, Ordering::SeqCst);
+        // Do NOT clear `running` yet. The health-check and exit-watcher tasks
+        // spawned in start() retire themselves when `running` goes false, and
+        // the Unix drain below may time out with the backend still alive — in
+        // which case we keep the process and must keep its watchers. Clearing
+        // `running` only after a *confirmed* stop (see the bottom of this fn)
+        // means the timeout path leaves both the flag and the watchers intact,
+        // so a later backend exit still clears state and monitoring survives a
+        // failed stop attempt. The tray already shows "Stopped" optimistically
+        // via stop()'s wrapper, so the label isn't tied to this flag.
         if let Some(mut child) = process.take() {
             // Try graceful shutdown first - kill the process group on Unix
             #[cfg(unix)]
@@ -477,12 +485,15 @@ impl DaemonManager {
                 Err(_) => {
                     // On Unix we do NOT escalate to SIGKILL — force-killing
                     // corrupts dashboard state. The backend is still alive, so
-                    // we cannot honestly report a successful stop: restore the
-                    // tracking state (the child handle and the `running` flag)
-                    // and return Err. Callers such as the channel/backend
-                    // switch flows depend on this to abort *before* pip-
-                    // installing over a live process; `stop()`'s tray wrapper
-                    // depends on it to keep the running label standing.
+                    // we cannot honestly report a successful stop: put the child
+                    // handle back and return Err. `running` was never cleared
+                    // (we defer that until a confirmed stop, above), so the
+                    // watcher tasks from start() are still live and keep
+                    // monitoring the restored child. Callers such as the
+                    // channel/backend switch flows depend on this to abort
+                    // *before* pip-installing over a live process; `stop()`'s
+                    // tray wrapper depends on `running` staying true to keep the
+                    // running label standing.
                     #[cfg(unix)]
                     {
                         warn!(
@@ -491,7 +502,6 @@ impl DaemonManager {
                              reporting stop failure so callers can abort.",
                             backend_name
                         );
-                        self.running.store(true, Ordering::SeqCst);
                         *process = Some(child);
                         anyhow::bail!("timed out waiting for {} to stop", backend_name);
                     }
@@ -508,6 +518,11 @@ impl DaemonManager {
             }
         }
 
+        // Confirmed stop (child exited, wait errored as already-reaped, or the
+        // Windows force-kill fired). Only now clear `running`, which retires the
+        // watcher tasks; the Unix drain-timeout path bailed out above and left
+        // this flag true so its watchers live on.
+        self.running.store(false, Ordering::SeqCst);
         self.dashboard_pid.store(0, Ordering::SeqCst);
         info!("{} stopped", backend_name);
         Ok(())
