@@ -401,6 +401,12 @@ impl DaemonManager {
     /// not claim the backend is running), restored to the actual state if the
     /// stop fails — after a failed stop the backend may well still be
     /// running, so the optimistic label must not stand.
+    ///
+    /// Returns `Err` when the stop could not be confirmed: on Unix, if the
+    /// backend ignores SIGTERM for the full 30s drain window (we never
+    /// escalate to SIGKILL by design), the process is left running and this
+    /// reports the failure so callers can abort rather than act as if the
+    /// backend were down.
     pub async fn stop(&self) -> Result<()> {
         crate::tray::update_status(&self.app_handle, false);
         let result = self.stop_inner().await;
@@ -431,7 +437,15 @@ impl DaemonManager {
         let backend_name = BACKEND_NAME;
         info!("Stopping {}", backend_name);
 
-        self.running.store(false, Ordering::SeqCst);
+        // Do NOT clear `running` yet. The health-check and exit-watcher tasks
+        // spawned in start() retire themselves when `running` goes false, and
+        // the Unix drain below may time out with the backend still alive — in
+        // which case we keep the process and must keep its watchers. Clearing
+        // `running` only after a *confirmed* stop (see the bottom of this fn)
+        // means the timeout path leaves both the flag and the watchers intact,
+        // so a later backend exit still clears state and monitoring survives a
+        // failed stop attempt. The tray already shows "Stopped" optimistically
+        // via stop()'s wrapper, so the label isn't tied to this flag.
         if let Some(mut child) = process.take() {
             // Try graceful shutdown first - kill the process group on Unix
             #[cfg(unix)]
@@ -467,19 +481,34 @@ impl DaemonManager {
 
             match timeout.await {
                 Ok(Ok(status)) => info!("{} exited with status: {}", backend_name, status),
+                // A wait() error on Unix almost always means the child was
+                // already reaped (ECHILD) — i.e. it exited before we waited —
+                // so we treat this as a confirmed stop and fall through to
+                // clear state below, unlike the timeout arm which bail!s.
                 Ok(Err(e)) => warn!("Error waiting for process: {}", e),
                 Err(_) => {
                     // On Unix we do NOT escalate to SIGKILL — force-killing
-                    // corrupts dashboard state; we log and let the child
-                    // finish on its own (it may briefly outlive us as an
-                    // orphan). On Windows there is no gentler hard kill than
-                    // TerminateProcess, so we use it as the last resort.
+                    // corrupts dashboard state. The backend is still alive, so
+                    // we cannot honestly report a successful stop: put the child
+                    // handle back and return Err. `running` was never cleared
+                    // (we defer that until a confirmed stop, above), so the
+                    // watcher tasks from start() are still live and keep
+                    // monitoring the restored child. Callers such as the
+                    // channel/backend switch flows depend on this to abort
+                    // *before* pip-installing over a live process; `stop()`'s
+                    // tray wrapper depends on `running` staying true to keep the
+                    // running label standing.
                     #[cfg(unix)]
-                    warn!(
-                        "Timeout waiting for {} to honor SIGTERM after 30 s; \
-                         proceeding with exit without force-killing.",
-                        backend_name
-                    );
+                    {
+                        warn!(
+                            "Timeout waiting for {} to honor SIGTERM after 30 s; \
+                             not force-killing (would corrupt dashboard state) — \
+                             reporting stop failure so callers can abort.",
+                            backend_name
+                        );
+                        *process = Some(child);
+                        anyhow::bail!("timed out waiting for {} to stop", backend_name);
+                    }
                     #[cfg(windows)]
                     {
                         warn!(
@@ -493,6 +522,11 @@ impl DaemonManager {
             }
         }
 
+        // Confirmed stop (child exited, wait errored as already-reaped, or the
+        // Windows force-kill fired). Only now clear `running`, which retires the
+        // watcher tasks; the Unix drain-timeout path bailed out above and left
+        // this flag true so its watchers live on.
+        self.running.store(false, Ordering::SeqCst);
         self.dashboard_pid.store(0, Ordering::SeqCst);
         info!("{} stopped", backend_name);
         Ok(())
