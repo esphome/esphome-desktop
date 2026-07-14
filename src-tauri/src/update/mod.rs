@@ -912,7 +912,7 @@ async fn detect_device_builder_version_with_heal_async(
     let app = app_handle.clone();
     tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app))
         .await
-        .context("device-builder version detection task panicked")?
+        .context("device-builder version detection task panicked or was cancelled")?
 }
 
 /// Build the `pip install` argument list (appended after the `-m pip install`
@@ -1089,7 +1089,7 @@ async fn installed_esphome_version_async(app_handle: &AppHandle) -> Result<Optio
     let app = app_handle.clone();
     tokio::task::spawn_blocking(move || installed_esphome_version(&app))
         .await
-        .context("esphome version detection task panicked")?
+        .context("esphome version detection task panicked or was cancelled")?
 }
 
 /// Pre-release precedence for a version's tag, following PEP 440 ordering:
