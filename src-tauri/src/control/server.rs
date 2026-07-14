@@ -561,12 +561,29 @@ mod tests {
 
     #[test]
     fn a_line_at_the_cap_is_parsed_not_size_rejected() {
-        // The cap is inclusive: a line whose raw length equals MAX_LINE_BYTES
-        // must reach the parser, so an oversize verdict here would be a
-        // boundary-off-by-one. This one is invalid JSON, so it's rejected —
-        // but as a parse failure, not "request too large".
-        let line = "x".repeat(protocol::MAX_LINE_BYTES);
-        assert!(reject_message(&line).starts_with("invalid request:"));
+        // Model the real on-the-wire line: `read_line` hands us the content
+        // plus its trailing '\n', and the guard checks that untrimmed length.
+        // The cap is inclusive, so a newline-terminated line whose raw length
+        // equals MAX_LINE_BYTES must reach the parser — an oversize verdict
+        // here would be a boundary off-by-one. We pad valid JSON with spaces so
+        // the at-cap line both parses and dispatches; the padding trims away.
+        let json = r#"{"cmd":"open"}"#;
+        let padding = protocol::MAX_LINE_BYTES - json.len() - 1; // -1 for '\n'
+        let line = format!("{json}{}\n", " ".repeat(padding));
+        assert_eq!(line.len(), protocol::MAX_LINE_BYTES);
+        assert_eq!(dispatched(&line), Request::Open);
+    }
+
+    #[test]
+    fn a_newline_terminated_line_one_over_the_cap_is_rejected() {
+        // Same on-the-wire shape as above, but one byte longer: content plus
+        // '\n' totals MAX_LINE_BYTES + 1, which the guard rejects before the
+        // parser ever sees it.
+        let json = r#"{"cmd":"open"}"#;
+        let padding = protocol::MAX_LINE_BYTES - json.len(); // +1 over cap with '\n'
+        let line = format!("{json}{}\n", " ".repeat(padding));
+        assert_eq!(line.len(), protocol::MAX_LINE_BYTES + 1);
+        assert_eq!(reject_message(&line), "request too large");
     }
 
     #[test]
