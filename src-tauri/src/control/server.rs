@@ -180,6 +180,30 @@ async fn run(app: AppHandle) {
     }
 }
 
+/// Outcome of validating a single request line read from a control
+/// connection: either a request to dispatch, or a terminal reply to send back
+/// before closing.
+#[cfg_attr(test, derive(Debug))]
+enum LineOutcome {
+    Dispatch(Request),
+    Reject(Reply),
+}
+
+/// Validate and parse one request line off the wire. Enforces the
+/// [`protocol::MAX_LINE_BYTES`] cap on the raw (untrimmed) length — matching
+/// what the bounded reader in [`handle_connection`] counts — and surfaces JSON
+/// parse failures as a terminal `Err` reply rather than a dropped connection,
+/// so a malformed client gets an actionable message.
+fn classify_line(line: &str) -> LineOutcome {
+    if line.len() > protocol::MAX_LINE_BYTES {
+        return LineOutcome::Reject(Reply::failed("request too large"));
+    }
+    match serde_json::from_str(line.trim()) {
+        Ok(request) => LineOutcome::Dispatch(request),
+        Err(e) => LineOutcome::Reject(Reply::failed(format!("invalid request: {e}"))),
+    }
+}
+
 /// Serve one connection: read a single request line, dispatch it, stream the
 /// replies, close, then perform any post-close action (quit/relaunch).
 async fn handle_connection<S>(app: AppHandle, stream: S)
@@ -204,18 +228,10 @@ where
             return;
         }
         Ok(Ok(0)) => return, // client vanished before sending anything
-        Ok(Ok(_)) if line.len() > protocol::MAX_LINE_BYTES => {
-            let _ = write_reply(&mut write_half, &Reply::failed("request too large")).await;
-            return;
-        }
-        Ok(Ok(_)) => match serde_json::from_str(line.trim()) {
-            Ok(request) => request,
-            Err(e) => {
-                let _ = write_reply(
-                    &mut write_half,
-                    &Reply::failed(format!("invalid request: {e}")),
-                )
-                .await;
+        Ok(Ok(_)) => match classify_line(&line) {
+            LineOutcome::Dispatch(request) => request,
+            LineOutcome::Reject(reply) => {
+                let _ = write_reply(&mut write_half, &reply).await;
                 return;
             }
         },
@@ -504,5 +520,84 @@ async fn build_update_check(app: &AppHandle, state: &Arc<AppState>) -> UpdateChe
         app: app_update,
         esphome,
         device_builder,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reject_message(line: &str) -> String {
+        match classify_line(line) {
+            LineOutcome::Reject(Reply::Err { message, .. }) => message,
+            other => panic!("expected an Err rejection, got {other:?}"),
+        }
+    }
+
+    fn dispatched(line: &str) -> Request {
+        match classify_line(line) {
+            LineOutcome::Dispatch(request) => request,
+            LineOutcome::Reject(reply) => panic!("expected a dispatch, got {reply:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_line_parses_to_request() {
+        assert_eq!(dispatched(r#"{"cmd":"open"}"#), Request::Open);
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed_before_parsing() {
+        // read_line hands us the trailing newline; leading spaces model a
+        // sloppy client. Both must be tolerated.
+        assert_eq!(dispatched("  {\"cmd\":\"open\"}  \n"), Request::Open);
+    }
+
+    #[test]
+    fn line_over_the_cap_is_rejected_as_too_large() {
+        let line = "x".repeat(protocol::MAX_LINE_BYTES + 1);
+        assert_eq!(reject_message(&line), "request too large");
+    }
+
+    #[test]
+    fn a_line_at_the_cap_is_parsed_not_size_rejected() {
+        // Model the real on-the-wire line: `read_line` hands us the content
+        // plus its trailing '\n', and the guard checks that untrimmed length.
+        // The cap is inclusive, so a newline-terminated line whose raw length
+        // equals MAX_LINE_BYTES must reach the parser — an oversize verdict
+        // here would be a boundary off-by-one. We pad valid JSON with spaces so
+        // the at-cap line both parses and dispatches; the padding trims away.
+        let json = r#"{"cmd":"open"}"#;
+        let padding = protocol::MAX_LINE_BYTES - json.len() - 1; // -1 for '\n'
+        let line = format!("{json}{}\n", " ".repeat(padding));
+        assert_eq!(line.len(), protocol::MAX_LINE_BYTES);
+        assert_eq!(dispatched(&line), Request::Open);
+    }
+
+    #[test]
+    fn a_newline_terminated_line_one_over_the_cap_is_rejected() {
+        // Same on-the-wire shape as above, but one byte longer: content plus
+        // '\n' totals MAX_LINE_BYTES + 1, which the guard rejects before the
+        // parser ever sees it.
+        let json = r#"{"cmd":"open"}"#;
+        let padding = protocol::MAX_LINE_BYTES - json.len(); // +1 over cap with '\n'
+        let line = format!("{json}{}\n", " ".repeat(padding));
+        assert_eq!(line.len(), protocol::MAX_LINE_BYTES + 1);
+        assert_eq!(reject_message(&line), "request too large");
+    }
+
+    #[test]
+    fn malformed_json_is_rejected_as_invalid() {
+        assert!(reject_message("{not json").starts_with("invalid request:"));
+    }
+
+    #[test]
+    fn unknown_command_is_rejected_as_invalid() {
+        assert!(reject_message(r#"{"cmd":"teleport"}"#).starts_with("invalid request:"));
+    }
+
+    #[test]
+    fn blank_line_is_rejected_as_invalid() {
+        assert!(reject_message("   \n").starts_with("invalid request:"));
     }
 }
