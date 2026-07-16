@@ -1087,13 +1087,13 @@ pub fn isolate_python_command(cmd: &mut std::process::Command) {
 }
 
 /// [`isolate_python_command`] for a tokio::process::Command.
+///
+/// tokio's `Command` is a `std::process::Command` plus a `kill_on_drop` flag;
+/// its env methods forward straight to the inner command, and `spawn` runs that
+/// same command. So editing it through `as_std_mut` is what tokio would do
+/// anyway, and the two variants cannot drift apart.
 pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
-    for (k, v) in PYTHON_ISOLATION_SET {
-        cmd.env(k, v);
-    }
-    for k in PYTHON_ISOLATION_REMOVE {
-        cmd.env_remove(k);
-    }
+    isolate_python_command(cmd.as_std_mut());
 }
 
 /// pip settings that would send an install somewhere other than the managed
@@ -1142,15 +1142,10 @@ pub fn isolate_pip_command(cmd: &mut std::process::Command) {
     }
 }
 
-/// [`isolate_pip_command`] for a tokio::process::Command.
+/// [`isolate_pip_command`] for a tokio::process::Command. See
+/// [`isolate_python_tokio_command`] on why editing the wrapped command works.
 pub fn isolate_pip_tokio_command(cmd: &mut tokio::process::Command) {
-    isolate_python_tokio_command(cmd);
-    for (k, v) in PIP_ISOLATION_SET {
-        cmd.env(k, v);
-    }
-    for k in PIP_ISOLATION_REMOVE {
-        cmd.env_remove(k);
-    }
+    isolate_pip_command(cmd.as_std_mut());
 }
 
 /// Configure std::process::Command to not create a console window on Windows
@@ -2195,15 +2190,18 @@ mod tests {
         }
     }
 
+    /// The tokio variants reach through `as_std_mut`, which holds only because
+    /// tokio's `Command` stages env on the very `std::process::Command` it later
+    /// spawns. Assert the two variants stage identical env rather than
+    /// re-listing the vars, so this fails if that ever stops being true. The
+    /// std-side tests above prove the compared value isn't vacuously empty.
     #[test]
     fn isolate_python_tokio_command_matches_std_variant() {
-        let mut cmd = tokio::process::Command::new("python3");
-        isolate_python_tokio_command(&mut cmd);
-        let (set, removed) = env_edits(cmd.as_std());
-        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
-        for var in ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"] {
-            assert!(removed.contains(&var.to_string()), "{var} not removed");
-        }
+        let mut std_cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut std_cmd);
+        let mut tokio_cmd = tokio::process::Command::new("python3");
+        isolate_python_tokio_command(&mut tokio_cmd);
+        assert_eq!(env_edits(&std_cmd), env_edits(tokio_cmd.as_std()));
     }
 
     /// pip resolves and installs against the same interpreter the backend runs
@@ -2237,20 +2235,14 @@ mod tests {
         }
     }
 
+    /// See [`isolate_python_tokio_command_matches_std_variant`].
     #[test]
     fn isolate_pip_tokio_command_matches_std_variant() {
-        let mut cmd = tokio::process::Command::new("python3");
-        isolate_pip_tokio_command(&mut cmd);
-        let (set, removed) = env_edits(cmd.as_std());
-        for (k, v) in PYTHON_ISOLATION_SET.iter().chain(&PIP_ISOLATION_SET) {
-            assert!(
-                set.contains(&(k.to_string(), v.to_string())),
-                "{k} not set to {v}"
-            );
-        }
-        for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
-            assert!(removed.contains(&var.to_string()), "{var} not removed");
-        }
+        let mut std_cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut std_cmd);
+        let mut tokio_cmd = tokio::process::Command::new("python3");
+        isolate_pip_tokio_command(&mut tokio_cmd);
+        assert_eq!(env_edits(&std_cmd), env_edits(tokio_cmd.as_std()));
     }
 
     /// pip's precedence is command line > env > config file, so forcing `0`
