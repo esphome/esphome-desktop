@@ -96,11 +96,15 @@ enum ConnectError {
     /// "Not running" would mislead here — the app may well be running with
     /// its own server disabled for the same reason.
     ///
-    /// Unix only: `sun_path` is a Unix domain socket limit, and the Windows
-    /// client opens a fixed-name pipe that has no equivalent failure. Gated
-    /// rather than left dead so the Windows build doesn't carry a variant it
-    /// can never construct.
-    #[cfg(unix)]
+    /// Only ever constructed on Unix: `sun_path` is a Unix domain socket
+    /// limit, and the Windows `connect()` opens a fixed-name pipe that can
+    /// only fail as `NotRunning`. Kept on both platforms and allowed to be
+    /// dead on Windows rather than `#[cfg(unix)]`-gated, because gating it
+    /// leaves `ConnectError` single-variant there, which makes every
+    /// `Err(ConnectError::NotRunning) => …` arm exhaustive and every catch-all
+    /// `Err(e) => …` after it an unreachable-pattern error. A uniform enum
+    /// shape keeps the matches identical on both platforms.
+    #[cfg_attr(windows, allow(dead_code))]
     BadPath(String),
     /// Connecting failed — the usual "app is not running" case.
     NotRunning,
@@ -117,7 +121,6 @@ fn simple(request: Request, timeout: Duration) -> ExitCode {
 
 fn connect_failed(error: ConnectError) -> ExitCode {
     match error {
-        #[cfg(unix)]
         ConnectError::BadPath(message) => fail(message),
         ConnectError::NotRunning => not_running(),
     }
@@ -626,7 +629,6 @@ fn api_stream(request: &Request, timeout: Duration) -> u8 {
         Err(ConnectError::NotRunning) => {
             return api_err_line("not_running", "the app is not running", EXIT_NOT_RUNNING)
         }
-        #[cfg(unix)]
         Err(ConnectError::BadPath(message)) => {
             return api_err_line("bad_path", &message, EXIT_FAILED)
         }
