@@ -52,14 +52,28 @@
 ; Best effort throughout. If PowerShell is missing or wedged the timeout gives
 ; up and the install continues; the worst case is the leftover files users
 ; already get today.
-; An empty `Dir` must never reach the sweep. `[System.IO.Path]::GetFullPath('\')`
-; resolves to `C:\`, every running process then matches the prefix test, and the
-; sweep would `Stop-Process -Force` the user's entire session mid-install. That
-; is a catastrophically worse outcome than the locked files this exists to clear,
-; so it is guarded twice: here, where the value is known, and again inside the
-; script, so neither guard alone is load-bearing. `$INSTDIR` should always be set
-; by the time these hooks run, but the uninstaller populates it from the registry
-; and a corrupt install is exactly when someone reaches for the uninstaller.
+; The sweep must never be scoped to a filesystem root. Every running process
+; matches a `C:\` prefix test, so the sweep would `Stop-Process -Force` the
+; user's entire session mid-install: catastrophically worse than the locked files
+; this exists to clear. Two ways in, guarded separately because they fail
+; differently:
+;
+;   - An empty `Dir`, where `GetFullPath('\')` resolves to `C:\`. Guarded twice
+;     over, at the NSIS layer where the value is known and again in the script,
+;     so neither guard alone is load-bearing. `$INSTDIR` should always be set by
+;     the time these hooks run, but the uninstaller populates it from the
+;     registry and a corrupt install is exactly when someone reaches for the
+;     uninstaller. Note `SetEnvironmentVariableW` with an empty string deletes
+;     the variable rather than emptying it; both are falsy in PowerShell, so the
+;     script-side guard covers either without having to know which happened.
+;   - A `Dir` that is itself a root, `D:\` or `\\server\share\`, which survives
+;     any amount of trailing-separator normalisation because normalising a root
+;     yields a root. Comparing the normalised path against its own `GetPathRoot`
+;     catches the whole class rather than the two spellings we happened to think
+;     of; a real install directory always has a parent, a root never does.
+;
+; Neither is likely. Both are one clause, and the argument is blast radius rather
+; than probability, which is not a trade worth reasoning your way out of.
 !macro KillProcessesUnder Dir
   ${If} "${Dir}" == ""
     DetailPrint "Skipping process sweep: no directory to scope it to."
@@ -68,7 +82,7 @@
     ; Tauri's generated template is using around these hooks.
     Push $0
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
-    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$procs) { foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; Wait-Process -Id $$procs.ProcessId -Timeout 20 }"`
+    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$procs) { foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; Wait-Process -Id $$procs.ProcessId -Timeout 20 }"`
     ; Discard nsExec's status, then restore the caller's $0.
     Pop $0
     Pop $0
