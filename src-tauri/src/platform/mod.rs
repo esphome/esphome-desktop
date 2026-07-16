@@ -1096,29 +1096,36 @@ pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// pip reads `PIP_*` from the environment as config, so an ambient setting can
-/// redirect an install straight back off the tree [`PYTHON_ISOLATION_SET`] just
-/// pinned the interpreter to. We always want these installs landing in the
-/// managed `site-packages`, so the user's global pip preferences do not get a
-/// vote.
+/// pip settings that would send an install somewhere other than the managed
+/// tree [`PYTHON_ISOLATION_SET`] just pinned the interpreter to.
 ///
-/// Two of these are load-bearing rather than theoretical. `PIP_USER=1` is a
-/// common `sudo pip` workaround, and it used to "work" here only because the
-/// install went to user site and user site was importable; with the former on
-/// and the latter now off, pip aborts the install outright. And
-/// `PIP_REQUIRE_VIRTUALENV=1` fails every pip call we make regardless of user
-/// site, since the bundled tree is not a venv.
-const PIP_ISOLATION_REMOVE: [&str; 4] = [
-    "PIP_USER",
-    "PIP_TARGET",
-    "PIP_PREFIX",
-    "PIP_REQUIRE_VIRTUALENV",
-];
+/// Both are load-bearing rather than theoretical. `user` is a common `sudo pip`
+/// workaround, and it only ever "worked" here because the install went to user
+/// site and user site was importable; with the latter now off, pip aborts the
+/// install outright. `require-virtualenv` fails every pip call we make
+/// regardless of user site, since the bundled tree is not a venv.
+///
+/// These are forced to `0` rather than unset because pip resolves config as
+/// command line > env > config file. Unsetting only clears the ambient env var
+/// and leaves a `user = true` in `~/.config/pip/pip.conf` in force; an explicit
+/// `0` overrides the file too. Note this deliberately does not touch
+/// `PIP_CONFIG_FILE`: dropping it would discard the rest of the user's pip
+/// config (a corporate `index-url`, proxy settings) while still leaving the
+/// default config files to be read, so it neutralizes nothing on its own.
+const PIP_ISOLATION_SET: [(&str, &str); 2] = [("PIP_USER", "0"), ("PIP_REQUIRE_VIRTUALENV", "0")];
+
+/// pip settings that repoint the install directly. Unlike
+/// [`PIP_ISOLATION_SET`], these have no meaningful "off" value to force, so the
+/// ambient var is simply dropped.
+const PIP_ISOLATION_REMOVE: [&str; 2] = ["PIP_TARGET", "PIP_PREFIX"];
 
 /// [`isolate_python_command`] plus the `PIP_*` config that would redirect the
 /// install target. For commands running `-m pip`.
 pub fn isolate_pip_command(cmd: &mut std::process::Command) {
     isolate_python_command(cmd);
+    for (k, v) in PIP_ISOLATION_SET {
+        cmd.env(k, v);
+    }
     for k in PIP_ISOLATION_REMOVE {
         cmd.env_remove(k);
     }
@@ -1127,6 +1134,9 @@ pub fn isolate_pip_command(cmd: &mut std::process::Command) {
 /// [`isolate_pip_command`] for a tokio::process::Command.
 pub fn isolate_pip_tokio_command(cmd: &mut tokio::process::Command) {
     isolate_python_tokio_command(cmd);
+    for (k, v) in PIP_ISOLATION_SET {
+        cmd.env(k, v);
+    }
     for k in PIP_ISOLATION_REMOVE {
         cmd.env_remove(k);
     }
@@ -2191,8 +2201,8 @@ mod tests {
         let cmd = pip_command(Path::new("python3"));
         let (set, removed) = env_edits(cmd.as_std());
         assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        assert!(set.contains(&("PIP_USER".to_string(), "0".to_string())));
         assert!(removed.contains(&"PYTHONPATH".to_string()));
-        assert!(removed.contains(&"PIP_USER".to_string()));
     }
 
     /// pip isolation is a superset of Python isolation: a pip install that
@@ -2203,7 +2213,12 @@ mod tests {
         let mut cmd = std::process::Command::new("python3");
         isolate_pip_command(&mut cmd);
         let (set, removed) = env_edits(&cmd);
-        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        for (k, v) in PYTHON_ISOLATION_SET.iter().chain(&PIP_ISOLATION_SET) {
+            assert!(
+                set.contains(&(k.to_string(), v.to_string())),
+                "{k} not set to {v}"
+            );
+        }
         for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
             assert!(removed.contains(&var.to_string()), "{var} not removed");
         }
@@ -2214,9 +2229,32 @@ mod tests {
         let mut cmd = tokio::process::Command::new("python3");
         isolate_pip_tokio_command(&mut cmd);
         let (set, removed) = env_edits(cmd.as_std());
-        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        for (k, v) in PYTHON_ISOLATION_SET.iter().chain(&PIP_ISOLATION_SET) {
+            assert!(
+                set.contains(&(k.to_string(), v.to_string())),
+                "{k} not set to {v}"
+            );
+        }
         for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
             assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    /// pip's precedence is command line > env > config file, so forcing `0`
+    /// beats unsetting: a `user = true` in the user's pip.conf survives the
+    /// latter. Pin the values, not just the keys, so a future edit back to
+    /// `env_remove` fails here rather than in the field.
+    #[test]
+    fn pip_isolation_forces_off_rather_than_unsetting() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut cmd);
+        let (set, removed) = env_edits(&cmd);
+        for var in ["PIP_USER", "PIP_REQUIRE_VIRTUALENV"] {
+            assert!(
+                set.contains(&(var.to_string(), "0".to_string())),
+                "{var} must be forced to 0, not unset"
+            );
+            assert!(!removed.contains(&var.to_string()));
         }
     }
 
