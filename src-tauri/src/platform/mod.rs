@@ -872,7 +872,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
     cmd.stderr(std::process::Stdio::piped());
-    isolate_python_command(&mut cmd);
+    isolate_pip_command(&mut cmd);
     configure_no_window_command(&mut cmd);
 
     let mut child = cmd.spawn().context("Failed to spawn pip install")?;
@@ -1096,6 +1096,42 @@ pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// pip reads `PIP_*` from the environment as config, so an ambient setting can
+/// redirect an install straight back off the tree [`PYTHON_ISOLATION_SET`] just
+/// pinned the interpreter to. We always want these installs landing in the
+/// managed `site-packages`, so the user's global pip preferences do not get a
+/// vote.
+///
+/// Two of these are load-bearing rather than theoretical. `PIP_USER=1` is a
+/// common `sudo pip` workaround, and it used to "work" here only because the
+/// install went to user site and user site was importable; with the former on
+/// and the latter now off, pip aborts the install outright. And
+/// `PIP_REQUIRE_VIRTUALENV=1` fails every pip call we make regardless of user
+/// site, since the bundled tree is not a venv.
+const PIP_ISOLATION_REMOVE: [&str; 4] = [
+    "PIP_USER",
+    "PIP_TARGET",
+    "PIP_PREFIX",
+    "PIP_REQUIRE_VIRTUALENV",
+];
+
+/// [`isolate_python_command`] plus the `PIP_*` config that would redirect the
+/// install target. For commands running `-m pip`.
+pub fn isolate_pip_command(cmd: &mut std::process::Command) {
+    isolate_python_command(cmd);
+    for k in PIP_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
+}
+
+/// [`isolate_pip_command`] for a tokio::process::Command.
+pub fn isolate_pip_tokio_command(cmd: &mut tokio::process::Command) {
+    isolate_python_tokio_command(cmd);
+    for k in PIP_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
+}
+
 /// Configure std::process::Command to not create a console window on Windows
 pub fn configure_no_window_command(cmd: &mut std::process::Command) {
     #[cfg(target_os = "windows")]
@@ -1128,7 +1164,7 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
 pub fn pip_command(python: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(python);
     cmd.args(["-m", "pip", "install"]);
-    isolate_python_tokio_command(&mut cmd);
+    isolate_pip_tokio_command(&mut cmd);
     configure_no_window_tokio_command(&mut cmd);
     cmd
 }
@@ -2148,13 +2184,40 @@ mod tests {
     }
 
     /// pip resolves and installs against the same interpreter the backend runs
-    /// on, so it has to see the same `sys.path` the backend will.
+    /// on, so it has to see the same `sys.path` the backend will, and it must
+    /// not be redirected off that tree by ambient `PIP_*` config.
     #[test]
     fn pip_command_is_isolated() {
         let cmd = pip_command(Path::new("python3"));
         let (set, removed) = env_edits(cmd.as_std());
         assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
         assert!(removed.contains(&"PYTHONPATH".to_string()));
+        assert!(removed.contains(&"PIP_USER".to_string()));
+    }
+
+    /// pip isolation is a superset of Python isolation: a pip install that
+    /// lands outside the managed tree is as broken as an import that resolves
+    /// outside it.
+    #[test]
+    fn isolate_pip_command_covers_python_isolation_too() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut cmd);
+        let (set, removed) = env_edits(&cmd);
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    #[test]
+    fn isolate_pip_tokio_command_matches_std_variant() {
+        let mut cmd = tokio::process::Command::new("python3");
+        isolate_pip_tokio_command(&mut cmd);
+        let (set, removed) = env_edits(cmd.as_std());
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
     }
 
     #[test]
