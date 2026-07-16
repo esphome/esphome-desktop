@@ -81,16 +81,21 @@ jobs:
   # Win32 console/process-group code, the macOS app-cleanup and CLT git probe,
   # the platform-specific Python paths, …) is invisible to the required gate.
   # `cargo fmt` is the exception — it formats stripped-out branches regardless
-  # of target — so formatting is checked here just like on Linux (advisory on
-  # this job).
+  # of target — so formatting is checked here just like on Linux.
   #
-  # Every step here is ADVISORY: these checks run for the first time on these
-  # platforms and have no established green baseline, so a real lint, a Windows
-  # newline quirk, or a path-separator assumption in a test would otherwise
-  # block unrelated PRs. A failure surfaces as a `::warning::` annotation
-  # instead of a red check. This mirrors exactly how the Linux clippy/fmt gates
-  # were introduced (advisory first, promoted once green). To promote: drop the
-  # `|| echo "::warning::…"` tails and add these checks to branch protection.
+  # These steps were ADVISORY while they had no established green baseline, on
+  # the reasoning that a Windows newline quirk or a path-separator assumption
+  # shouldn't block unrelated PRs. That baseline now exists, and the advisory
+  # tails cost more than they saved: clippy failed on windows-latest from the
+  # day this job landed and the job reported success the whole time, so the
+  # Windows-only code — which is exactly what this job exists to cover, and
+  # which the required Linux gate can never see — was never linted at all. A
+  # check that is green whether or not it passes is worse than no check, because
+  # it reads as coverage. See #325.
+  #
+  # So they now fail the job. Note that a red check only *blocks a merge* if it
+  # is also a required check in branch protection; that is a repo setting, not
+  # something this file can do.
   lint-test-cross:
     name: Rust lint & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -104,10 +109,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      # Same pinned toolchain as the Linux job so the advisory clippy/fmt lints
-      # match what a maintainer would promote later. No webkit/appindicator
-      # deps are needed: Tauri uses the system WebView2 (Windows) / WKWebView
-      # (macOS), not the GTK/webkit stack.
+      # Same pinned toolchain as the Linux job, so a lint is a lint regardless
+      # of which job caught it. No webkit/appindicator deps are needed: Tauri
+      # uses the system WebView2 (Windows) / WKWebView (macOS), not the
+      # GTK/webkit stack.
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
         with:
@@ -121,19 +126,25 @@ jobs:
       - name: Stub bundle resource dirs
         uses: ./.github/actions/stub-bundle-dirs
 
-      # fmt is cfg-agnostic and already green on Linux; advisory here only to
-      # guard against a Windows newline quirk on this first run.
-      - name: Formatting (advisory)
+      # fmt is cfg-agnostic and already green on Linux, so this is belt and
+      # braces against a platform newline quirk rather than a real second check.
+      - name: Formatting
         working-directory: src-tauri
         shell: bash
-        run: cargo fmt --all --check || echo "::warning::cargo fmt --check failed on ${{ matrix.os }} (advisory — not blocking)"
+        run: cargo fmt --all --check
 
-      - name: Clippy (advisory)
+      # The whole point of this job: the required Linux gate only ever
+      # evaluates the host cfg, so this is the only thing that lints the
+      # `#[cfg(target_os = "windows")]` / `#[cfg(target_os = "macos")]` code.
+      - name: Clippy
         working-directory: src-tauri
         shell: bash
-        run: cargo clippy --all-targets --all-features -- -D warnings || echo "::warning::clippy found issues on ${{ matrix.os }} (advisory — not blocking)"
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Tests (advisory)
+      # Same reasoning as clippy: the platform-gated tests (e.g. the Windows
+      # job-object test) only ever run here, so an advisory tail would mean a
+      # green check proving nothing about the code it is meant to cover.
+      - name: Tests
         working-directory: src-tauri
         shell: bash
-        run: cargo test --all-features --verbose || echo "::warning::cargo test failed on ${{ matrix.os }} (advisory — not blocking)"
+        run: cargo test --all-features --verbose
