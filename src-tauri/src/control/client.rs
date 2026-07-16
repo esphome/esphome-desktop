@@ -95,6 +95,12 @@ enum ConnectError {
     /// The socket path itself is unusable (e.g. too long for `sun_path`).
     /// "Not running" would mislead here — the app may well be running with
     /// its own server disabled for the same reason.
+    ///
+    /// Unix only: `sun_path` is a Unix domain socket limit, and the Windows
+    /// client opens a fixed-name pipe that has no equivalent failure. Gated
+    /// rather than left dead so the Windows build doesn't carry a variant it
+    /// can never construct.
+    #[cfg(unix)]
     BadPath(String),
     /// Connecting failed — the usual "app is not running" case.
     NotRunning,
@@ -111,6 +117,7 @@ fn simple(request: Request, timeout: Duration) -> ExitCode {
 
 fn connect_failed(error: ConnectError) -> ExitCode {
     match error {
+        #[cfg(unix)]
         ConnectError::BadPath(message) => fail(message),
         ConnectError::NotRunning => not_running(),
     }
@@ -619,6 +626,7 @@ fn api_stream(request: &Request, timeout: Duration) -> u8 {
         Err(ConnectError::NotRunning) => {
             return api_err_line("not_running", "the app is not running", EXIT_NOT_RUNNING)
         }
+        #[cfg(unix)]
         Err(ConnectError::BadPath(message)) => {
             return api_err_line("bad_path", &message, EXIT_FAILED)
         }

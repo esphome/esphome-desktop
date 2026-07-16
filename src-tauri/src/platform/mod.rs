@@ -487,7 +487,7 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
