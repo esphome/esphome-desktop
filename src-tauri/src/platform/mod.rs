@@ -1125,9 +1125,13 @@ const PIP_ISOLATION_SET: [(&str, &str); 2] = [("PIP_USER", "0"), ("PIP_REQUIRE_V
 /// so a `target`/`prefix` in the user's own pip.conf still redirects the
 /// install off the managed tree, and an ESPHome update then reports success
 /// while landing somewhere this interpreter will never import. The only lever
-/// that would neutralize it is `PIP_CONFIG_FILE=os.devnull`, which throws away
-/// the rest of their pip config (see [`PIP_ISOLATION_SET`]); that trade is not
-/// worth it for a config this rare, and the gap predates the isolation work.
+/// that would neutralize it is pointing `PIP_CONFIG_FILE` at the platform's
+/// null device (`/dev/null`, `NUL` on Windows), which throws away the rest of
+/// their pip config (see [`PIP_ISOLATION_SET`]); that trade is not worth it for
+/// a config this rare, and the gap predates the isolation work. Note pip's docs
+/// spell that lever `os.devnull`, meaning the *value* of Python's constant: set
+/// literally, it is just a relative path that does not exist, and pip silently
+/// falls back to the default config files rather than erroring.
 const PIP_ISOLATION_REMOVE: [&str; 2] = ["PIP_TARGET", "PIP_PREFIX"];
 
 /// [`isolate_python_command`] plus the `PIP_*` config that would redirect the
