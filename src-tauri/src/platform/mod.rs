@@ -1115,8 +1115,19 @@ pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
 const PIP_ISOLATION_SET: [(&str, &str); 2] = [("PIP_USER", "0"), ("PIP_REQUIRE_VIRTUALENV", "0")];
 
 /// pip settings that repoint the install directly. Unlike
-/// [`PIP_ISOLATION_SET`], these have no meaningful "off" value to force, so the
-/// ambient var is simply dropped.
+/// [`PIP_ISOLATION_SET`], these have no "off" value to force: pip strips empty
+/// config values before it applies the override order (`if v` in
+/// `ConfigOptionParser._get_ordered_configuration_items`), so `PIP_TARGET=""`
+/// never reaches the defaults and the config file wins by fallthrough. Dropping
+/// the ambient var is all that is available.
+///
+/// Known residual gap, deliberately not closed: this only clears the env var,
+/// so a `target`/`prefix` in the user's own pip.conf still redirects the
+/// install off the managed tree, and an ESPHome update then reports success
+/// while landing somewhere this interpreter will never import. The only lever
+/// that would neutralize it is `PIP_CONFIG_FILE=os.devnull`, which throws away
+/// the rest of their pip config (see [`PIP_ISOLATION_SET`]); that trade is not
+/// worth it for a config this rare, and the gap predates the isolation work.
 const PIP_ISOLATION_REMOVE: [&str; 2] = ["PIP_TARGET", "PIP_PREFIX"];
 
 /// [`isolate_python_command`] plus the `PIP_*` config that would redirect the
