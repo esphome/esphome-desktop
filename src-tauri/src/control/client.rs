@@ -99,11 +99,15 @@ enum ConnectError {
     /// Only ever constructed on Unix: `sun_path` is a Unix domain socket
     /// limit, and the Windows `connect()` opens a fixed-name pipe that can
     /// only fail as `NotRunning`. Kept on both platforms and allowed to be
-    /// dead on Windows rather than `#[cfg(unix)]`-gated, because gating it
-    /// leaves `ConnectError` single-variant there, which makes every
-    /// `Err(ConnectError::NotRunning) => …` arm exhaustive and every catch-all
-    /// `Err(e) => …` after it an unreachable-pattern error. A uniform enum
-    /// shape keeps the matches identical on both platforms.
+    /// dead on Windows rather than `#[cfg(unix)]`-gated.
+    ///
+    /// Gating was tried and does not work: it leaves `ConnectError`
+    /// single-valued on Windows, so the `Err(ConnectError::NotRunning)` arms in
+    /// `open_cmd` and `status_cmd` become exhaustive and the catch-all
+    /// `Err(e) => connect_failed(e)` after each one is an unreachable-pattern
+    /// error. Those two arms never name `BadPath`, so they don't turn up when
+    /// you grep for it. A uniform enum shape keeps every match identical on
+    /// both platforms and doesn't leave the same trap for the next catch-all.
     #[cfg_attr(windows, allow(dead_code))]
     BadPath(String),
     /// Connecting failed — the usual "app is not running" case.
