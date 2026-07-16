@@ -872,6 +872,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
     cmd.stderr(std::process::Stdio::piped());
+    isolate_python_command(&mut cmd);
     configure_no_window_command(&mut cmd);
 
     let mut child = cmd.spawn().context("Failed to spawn pip install")?;
@@ -1019,16 +1020,18 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Spawn the given Python interpreter with `args`, suppress the console
-/// window on Windows, and capture its output. This only removes the
-/// spawn/capture boilerplate: it adds no flags of its own (callers pass
-/// exactly the flags they need, `-I` included or not), and callers keep their
-/// own policy for exit status, logging, and stdout/stderr interpretation.
+/// window on Windows, isolate it from user site-packages (see
+/// [`isolate_python_command`]), and capture its output. It adds no *flags* of
+/// its own (callers pass exactly the flags they need, `-I` included or not),
+/// and callers keep their own policy for exit status, logging, and
+/// stdout/stderr interpretation.
 pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = std::process::Command::new(python);
     cmd.args(args);
+    isolate_python_command(&mut cmd);
     configure_no_window_command(&mut cmd);
     cmd.output()
 }
@@ -1048,6 +1051,49 @@ pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
     Ok(Some(
         String::from_utf8_lossy(&output.stdout).trim().to_string(),
     ))
+}
+
+/// Env that keeps the managed interpreter on its own tree.
+///
+/// The bundled Python is a plain (non-venv) install, so `site.py` runs
+/// `addusersitepackages()` before `addsitepackages()` and the per-user site
+/// directory (`~/.local/lib/pythonX.Y/site-packages`, or
+/// `%APPDATA%\Python\PythonXY\site-packages` on Windows) lands on `sys.path`
+/// AHEAD of our own `site-packages`. Anyone who has ever run `pip install
+/// --user` against a same-minor system Python therefore shadows our pinned
+/// dependencies with theirs, and the backend dies at import (#318). The
+/// ambient `PYTHON*` vars can redirect the interpreter just as effectively, so
+/// drop them too.
+///
+/// This is an env var rather than a `-s` flag so it also reaches the processes
+/// the backend spawns for itself (esptool, PlatformIO, compilers), which run
+/// against the same tree and have the same exposure. venvs already ignore user
+/// site, so inheriting it costs them nothing.
+const PYTHON_ISOLATION_SET: [(&str, &str); 1] = [("PYTHONNOUSERSITE", "1")];
+
+/// Ambient vars that can redirect the interpreter off its own tree just as
+/// effectively as user site. See [`PYTHON_ISOLATION_SET`].
+const PYTHON_ISOLATION_REMOVE: [&str; 3] = ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"];
+
+/// Point the managed interpreter at its own tree only, per
+/// [`PYTHON_ISOLATION_SET`].
+pub fn isolate_python_command(cmd: &mut std::process::Command) {
+    for (k, v) in PYTHON_ISOLATION_SET {
+        cmd.env(k, v);
+    }
+    for k in PYTHON_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
+}
+
+/// [`isolate_python_command`] for a tokio::process::Command.
+pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
+    for (k, v) in PYTHON_ISOLATION_SET {
+        cmd.env(k, v);
+    }
+    for k in PYTHON_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
 }
 
 /// Configure std::process::Command to not create a console window on Windows
@@ -1082,6 +1128,7 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
 pub fn pip_command(python: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(python);
     cmd.args(["-m", "pip", "install"]);
+    isolate_python_tokio_command(&mut cmd);
     configure_no_window_tokio_command(&mut cmd);
     cmd
 }
@@ -2054,6 +2101,61 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::util::unique_temp_dir;
+
+    /// Collect a command's staged env edits into (set, removed). `get_envs`
+    /// yields `(key, None)` for a var marked for removal and `(key, Some(v))`
+    /// for one that is set.
+    fn env_edits(cmd: &std::process::Command) -> (Vec<(String, String)>, Vec<String>) {
+        let mut set = Vec::new();
+        let mut removed = Vec::new();
+        for (k, v) in cmd.get_envs() {
+            let k = k.to_string_lossy().into_owned();
+            match v {
+                Some(v) => set.push((k, v.to_string_lossy().into_owned())),
+                None => removed.push(k),
+            }
+        }
+        (set, removed)
+    }
+
+    #[test]
+    fn isolate_python_command_disables_user_site() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut cmd);
+        let (set, _) = env_edits(&cmd);
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+    }
+
+    #[test]
+    fn isolate_python_command_strips_ambient_python_vars() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut cmd);
+        let (_, removed) = env_edits(&cmd);
+        for var in ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"] {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    #[test]
+    fn isolate_python_tokio_command_matches_std_variant() {
+        let mut cmd = tokio::process::Command::new("python3");
+        isolate_python_tokio_command(&mut cmd);
+        let (set, removed) = env_edits(cmd.as_std());
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        for var in ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"] {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    /// pip resolves and installs against the same interpreter the backend runs
+    /// on, so it has to see the same `sys.path` the backend will.
+    #[test]
+    fn pip_command_is_isolated() {
+        let cmd = pip_command(Path::new("python3"));
+        let (set, removed) = env_edits(cmd.as_std());
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        assert!(removed.contains(&"PYTHONPATH".to_string()));
+    }
 
     #[test]
     fn path_with_prepended_puts_dir_first() {
