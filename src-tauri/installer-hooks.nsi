@@ -14,13 +14,15 @@
 
 ; Kill every process running from under `Dir`, then wait for it to actually go.
 ;
-; Closing the backend is the app's job, not the installer's, and the app now
-; does it unconditionally: the backend is held in a job object with
+; Closing the backend is the app's job, not the installer's. PR #321 makes the
+; app do it unconditionally by holding the backend in a job object with
 ; JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, so Windows kills it whenever the desktop
 ; process dies, however it dies. These hooks are the backstop for the cases that
-; guarantee cannot reach.
+; guarantee cannot reach. If you are reading this and find no job object in
+; src-tauri/src/, that PR has not landed yet and these hooks are currently doing
+; the whole job rather than backstopping it.
 ;
-; The one it structurally cannot reach is the upgrade off a version that predates
+; The case it structurally cannot reach is the upgrade off a version that predates
 ; the job object. Such a build can still leave a backend behind, and PREINSTALL
 ; runs before the newly installed app has ever launched, so nothing else is going
 ; to clear it. That matters because on Windows the backend runs straight out of
@@ -32,6 +34,10 @@
 ;
 ; Beyond that it is belt and braces: job object setup is best effort in the app
 ; and logs a warning if it fails, and this costs one PowerShell invocation.
+;
+; The sweep is bounded twice over: Wait-Process takes every PID at once under a
+; single 20s cap rather than per process, so it cannot creep past the nsExec
+; timeout no matter how many processes are stuck.
 ;
 ; Match on the executable's full path rather than its name: a bare
 ; `taskkill /IM python.exe` would take the user's own Python installs with it.
@@ -46,11 +52,28 @@
 ; Best effort throughout. If PowerShell is missing or wedged the timeout gives
 ; up and the install continues; the worst case is the leftover files users
 ; already get today.
+; An empty `Dir` must never reach the sweep. `[System.IO.Path]::GetFullPath('\')`
+; resolves to `C:\`, every running process then matches the prefix test, and the
+; sweep would `Stop-Process -Force` the user's entire session mid-install. That
+; is a catastrophically worse outcome than the locked files this exists to clear,
+; so it is guarded twice: here, where the value is known, and again inside the
+; script, so neither guard alone is load-bearing. `$INSTDIR` should always be set
+; by the time these hooks run, but the uninstaller populates it from the registry
+; and a corrupt install is exactly when someone reaches for the uninstaller.
 !macro KillProcessesUnder Dir
-  System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
-  nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = [System.IO.Path]::GetFullPath($$env:ESPHOME_KILL_ROOT + '\'); $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; foreach ($$p in $$procs) { Wait-Process -Id $$p.ProcessId -Timeout 20 }"`
-  Pop $0
-  System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", n)'
+  ${If} "${Dir}" == ""
+    DetailPrint "Skipping process sweep: no directory to scope it to."
+  ${Else}
+    ; Save $0 rather than clobbering it; the register is shared with whatever
+    ; Tauri's generated template is using around these hooks.
+    Push $0
+    System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
+    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$procs) { foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; Wait-Process -Id $$procs.ProcessId -Timeout 20 }"`
+    ; Discard nsExec's status, then restore the caller's $0.
+    Pop $0
+    Pop $0
+    System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", n)'
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
