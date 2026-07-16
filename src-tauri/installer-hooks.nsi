@@ -50,20 +50,20 @@
 ; $TEMP so they can delete their own install dir, so the running uninstaller's
 ; path is not under `Dir` and it does not match itself.
 ;
-; KNOWN INTERACTION, not yet decided: Tauri's template runs these hooks *before*
-; its own `CheckIfAppIsRunning` (installer.nsi:642 then :645; :779 then :782 for
-; uninstall). The main binary lives directly in `$INSTDIR`, so a `$INSTDIR` sweep
-; matches and force-kills it first, and `CheckIfAppIsRunning`'s
-; "app is running, OK to close it?" MessageBox — whose Cancel aborts the install
-; — never fires. So on a manual install over a running app the user silently
-; loses the chance to cancel. (Updater-driven installs set passive mode, which
-; suppresses that prompt anyway, so this only affects hand-run installers.)
+; KNOWN INTERACTION, tracked in #324: Tauri's template runs these hooks *before*
+; its own `CheckIfAppIsRunning` (true as of the v2.11.4 template; both the
+; install and uninstall sections have that order). The main binary lives directly
+; in `$INSTDIR`, so a `$INSTDIR` sweep matches and force-kills it first, and
+; `CheckIfAppIsRunning`'s "app is running, OK to close it?" MessageBox — whose
+; Cancel aborts the install — never fires. So on a manual install over a running
+; app the user silently loses the chance to cancel. (Updater-driven installs set
+; passive mode, which suppresses that prompt anyway, so this only affects
+; hand-run installers.)
 ;
 ; Excluding the main binary here is not the fix: it would kill the backend first
 ; and prompt second, so cancelling would cost the user their compile *and* the
-; install. The real options are to skip the sweep while the app is live and let
-; the template own that case, or to accept the preemption deliberately. Left as
-; the status quo pending that call rather than picked silently here.
+; install. See #324 for the options; left as the status quo pending that call
+; rather than picked silently here.
 ;
 ; Best effort throughout. If PowerShell is missing or wedged the timeout gives
 ; up and the install continues; the worst case is the leftover files users
@@ -92,10 +92,11 @@
   ${If} "${Dir}" == ""
     DetailPrint "Skipping process sweep: no directory to scope it to."
   ${Else}
+    ; Names the directory rather than a product: one call site sweeps the legacy
+    ; "ESPHome Builder" tree, so a fixed product name would be wrong there.
     ; Worded for the common case, where nothing is running and this finds
-    ; nothing; every call site sweeps the same way, so the message lives here
-    ; rather than being repeated (and drifting) at each one.
-    DetailPrint "Checking for running ESPHome Device Builder processes..."
+    ; nothing. Lives here rather than being repeated (and drifting) per site.
+    DetailPrint "Checking for running processes under ${Dir}..."
     ; Save $0 rather than clobbering it; the register is shared with whatever
     ; Tauri's generated template is using around these hooks.
     Push $0
