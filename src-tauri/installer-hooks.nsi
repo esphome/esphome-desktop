@@ -42,8 +42,9 @@
 ; Match on the executable's full path rather than its name: a bare
 ; `taskkill /IM python.exe` would take the user's own Python installs with it.
 ; The directory is passed through the environment instead of being interpolated
-; into the script text so that a path containing a quote (a username like
-; O'Brien) can't break out of the command.
+; into the script text, so a path containing an apostrophe (a username like
+; O'Brien) can't terminate the PowerShell string literal and break out of the
+; command.
 ;
 ; Safe to run from the uninstaller: NSIS uninstallers re-exec from a copy in
 ; $TEMP so they can delete their own install dir, so the running uninstaller's
@@ -81,6 +82,13 @@
     ; Save $0 rather than clobbering it; the register is shared with whatever
     ; Tauri's generated template is using around these hooks.
     Push $0
+    ; Clear any inherited value before setting ours. The name is ours, but
+    ; nothing stops it already existing in the environment, and if the set below
+    ; failed the sweep would otherwise run scoped to whatever was already
+    ; there. Clearing first means a failed set leaves it absent, which the
+    ; script's own falsy guard turns into an exit rather than a wrong-directory
+    ; kill.
+    System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", n)'
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
     nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$procs) { foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; Wait-Process -Id $$procs.ProcessId -Timeout 20 }"`
     ; Discard nsExec's status, then restore the caller's $0.
