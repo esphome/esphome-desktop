@@ -35,9 +35,9 @@
 ; Beyond that it is belt and braces: job object setup is best effort in the app
 ; and logs a warning if it fails, and this costs one PowerShell invocation.
 ;
-; The sweep is bounded twice over: Wait-Process takes every PID at once under a
-; single 20s cap rather than per process, so it cannot creep past the nsExec
-; timeout no matter how many processes are stuck.
+; The sweep is bounded: Stop-Process and Wait-Process each take every PID at
+; once, under a single 20s cap rather than one per process, so the wait cannot
+; creep past the nsExec timeout no matter how many processes are stuck.
 ;
 ; Match on the executable's full path rather than its name: a bare
 ; `taskkill /IM python.exe` would take the user's own Python installs with it.
@@ -50,9 +50,25 @@
 ; $TEMP so they can delete their own install dir, so the running uninstaller's
 ; path is not under `Dir` and it does not match itself.
 ;
+; KNOWN INTERACTION, not yet decided: Tauri's template runs these hooks *before*
+; its own `CheckIfAppIsRunning` (installer.nsi:642 then :645; :779 then :782 for
+; uninstall). The main binary lives directly in `$INSTDIR`, so a `$INSTDIR` sweep
+; matches and force-kills it first, and `CheckIfAppIsRunning`'s
+; "app is running, OK to close it?" MessageBox — whose Cancel aborts the install
+; — never fires. So on a manual install over a running app the user silently
+; loses the chance to cancel. (Updater-driven installs set passive mode, which
+; suppresses that prompt anyway, so this only affects hand-run installers.)
+;
+; Excluding the main binary here is not the fix: it would kill the backend first
+; and prompt second, so cancelling would cost the user their compile *and* the
+; install. The real options are to skip the sweep while the app is live and let
+; the template own that case, or to accept the preemption deliberately. Left as
+; the status quo pending that call rather than picked silently here.
+;
 ; Best effort throughout. If PowerShell is missing or wedged the timeout gives
 ; up and the install continues; the worst case is the leftover files users
 ; already get today.
+;
 ; The sweep must never be scoped to a filesystem root. Every running process
 ; matches a `C:\` prefix test, so the sweep would `Stop-Process -Force` the
 ; user's entire session mid-install: catastrophically worse than the locked files
@@ -72,13 +88,14 @@
 ;     yields a root. Comparing the normalised path against its own `GetPathRoot`
 ;     catches the whole class rather than the two spellings we happened to think
 ;     of; a real install directory always has a parent, a root never does.
-;
-; Neither is likely. Both are one clause, and the argument is blast radius rather
-; than probability, which is not a trade worth reasoning your way out of.
 !macro KillProcessesUnder Dir
   ${If} "${Dir}" == ""
     DetailPrint "Skipping process sweep: no directory to scope it to."
   ${Else}
+    ; Worded for the common case, where nothing is running and this finds
+    ; nothing; every call site sweeps the same way, so the message lives here
+    ; rather than being repeated (and drifting) at each one.
+    DetailPrint "Checking for running ESPHome Device Builder processes..."
     ; Save $0 rather than clobbering it; the register is shared with whatever
     ; Tauri's generated template is using around these hooks.
     Push $0
@@ -90,7 +107,7 @@
     ; kill.
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", n)'
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
-    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$procs = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$procs) { foreach ($$p in $$procs) { Stop-Process -Id $$p.ProcessId -Force }; Wait-Process -Id $$procs.ProcessId -Timeout 20 }"`
+    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$ids = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }).ProcessId; if ($$ids) { Stop-Process -Id $$ids -Force; Wait-Process -Id $$ids -Timeout 20 }"`
     ; Discard nsExec's status, then restore the caller's $0.
     Pop $0
     Pop $0
@@ -101,9 +118,7 @@
 !macro NSIS_HOOK_PREINSTALL
   ; A backend still holding files open here makes the file overwrites below
   ; fail, which is the "failed to update several files including git.exe"
-  ; upgrade failure. This is the case the app-side job object cannot cover: the
-  ; orphan belongs to the old build being replaced.
-  DetailPrint "Closing any running ESPHome Device Builder processes..."
+  ; upgrade failure.
   !insertmacro KillProcessesUnder "$INSTDIR"
 
   ${If} ${FileExists} "$LOCALAPPDATA\ESPHome Builder\uninstall.exe"
@@ -118,11 +133,11 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; The job object should already have taken the backend down with the app that
-  ; the uninstaller just closed, so this is normally a no-op. It only earns its
-  ; keep if that guarantee did not hold, in which case the uninstall would
-  ; otherwise leave the tree behind and the user would be back to killing
-  ; processes from Task Manager by hand.
-  DetailPrint "Closing any running ESPHome Device Builder processes..."
+  ; Until #321 lands this is the only thing that closes the backend on uninstall:
+  ; Tauri's template closes the main exe and knows nothing about `python.exe`.
+  ; Once it lands the job object takes the backend down with the app the
+  ; uninstaller just closed, and this becomes a near-no-op that only earns its
+  ; keep if that guarantee did not hold. Either way, without it the uninstall
+  ; leaves the tree behind and the user is back to Task Manager.
   !insertmacro KillProcessesUnder "$INSTDIR"
 !macroend
