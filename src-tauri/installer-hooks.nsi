@@ -65,6 +65,16 @@
 ; install. See #324 for the options; left as the status quo pending that call
 ; rather than picked silently here.
 ;
+; PowerShell is invoked by absolute path under `$SYSDIR`, never by bare name.
+; CreateProcess searches the launching binary's own directory before System32,
+; and installers are typically run straight out of Downloads — a directory the
+; browser writes to — so a bare `powershell.exe` would hand an attacker who
+; dropped one there arbitrary code execution inside the installer. In a 32-bit
+; installer (makensis' default, and no `Target` is set) WOW64 redirects `$SYSDIR`
+; to SysWOW64 and this resolves to the 32-bit PowerShell, which is equally fine:
+; the point is that both paths are system-owned rather than user-writable, and
+; WMI is out-of-process so a 32-bit host still enumerates 64-bit processes.
+;
 ; Best effort throughout. If PowerShell is missing or wedged the timeout gives
 ; up and the install continues; the worst case is the leftover files users
 ; already get today.
@@ -108,7 +118,7 @@
     ; kill.
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", n)'
     System::Call 'kernel32::SetEnvironmentVariableW(w "ESPHOME_KILL_ROOT", w "${Dir}")'
-    nsExec::ExecToLog /TIMEOUT=60000 `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$ids = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }).ProcessId; if ($$ids) { Stop-Process -Id $$ids -Force; Wait-Process -Id $$ids -Timeout 20 }"`
+    nsExec::ExecToLog /TIMEOUT=60000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'SilentlyContinue'; $$root = $$env:ESPHOME_KILL_ROOT; if (-not $$root) { exit }; $$root = [System.IO.Path]::GetFullPath($$root + '\'); if ($$root -eq [System.IO.Path]::GetPathRoot($$root)) { exit }; $$ids = @(Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, [System.StringComparison]::OrdinalIgnoreCase) }).ProcessId; if ($$ids) { Stop-Process -Id $$ids -Force; Wait-Process -Id $$ids -Timeout 20 }"`
     ; Discard nsExec's status, then restore the caller's $0.
     Pop $0
     Pop $0
