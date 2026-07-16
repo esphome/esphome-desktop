@@ -1169,8 +1169,10 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
 }
 
 /// Build a tokio `pip install` command for the given Python interpreter,
-/// prefilled with `-m pip install` and the Windows no-window flag. Callers
-/// append their own package specs and flags before running it.
+/// prefilled with `-m pip install` and the Windows no-window flag, and
+/// isolated from the ambient Python/pip environment so the install lands in
+/// the managed tree (see [`isolate_pip_command`]). Callers append their own
+/// package specs and flags before running it.
 pub fn pip_command(python: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(python);
     cmd.args(["-m", "pip", "install"]);
