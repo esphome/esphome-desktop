@@ -78,62 +78,71 @@ if (-not $exe) { throw "no main binary in $InstallDir" }
 Write-Host "Launching $($exe.Name)"
 
 # --- start it and wait for the backend ------------------------------------
+# Everything from the launch onward is wrapped so that every exit — pass, fail,
+# or throw — leaves nothing of ours running. A leaked GUI app still holding the
+# install directory open is the exact failure mode this script exists to detect,
+# so it must not be one this script can cause.
 $app = Start-Process -FilePath $exe.FullName -PassThru
-
-# The backend is Python importing ESPHome, which is not fast, and this is a
-# cold first run on a CI runner. Fail with diagnostics rather than hang.
-$deadline = [Diagnostics.Stopwatch]::StartNew()
-$backend = @()
-while ($deadline.Elapsed.TotalSeconds -lt 180) {
-    $backend = Get-BackendProcesses
-    if ($backend.Count -gt 0) { break }
-    if ($app.HasExited) {
-        Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the backend appeared"
-        throw 'the desktop process exited before starting the backend'
+try {
+    # The backend is Python importing ESPHome, which is not fast, and this is a
+    # cold first run on a CI runner. Fail with diagnostics rather than hang.
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    $backend = @()
+    while ($deadline.Elapsed.TotalSeconds -lt 180) {
+        $backend = Get-BackendProcesses
+        if ($backend.Count -gt 0) { break }
+        if ($app.HasExited) {
+            Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the backend appeared"
+            throw 'the desktop process exited before starting the backend'
+        }
+        Start-Sleep -Milliseconds 500
     }
-    Start-Sleep -Milliseconds 500
+    if ($backend.Count -eq 0) {
+        Show-Diagnostics 'the backend never started'
+        throw "no bundled python.exe under $InstallDir after 180s"
+    }
+
+    Write-Host "Backend up after $([int]$deadline.Elapsed.TotalSeconds)s: PID(s) $(@($backend.ProcessId) -join ', ')"
+
+    # --- the actual test --------------------------------------------------
+    # Force-kill the desktop with no chance to run any shutdown code. This is
+    # the NSIS uninstaller, a crash, and End Task. Nothing but the job object
+    # can save the backend from being orphaned here.
+    if ($app.HasExited) {
+        # Interesting in its own right: the desktop fell over on its own between
+        # the backend coming up and us killing it, so there is a different bug
+        # to see, and nothing was actually tested.
+        Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the force-kill"
+        throw 'the desktop process exited before it could be force-killed; nothing was tested'
+    }
+
+    Write-Host "Force-killing the desktop (PID $($app.Id))"
+    # Tolerate a race with the check above rather than throwing past the
+    # diagnostics; the wait and the poll below are what actually decide.
+    Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+    $app.WaitForExit(30000) | Out-Null
+
+    $gone = $false
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.Elapsed.TotalSeconds -lt 30) {
+        if ((Get-BackendProcesses).Count -eq 0) { $gone = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+
+    if (-not $gone) {
+        Show-Diagnostics 'the backend outlived the force-killed desktop'
+        throw 'the backend survived the desktop being force-killed; the job object did not take it down'
+    }
+
+    Write-Host "Backend died with the desktop after $([int]$watch.Elapsed.TotalMilliseconds)ms"
+    Write-Host 'PASS: the backend cannot outlive the desktop process'
 }
-if ($backend.Count -eq 0) {
-    Show-Diagnostics 'the backend never started'
-    throw "no bundled python.exe under $InstallDir after 180s"
+finally {
+    if ($app -and -not $app.HasExited) {
+        Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+    }
+    # On the failing path the whole point is that these are still alive.
+    foreach ($p in Get-BackendProcesses) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+    }
 }
-
-$backendPids = @($backend.ProcessId)
-Write-Host "Backend up after $([int]$deadline.Elapsed.TotalSeconds)s: PID(s) $($backendPids -join ', ')"
-
-# Hold handles so the PIDs cannot be recycled while we watch them.
-$handles = @($backendPids | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-
-# --- the actual test ------------------------------------------------------
-# Force-kill the desktop with no chance to run any shutdown code. This is the
-# NSIS uninstaller, a crash, and End Task. Nothing but the job object can save
-# the backend from being orphaned here.
-if ($app.HasExited) {
-    # Interesting in its own right: the desktop fell over on its own between the
-    # backend coming up and us killing it, so there is a different bug to see.
-    Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the force-kill"
-    throw 'the desktop process exited before it could be force-killed; nothing was tested'
-}
-
-Write-Host "Force-killing the desktop (PID $($app.Id))"
-# Tolerate a race with the check above rather than throwing past the
-# diagnostics; the WaitForExit below is what actually decides.
-Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-$app.WaitForExit(30000) | Out-Null
-
-$gone = $false
-$watch = [Diagnostics.Stopwatch]::StartNew()
-while ($watch.Elapsed.TotalSeconds -lt 30) {
-    if ((Get-BackendProcesses).Count -eq 0) { $gone = $true; break }
-    Start-Sleep -Milliseconds 250
-}
-
-if (-not $gone) {
-    Show-Diagnostics 'the backend outlived the force-killed desktop'
-    # Do not leave it running for the rest of the job.
-    $handles | Where-Object { $_ -and -not $_.HasExited } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-    throw 'the backend survived the desktop being force-killed; the job object did not take it down'
-}
-
-Write-Host "Backend died with the desktop after $([int]$watch.Elapsed.TotalMilliseconds)ms"
-Write-Host 'PASS: the backend cannot outlive the desktop process'
