@@ -5,9 +5,8 @@
 //! path uses to aim its diagnosis.
 
 use super::health::{bump_counter, read_counter, PROBE_TIMEOUT};
-use super::process::{
-    pip_install_blocking, run_python_capture, run_python_capture_bounded, tail_for_log,
-};
+use super::pip::pip_install_blocking;
+use super::process::{run_python_capture, run_python_capture_bounded, tail_for_log};
 use super::{
     get_bundled_python_root, get_python_parent_dir, interpreter_in_tree, PYTHON_TREE_DIRNAME,
 };
