@@ -897,6 +897,77 @@ fn tail_for_log(s: &str) -> String {
     )
 }
 
+/// How often [`run_bounded`] checks whether the child has exited. Small enough
+/// that a deadline fires promptly, large enough that polling costs nothing: even
+/// the five-minute pip bound is only a few thousand `try_wait` calls.
+const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How a child bounded by [`run_bounded`] finished.
+enum BoundedRun {
+    /// It exited on its own, within the deadline.
+    Exited(std::process::Output),
+    /// It outlived the deadline and was killed. The pipes are still drained, so
+    /// whatever it printed before the kill survives — for a hung install that
+    /// partial output is the only diagnostic there is.
+    TimedOut { stdout: Vec<u8>, stderr: Vec<u8> },
+}
+
+/// Run an already-configured `cmd` to completion, killing it if it outlives
+/// `timeout`.
+///
+/// The caller owns the policy — which interpreter, which isolation, which pipes,
+/// and what any of the outcomes mean. This owns the part that is easy to get
+/// subtly wrong and expensive to get wrong twice: a child whose output fills a
+/// pipe buffer (~64 KiB) blocks on `write` until someone reads the other end, so
+/// the pipes must be drained on their own threads or the child outlives the very
+/// deadline meant to bound it. The readers exit on their own once the child
+/// closes its fds, whether it exited or was killed.
+fn run_bounded(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<BoundedRun> {
+    use std::io::Read;
+    use std::thread::JoinHandle;
+    use std::time::Instant;
+
+    fn drain<R: Read + Send + 'static>(handle: Option<R>) -> Option<JoinHandle<Vec<u8>>> {
+        handle.map(|mut h| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = h.read_to_end(&mut buf);
+                buf
+            })
+        })
+    }
+    fn collect(reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+        reader.and_then(|t| t.join().ok()).unwrap_or_default()
+    }
+
+    let mut child = cmd.spawn()?;
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(BoundedRun::Exited(std::process::Output {
+                status,
+                stdout: collect(stdout_reader),
+                stderr: collect(stderr_reader),
+            }));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(BoundedRun::TimedOut {
+                stdout: collect(stdout_reader),
+                stderr: collect(stderr_reader),
+            });
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    }
+}
+
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
 /// needing `--pre`. On timeout the child is killed and an error is returned;
@@ -904,62 +975,30 @@ fn tail_for_log(s: &str) -> String {
 /// stalled pip can't block app launch.
 #[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
-    use std::io::Read;
-    use std::time::{Duration, Instant};
-
     let spec = format!("{}=={}", package, version);
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
+    // stderr only: pip's diagnostics go there, and nothing reads its stdout.
     cmd.stderr(std::process::Stdio::piped());
     isolate_pip_command(&mut cmd);
     configure_no_window_command(&mut cmd);
 
-    let mut child = cmd.spawn().context("Failed to spawn pip install")?;
-    let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
-
-    // Drain stderr in a background thread. pip's progress bars and resolver
-    // diagnostics can easily exceed the OS pipe buffer (~64 KiB on Linux);
-    // if nothing reads the parent's end, pip blocks on `write()` mid-install,
-    // which would defeat the deadline and hang startup. The reader exits
-    // naturally once the child closes its stderr fd (normal exit or kill).
-    let mut stderr_thread = child.stderr.take().map(|mut handle| {
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = handle.read_to_string(&mut buf);
-            buf
-        })
-    });
-
-    loop {
-        match child.try_wait().context("Failed to poll pip install")? {
-            Some(status) => {
-                let stderr = stderr_thread
-                    .take()
-                    .and_then(|t| t.join().ok())
-                    .unwrap_or_default();
-                if status.success() {
-                    return Ok(());
-                }
-                anyhow::bail!("pip install {} failed: {}", spec, tail_for_log(&stderr));
-            }
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let stderr = stderr_thread
-                        .take()
-                        .and_then(|t| t.join().ok())
-                        .unwrap_or_default();
-                    anyhow::bail!(
-                        "pip install {} timed out after {:?}; partial stderr: {}",
-                        spec,
-                        PIP_INSTALL_TIMEOUT,
-                        tail_for_log(&stderr)
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
+    let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
+    match run_bounded(cmd, PIP_INSTALL_TIMEOUT).context("Failed to run pip install")? {
+        BoundedRun::Exited(output) if output.status.success() => Ok(()),
+        BoundedRun::Exited(output) => {
+            anyhow::bail!(
+                "pip install {} failed: {}",
+                spec,
+                stderr_tail(&output.stderr)
+            )
         }
+        BoundedRun::TimedOut { stderr, .. } => anyhow::bail!(
+            "pip install {} timed out after {:?}; partial stderr: {}",
+            spec,
+            PIP_INSTALL_TIMEOUT,
+            stderr_tail(&stderr)
+        ),
     }
 }
 
@@ -1332,11 +1371,6 @@ const PACKAGE_RESET_MARKER: &str = ".package-reset-count";
 /// while turning an unfixable failure into a bounded cost and a loud log.
 const MAX_PACKAGE_RESETS: u32 = 2;
 
-/// Path of the repair-attempt counter, given the app data dir.
-fn package_reset_marker(data_dir: &Path) -> PathBuf {
-    data_dir.join(PACKAGE_RESET_MARKER)
-}
-
 /// Whether a failing health probe is allowed to trigger another repair,
 /// recording the attempt if so.
 ///
@@ -1345,7 +1379,7 @@ fn package_reset_marker(data_dir: &Path) -> PathBuf {
 /// budget implicitly — [`clear_package_reset_count`] does it, once a probe
 /// actually passes.
 pub fn may_reset_packages(data_dir: &Path) -> bool {
-    let marker = package_reset_marker(data_dir);
+    let marker = data_dir.join(PACKAGE_RESET_MARKER);
     let attempts = read_counter(&marker);
     if attempts >= MAX_PACKAGE_RESETS {
         return false;
@@ -1364,7 +1398,7 @@ pub fn may_reset_packages(data_dir: &Path) -> bool {
 /// budget is spent. That is worth a line, for the same reason [`bump_counter`]
 /// reports its own write failures rather than swallowing them.
 pub fn clear_package_reset_count(data_dir: &Path) {
-    let marker = package_reset_marker(data_dir);
+    let marker = data_dir.join(PACKAGE_RESET_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1564,57 +1598,34 @@ fn run_python_capture_bounded<S: AsRef<OsStr>>(
     args: impl IntoIterator<Item = S>,
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
-    use std::io::Read;
-    use std::time::Instant;
+    let mut cmd = python_command(python, args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
+    match run_bounded(cmd, timeout)? {
+        BoundedRun::Exited(output) => Ok(output),
+        BoundedRun::TimedOut { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("timed out after {timeout:?}"),
+        )),
+    }
+}
+
+/// The command every Python we spawn is built from: the given interpreter and
+/// args, isolated from user site-packages (see [`isolate_python_command`]), with
+/// no console window on Windows.
+///
+/// One home for that setup, so "every Python we spawn is isolated" is a property
+/// of the builder rather than something each caller has to remember.
+fn python_command<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(python);
     cmd.args(args);
     isolate_python_command(&mut cmd);
     configure_no_window_command(&mut cmd);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-
-    // Drain both pipes on their own threads. A child that fills a pipe buffer
-    // blocks on `write` until someone reads, which would outlast the deadline
-    // and defeat the point of having one.
-    fn drain(
-        handle: Option<impl Read + Send + 'static>,
-    ) -> Option<std::thread::JoinHandle<Vec<u8>>> {
-        handle.map(|mut h| {
-            std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = h.read_to_end(&mut buf);
-                buf
-            })
-        })
-    }
-    let stdout_reader = drain(child.stdout.take());
-    let stderr_reader = drain(child.stderr.take());
-    let collect = |reader: Option<std::thread::JoinHandle<Vec<u8>>>| {
-        reader.and_then(|t| t.join().ok()).unwrap_or_default()
-    };
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(std::process::Output {
-                status,
-                stdout: collect(stdout_reader),
-                stderr: collect(stderr_reader),
-            });
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("timed out after {timeout:?}"),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    cmd
 }
 
 /// Spawn the given Python interpreter with `args`, suppress the console
@@ -1629,11 +1640,7 @@ pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<std::process::Output> {
-    let mut cmd = std::process::Command::new(python);
-    cmd.args(args);
-    isolate_python_command(&mut cmd);
-    configure_no_window_command(&mut cmd);
-    cmd.output()
+    python_command(python, args).output()
 }
 
 /// [`run_python_capture`], returning the trimmed stdout on a successful exit
@@ -3966,12 +3973,10 @@ mod tests {
     fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
         // The probe runs in front of daemon.start(); an unbounded child there
         // means the backend never starts and nothing says why.
-        let Some(python) = system_python_for_test() else {
-            return;
-        };
+        let python = Path::new(TEST_PYTHON);
         let started = std::time::Instant::now();
         let err = run_python_capture_bounded(
-            &python,
+            python,
             ["-c", "import time; time.sleep(600)"],
             std::time::Duration::from_millis(300),
         )
@@ -3986,11 +3991,8 @@ mod tests {
 
     #[test]
     fn run_python_capture_bounded_returns_output_within_the_deadline() {
-        let Some(python) = system_python_for_test() else {
-            return;
-        };
         let out = run_python_capture_bounded(
-            &python,
+            Path::new(TEST_PYTHON),
             ["-c", "print('hi')"],
             std::time::Duration::from_secs(60),
         )
@@ -3999,22 +4001,16 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
     }
 
-    /// A Python to exercise the process plumbing with, or `None` when the host
-    /// has none — the bounded-capture tests are about the plumbing, not about
-    /// the bundled interpreter, so any Python does.
-    fn system_python_for_test() -> Option<PathBuf> {
-        for name in ["python3", "python"] {
-            if std::process::Command::new(name)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            {
-                return Some(PathBuf::from(name));
-            }
-        }
-        None
-    }
+    /// Any interpreter will do for the bounded-capture tests: they exercise the
+    /// process plumbing, not the bundled tree. Named rather than probed for, so a
+    /// host without it fails these tests loudly instead of skipping them — a
+    /// timeout test that quietly reports green is worse than no timeout test.
+    /// Every platform we build on has `python3` (the Python jobs install it, and
+    /// `prepare_bundle.sh` needs one regardless).
+    #[cfg(not(target_os = "windows"))]
+    const TEST_PYTHON: &str = "python3";
+    #[cfg(target_os = "windows")]
+    const TEST_PYTHON: &str = "python";
 
     #[test]
     fn parse_base_manifest_rejects_an_unknown_verb() {

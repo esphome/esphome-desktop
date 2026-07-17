@@ -85,14 +85,16 @@ jobs:
         shell: bash
         run: ./build-scripts/prepare_bundle.sh ${{ matrix.target }}
 
-      - name: Check the manifest was written
+      # Only that the file landed where the *Rust* side goes looking, which is a
+      # different claim from "the generator produced good text" and the one thing
+      # prepare_bundle.sh cannot make. It already asserts the contents and exits
+      # non-zero on a bad manifest, so re-checking those here would be an
+      # assertion that can never fire — which reads as coverage and is not.
+      - name: Check the manifest reached the tree
         shell: bash
         run: |
           manifest="build/python-${{ matrix.target }}/.base-packages"
           test -f "$manifest" || { echo "::error::no manifest at $manifest"; exit 1; }
-          echo "sweep dirs: $(grep -c '^sweep ' "$manifest")"
-          echo "base entries: $(grep -c '^keep ' "$manifest")"
-          grep -q '/pip$' "$manifest" || { echo "::error::manifest does not name pip"; exit 1; }
 
       - name: Run the repair cycle
         shell: bash

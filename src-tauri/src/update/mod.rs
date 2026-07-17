@@ -512,30 +512,20 @@ impl UpdateChecker {
             }
         };
 
-        let probe_python = python_path.clone();
-        let probe =
-            tokio::task::spawn_blocking(move || platform::esphome_config_probe(&probe_python))
-                .await;
-
-        let detail = match probe {
-            // The probe could not be run at all. A package reset needs this same
-            // interpreter to drive pip, so it cannot help here, and a broken
-            // interpreter is not what this repairs — leave it to the existing
-            // bundled-Python refresh.
-            Ok(Err(e)) => {
+        let detail = match probe_esphome(&python_path).await {
+            // The probe could not be run at all. A repair needs this same
+            // interpreter to drive pip, and a broken interpreter is not what
+            // this repairs — leave it to the bundled-Python refresh.
+            Err(e) => {
                 warn!("ESPHome health probe could not run: {e:#}");
                 return;
             }
-            Err(e) => {
-                warn!("ESPHome health probe task panicked or was cancelled: {e:#}");
-                return;
-            }
-            Ok(Ok(None)) => {
+            Ok(None) => {
                 debug!("ESPHome health probe passed");
                 platform::clear_package_reset_count(&data_dir);
                 return;
             }
-            Ok(Ok(Some(detail))) => detail,
+            Ok(Some(detail)) => detail,
         };
 
         if !platform::may_reset_packages(&data_dir) {
@@ -561,17 +551,14 @@ impl UpdateChecker {
         }
 
         // Confirm the repair with the same probe that condemned the tree, so a
-        // reset that did not actually fix anything says so rather than being
+        // repair that did not actually fix anything says so rather than being
         // reported as a success.
-        let verify_python = python_path.clone();
-        match tokio::task::spawn_blocking(move || platform::esphome_config_probe(&verify_python))
-            .await
-        {
-            Ok(Ok(None)) => {
+        match probe_esphome(&python_path).await {
+            Ok(None) => {
                 info!("ESPHome install repaired");
                 platform::clear_package_reset_count(&data_dir);
             }
-            Ok(Ok(Some(detail))) => {
+            Ok(Some(detail)) => {
                 warn!("ESPHome install still broken after the repair: {detail}");
                 notify_repair_incomplete(app_handle);
             }
@@ -582,12 +569,8 @@ impl UpdateChecker {
             // unverifiable repair the one outcome the user is never told about.
             // Leaving the counter alone is deliberate for the same reason — an
             // unconfirmed repair has not earned back its budget.
-            Ok(Err(e)) => {
-                warn!("Could not re-check the ESPHome install after the repair: {e:#}");
-                notify_repair_incomplete(app_handle);
-            }
             Err(e) => {
-                warn!("ESPHome health probe task panicked or was cancelled: {e:#}");
+                warn!("Could not re-check the ESPHome install after the repair: {e:#}");
                 notify_repair_incomplete(app_handle);
             }
         }
@@ -1231,6 +1214,20 @@ fn repair_hint() -> String {
     } else {
         t("update.repair_hint_retry")
     }
+}
+
+/// Run the ESPHome health probe off the async executor.
+///
+/// The probe spawns an interpreter and waits on it, so it cannot run on a tokio
+/// worker. Flattening the `JoinError` into the probe's own error here means
+/// callers get one three-armed answer — healthy, broken, or unknown — instead of
+/// each re-deciding what a panicked task means. The distinction survives in the
+/// error chain, which is where it belongs: nothing acts on it differently.
+async fn probe_esphome(python_path: &std::path::Path) -> Result<Option<String>> {
+    let python = python_path.to_path_buf();
+    tokio::task::spawn_blocking(move || platform::esphome_config_probe(&python))
+        .await
+        .context("ESPHome health probe task panicked or was cancelled")?
 }
 
 /// Tell the user the tree is still broken after a repair, or that we could

@@ -497,33 +497,32 @@ write_base_manifest() {
     echo "=== Recording base packages (${platform}) ==="
 
     local manifest="$python_dir/$BASE_MANIFEST"
+    local partial="${manifest}.partial"
 
-    # Generate to a temp file and promote only once it checks out, so a failed
-    # run cannot leave a half-written manifest in the tree for the reset to act
-    # on. The generator's own asserts already fail the build; `set -e` sees them
-    # because this is a plain command, not a substitution.
-    "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" \
-        > "${manifest}.partial"
+    # Generate to a temp path and promote only once it checks out, so a failed
+    # run cannot leave a half-written manifest in the tree for the reset to read.
+    # Same trap-based cleanup as download_verified, so the partial goes even when
+    # the generator's own asserts abort the script under `set -e` — which is the
+    # case this exists for.
+    trap 'rm -f "$partial"' INT TERM EXIT
+    "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" > "$partial"
 
-    # `grep -c` exits 1 on zero matches, but a substitution inside `echo` throws
-    # that status away and `set -e` never sees it — so a keep-less manifest would
-    # print "Recorded 0 base entries" and ship, and the failure would surface as
-    # a refused repair on a user's machine months later. Check the count as its
-    # own command, where a bad manifest fails the build that produced it.
+    # The generator asserts its own output names pip and sweeps nothing empty, and
+    # it is invoked as a plain command so `set -e` acts on that. This re-checks
+    # the file as *written*, which is the artifact that actually ships: it is the
+    # count we print anyway, and `grep -c` exits 1 on zero matches, which a
+    # substitution inside `echo` would throw away where `set -e` cannot see it —
+    # a keep-less manifest would then print "Recorded 0 base entries" and ship,
+    # and surface as a refused repair on a user's machine months later.
     local keeps
-    keeps=$(grep -c '^keep ' "${manifest}.partial") || keeps=0
+    keeps=$(grep -c '^keep ' "$partial") || keeps=0
     if [[ "$keeps" -eq 0 ]]; then
         echo "ERROR: base manifest names nothing to keep" >&2
-        rm -f "${manifest}.partial"
-        exit 1
-    fi
-    if ! grep -q '/pip$' "${manifest}.partial"; then
-        echo "ERROR: base manifest does not name pip; a reset would delete it" >&2
-        rm -f "${manifest}.partial"
         exit 1
     fi
 
-    mv -f "${manifest}.partial" "$manifest"
+    mv -f "$partial" "$manifest"
+    trap - INT TERM EXIT
     echo "Recorded ${keeps} base entries"
 }
 
