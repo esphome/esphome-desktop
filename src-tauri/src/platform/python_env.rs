@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 /// Filename of the marker recording which desktop-app version copied the
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
-const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
+pub(super) const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
 /// Filename of the counter tracking consecutive launches that deferred the
 /// bundled-Python refresh because the version probe failed on a still-usable

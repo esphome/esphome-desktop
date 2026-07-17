@@ -482,12 +482,12 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
 /// code. None of it runs when the NSIS uninstaller force-kills us, when we
 /// crash, or when the user ends the task from Task Manager. `kill_on_drop` is
 /// no help either: the normal quit path calls `std::process::exit()`, which
-/// skips `Drop`. The backend is then orphaned, and because Windows runs the
-/// interpreter straight out of the install directory (`ensure_user_python`
-/// returns early rather than copying it to app data), that orphan keeps
-/// `python.exe` — and every file its compile subtree touches, `git.exe`
-/// included — open. A later uninstall or in-place upgrade cannot replace or
-/// remove them, which strands the install tree and breaks the next launch.
+/// skips `Drop`. The backend is then orphaned, keeping `python.exe` in the
+/// app-data tree — and every file its compile subtree touches, the install
+/// dir's `git.exe` included — open. `ensure_user_python`'s next refresh or
+/// repair cannot `remove_dir_all` a tree with open files, and the uninstaller
+/// cannot remove a held `git.exe`, so the orphan strands both trees and breaks
+/// the next launch.
 ///
 /// A job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` closes that gap
 /// without needing any cooperation from the dying process: when the last
@@ -1184,7 +1184,7 @@ mod tests {
         assert_eq!(
             waited, WAIT_OBJECT_0,
             "the job did not kill its member when the owning process was force-killed; \
-             the backend would survive the desktop and keep holding the install dir open"
+             the backend would survive the desktop and keep holding its trees open"
         );
     }
 
