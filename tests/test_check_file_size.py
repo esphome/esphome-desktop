@@ -329,3 +329,18 @@ def test_repo_is_clean() -> None:
     files = check_file_size.tracked_rust_files(REPO_ROOT)
     assert files, "expected tracked .rs files under src-tauri/src"
     assert check_file_size.check(REPO_ROOT, files, check_file_size.EXEMPT) == []
+
+
+def test_tracked_rust_files_reaches_nested_modules() -> None:
+    """`*` crosses `/` in a default git pathspec, so one spec covers the tree.
+
+    That is the opposite of `:(glob)` magic, which sets FNM_PATHNAME and would
+    match only the three files sitting directly in src-tauri/src. Asserting
+    merely that the list is non-empty would pass either way, while the cap
+    silently stopped covering 14 of the 17 files.
+    """
+    files = check_file_size.tracked_rust_files(REPO_ROOT)
+    assert "src-tauri/src/lib.rs" in files, "expected the top-level files"
+    assert "src-tauri/src/platform/mod.rs" in files, "expected nested modules"
+    nested = [f for f in files if f.count("/") > 2]
+    assert len(nested) > 3, f"expected many nested files, found {len(nested)}"
