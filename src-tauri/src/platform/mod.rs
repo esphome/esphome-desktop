@@ -218,26 +218,25 @@ pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 
 /// MinGit's CA-bundle locations relative to the `git` resource dir, in the order
 /// MinGit's own `etc/gitconfig` and layout prefer. `prepare_bundle.sh` extracts
-/// the MinGit tree whole, so one of these is always shipped.
-const GIT_CA_BUNDLE_RELATIVE: [&[&str]; 2] = [
-    &["mingw64", "etc", "ssl", "certs", "ca-bundle.crt"],
-    &["mingw64", "ssl", "certs", "ca-bundle.crt"],
+/// the MinGit tree whole, so one of these is always shipped. `Path::join` treats
+/// `/` as a separator on Windows too, so these resolve correctly on every OS.
+const GIT_CA_BUNDLE_RELATIVE: [&str; 2] = [
+    "mingw64/etc/ssl/certs/ca-bundle.crt",
+    "mingw64/ssl/certs/ca-bundle.crt",
 ];
 
 /// First of MinGit's CA-bundle locations that exists under `git_dir`.
 ///
 /// Split out from [`bundled_git_ca_bundle`] so the candidate order can be
 /// unit-tested without a Tauri `AppHandle` or a real bundle on disk, the same
-/// split-the-logic pattern [`path_with_prepended`] uses. Joined component by
-/// component so the path is correct (and the test runs) on any OS.
+/// split-the-logic pattern [`path_with_prepended`] uses.
 // Reached outside tests only through bundled_git_ca_bundle, which is Windows only.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn first_existing_ca_bundle(git_dir: &Path) -> Option<PathBuf> {
-    GIT_CA_BUNDLE_RELATIVE.iter().find_map(|components| {
-        let mut candidate = git_dir.to_path_buf();
-        candidate.extend(*components);
-        candidate.exists().then_some(candidate)
-    })
+    GIT_CA_BUNDLE_RELATIVE
+        .into_iter()
+        .map(|relative| git_dir.join(relative))
+        .find(|candidate| candidate.exists())
 }
 
 /// The bundled MinGit CA bundle, if present.
