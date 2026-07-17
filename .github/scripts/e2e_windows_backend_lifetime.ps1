@@ -35,12 +35,24 @@ $Prefix = $InstallDir + '\'
 # under `Set-StrictMode -Version Latest`. That is not hypothetical — it is what
 # broke the first two runs of this script, before it had checked anything.
 function Get-BackendProcesses {
-    # Scope by executable path, not image name: the runner has its own Pythons
-    # and this must only ever see the bundled one. The WQL filter keeps the
-    # marshalling down; the path test is what makes it correct.
+    # Three filters, each load-bearing:
+    #
+    #   Name     — cheap, pushed into WQL so we don't marshal every process.
+    #   Path     — the runner has its own Pythons; only the bundled one counts.
+    #   argv     — and only the *backend*. `Settings::load` runs the same
+    #              install-dir interpreter as `-m esphome version` synchronously
+    #              in `setup()`, before the daemon spawns and for several seconds
+    #              on a cold runner. Matching any install-dir python.exe grabs
+    #              that detector instead: the script would report "backend up",
+    #              kill the desktop before the backend existed, watch the
+    #              detector exit on its own, and print PASS — with or without the
+    #              job object. The backend is `-m esphome_device_builder ...`
+    #              (daemon::start_inner); the detector is `-m esphome version`.
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
         $_.ExecutablePath -and
-        $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $_.CommandLine -and
+        $_.CommandLine -match 'esphome_device_builder'
     })
 }
 
@@ -56,12 +68,14 @@ function Show-Diagnostics {
         Write-Host "--- no dashboard.log at $log ---"
     }
 
-    Write-Host "--- processes under the install dir ---"
+    Write-Host "--- processes under the install dir (CommandLine included: the"
+    Write-Host "    backend is -m esphome_device_builder, the version probe is"
+    Write-Host "    -m esphome version) ---"
     # Unfiltered on purpose: on failure we want everything still holding the
     # directory open, not just Python.
     Get-CimInstance Win32_Process |
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
-        Select-Object ProcessId, ParentProcessId, Name, ExecutablePath |
+        Select-Object ProcessId, ParentProcessId, Name, CommandLine |
         Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 
     Write-Host "--- install dir top level ---"
