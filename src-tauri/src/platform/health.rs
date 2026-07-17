@@ -207,7 +207,7 @@ pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
 
         // ESPHome reports validation failures on stdout and stderr depending on
         // the stage, so keep both; the reason is what tells a maintainer why a
-        // reset happened.
+        // repair happened.
         let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stdout = stdout.trim();

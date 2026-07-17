@@ -8,7 +8,9 @@ use super::health::{bump_counter, read_counter, PROBE_TIMEOUT};
 use super::process::{
     pip_install_blocking, run_python_capture, run_python_capture_bounded, tail_for_log,
 };
-use super::{get_bundled_resource_dir, get_python_parent_dir, interpreter_in_tree};
+use super::{
+    get_bundled_python_root, get_python_parent_dir, interpreter_in_tree, PYTHON_TREE_DIRNAME,
+};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
@@ -60,12 +62,8 @@ pub enum RefreshReason {
 /// [`RefreshReason::Repair`] additionally forces the copy, which is how a broken
 /// tree is fixed on every platform (#335).
 pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Result<()> {
-    let user_python = get_python_parent_dir(app_handle)?.join(super::PYTHON_TREE_DIRNAME);
-    refresh_python_tree(
-        &user_python,
-        || Ok(get_bundled_resource_dir(app_handle)?.join("python")),
-        reason,
-    )
+    let user_python = get_python_parent_dir(app_handle)?.join(PYTHON_TREE_DIRNAME);
+    refresh_python_tree(&user_python, || get_bundled_python_root(app_handle), reason)
 }
 
 /// The refresh itself, parameterized on paths so the repair-cycle e2e can drive

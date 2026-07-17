@@ -182,6 +182,16 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 }
 
+/// Root of the pristine Python tree inside the bundled resources.
+///
+/// The `"python"` here is the resource name listed in `tauri.conf.json`'s
+/// `bundle.resources`, deliberately NOT [`PYTHON_TREE_DIRNAME`]: renaming the
+/// managed tree in app data must not change where the shipped bundle is
+/// looked up, and vice versa.
+fn get_bundled_python_root(app_handle: &AppHandle) -> Result<PathBuf> {
+    Ok(get_bundled_resource_dir(app_handle)?.join("python"))
+}
+
 /// Get the path to the user Python executable: the copy `ensure_user_python`
 /// keeps under [`get_python_parent_dir`], falling back to the bundled tree
 /// before the first-run copy exists and to a bare system Python in development
@@ -196,8 +206,7 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python (will be copied on first run)
-    let resource_dir = get_bundled_resource_dir(app_handle)?;
-    let bundled_python = interpreter_in_tree(&resource_dir.join("python"));
+    let bundled_python = interpreter_in_tree(&get_bundled_python_root(app_handle)?);
 
     if bundled_python.exists() {
         debug!("Using bundled Python: {:?}", bundled_python);
@@ -213,9 +222,8 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }))
 }
 
-/// Directory holding the interpreter inside a managed tree: the tree root on
-/// Windows, `<root>/bin` elsewhere. Derived from [`interpreter_in_tree`] so
-/// the layout stays spelled once.
+/// Directory holding the interpreter inside a managed tree. Derived from
+/// [`interpreter_in_tree`] so the layout stays spelled once.
 fn bin_dir_in_tree(root: &Path) -> PathBuf {
     interpreter_in_tree(root)
         .parent()
@@ -234,8 +242,7 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python
-    let resource_dir = get_bundled_resource_dir(app_handle)?;
-    Ok(bin_dir_in_tree(&resource_dir.join("python")))
+    Ok(bin_dir_in_tree(&get_bundled_python_root(app_handle)?))
 }
 
 /// Directory inside the bundled `git` resource that holds `git.exe`.
@@ -930,8 +937,8 @@ mod tests {
         );
 
         // 6. The repair: wipe the damaged copy and re-copy the pristine
-        //    bundle, through the same code path the app uses. No network and
-        //    no manifest; the snapshot reads the damaged tree's versions and
+        //    bundle, through the same code path the app uses. No network
+        //    involved; the snapshot reads the damaged tree's versions and
         //    the restore compares them against the freshly copied ones.
         python_env::refresh_python_tree(&user_tree, || Ok(bundle.clone()), RefreshReason::Repair)
             .expect("repair failed");
