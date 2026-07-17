@@ -1157,11 +1157,15 @@ mod tests {
 
     #[test]
     fn head_for_log_does_not_split_a_multibyte_char() {
-        // Mirror of the tail_for_log boundary test: the cut must back up to a
-        // char boundary or the slice panics.
-        let s = "é".repeat(LOG_TAIL_BYTES);
+        // Mirror of the tail_for_log boundary test: 1366 * 3 bytes = 4098 >
+        // 4096, and the naive cut at byte 4096 lands mid-"€". The function
+        // backs up to the previous char boundary, so the slice stays valid
+        // UTF-8 and never panics.
+        let s = "€".repeat(1366);
         let out = head_for_log(&s);
-        assert!(out.starts_with('é'));
-        assert!(out.ends_with("bytes)"));
+        assert!(out.ends_with("bytes)"), "long input must be marked");
+        let head = out.split_once('\n').unwrap().0;
+        assert!(head.len() <= LOG_TAIL_BYTES, "head stays within bound");
+        assert!(head.chars().all(|c| c == '€'), "no partial char survives");
     }
 }
