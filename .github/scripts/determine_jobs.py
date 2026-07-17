@@ -15,6 +15,14 @@ any error determining the changed set falls back to running everything. A real
 code change can therefore never be skipped by mistake; the worst case is running
 CI that was not strictly needed.
 
+Trust boundary: the workflow runs THIS script from the pull request's own
+checkout, so a diff that edits the classifier or widens ``META_ONLY_GLOBS`` can
+make CI Status pass without building. The fail-safe guarantee above holds only
+for the unmodified script; a diff touching this file is exactly what deserves
+extra scrutiny in review. That is acceptable because pull_request runs with a
+read-only token and no secrets, and the classifier change is always visible in
+the reviewed diff, which is the real backstop (same posture as esphome/esphome).
+
 Usage:
   python determine_jobs.py
 """
