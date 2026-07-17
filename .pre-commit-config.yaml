@@ -47,6 +47,18 @@ repos:
         entry: "\\x00"
         types: [text]
 
+      # Mirrors the "File size cap" gate in lint-test.yml. Unlike the cargo
+      # hooks below this is pure Python with no toolchain to find, so it is
+      # absent from the `ci: skip` list above and runs on pre-commit.ci too.
+      # The script enumerates its own files with `git ls-files`, so it takes
+      # no filenames.
+      - id: check-file-size
+        name: file size cap (src-tauri/src)
+        entry: python3 .github/scripts/check_file_size.py
+        language: system
+        types: [rust]
+        pass_filenames: false
+
       # Run inside src-tauri so rustup discovers src-tauri/rust-toolchain.toml
       # and resolves the same pinned toolchain CI uses (requires git-bash on
       # Windows).

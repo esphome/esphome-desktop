@@ -30,6 +30,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Structural gate: no file under src-tauri/src may cross the line cap.
+      # Needs no Rust toolchain, so it runs before the setup steps and fails
+      # fast. The rule is in CONTRIBUTING.md ("Code structure policies"); the
+      # grandfathered files are listed in the script itself. Runs here rather
+      # than in lint-test-cross because it is platform independent and would
+      # otherwise report the same result three times.
+      - name: File size cap
+        run: python3 .github/scripts/check_file_size.py
+
       # Tauri links against the system webkit/appindicator stack on Linux, so
       # even a plain `cargo test` needs these to compile. Same dependency set
       # as the Build workflow's Linux jobs (shared composite action).
