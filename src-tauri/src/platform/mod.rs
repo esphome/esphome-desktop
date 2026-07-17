@@ -597,8 +597,22 @@ pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Resu
                         // another launch is the wrong answer to both, and the
                         // caller has no way to tell that its request was
                         // silently dropped.
-                        if reason == RefreshReason::Startup && interpreter_is_usable(&python_check)
-                        {
+                        // A check we could not make is not a check that failed.
+                        // Wiping on "we could not tell" would discard the user's
+                        // pinned version on the strength of an unanswered
+                        // question — the very downgrade the snapshot above
+                        // exists to prevent. Assume usable and defer; that is
+                        // bounded, so a persistently unanswerable check still
+                        // self-heals after MAX_REFRESH_DEFERS.
+                        let usable = interpreter_is_usable(&python_check).unwrap_or_else(|probe| {
+                            warn!(
+                                "Could not check whether the interpreter at {python_check:?} is \
+                                 usable ({probe}); assuming it is rather than wiping a tree that \
+                                 may be fine"
+                            );
+                            true
+                        });
+                        if reason == RefreshReason::Startup && usable {
                             let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
                             let defers = read_counter(&defer_marker);
                             if defers < MAX_REFRESH_DEFERS
@@ -733,15 +747,24 @@ fn snapshot_preserved_versions(
 /// Bounded, because both callers are on the launch path: an interpreter wedged
 /// rather than broken would otherwise hang the very startup this is meant to
 /// rescue.
-pub fn interpreter_is_usable(python_bin: &Path) -> bool {
-    matches!(
-        run_python_capture_bounded(
-            python_bin,
-            ["-c", "import importlib.metadata"],
-            PROBE_TIMEOUT,
-        ),
-        Ok(o) if o.status.success()
-    )
+/// `Err` means the check itself could not be made — the spawn failed for a
+/// reason that says nothing about this interpreter (`EMFILE`, `EPERM`), or it
+/// outran [`PROBE_TIMEOUT`] on a loaded machine. That is not the same as an
+/// interpreter that ran and failed, and callers must not treat it as one:
+/// collapsing the two would wipe a working tree, discarding the user's pinned
+/// versions, on the strength of a question we never got an answer to.
+pub fn interpreter_is_usable(python_bin: &Path) -> std::io::Result<bool> {
+    match run_python_capture_bounded(
+        python_bin,
+        ["-c", "import importlib.metadata"],
+        PROBE_TIMEOUT,
+    ) {
+        Ok(o) => Ok(o.status.success()),
+        // An interpreter that is not there is an answer, not a failure to get
+        // one: nothing about it will run, now or later.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Read a persisted attempt counter, returning 0 when the marker is missing or
@@ -915,6 +938,15 @@ fn tail_for_log(s: &str) -> String {
 /// the five-minute pip bound is only a few thousand `try_wait` calls.
 const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How long [`run_bounded`] waits for a reader thread to drain a pipe after the
+/// child is done with it.
+///
+/// Normally instant: the child closed its end, so the reader sees EOF and
+/// returns. This bounds the case where it does not — a grandchild that inherited
+/// the pipe and outlived the kill — where waiting would mean the deadline never
+/// fires at all. Generous enough that a merely slow reader is never cut short.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How a child bounded by [`run_bounded`] finished.
 enum BoundedRun {
     /// It exited on its own, within the deadline.
@@ -934,45 +966,79 @@ enum BoundedRun {
 /// subtly wrong and expensive to get wrong twice: a child whose output fills a
 /// pipe buffer (~64 KiB) blocks on `write` until someone reads the other end, so
 /// the pipes must be drained on their own threads or the child outlives the very
-/// deadline meant to bound it. The readers exit on their own once the child
-/// closes its fds, whether it exited or was killed.
+/// deadline meant to bound it.
+///
+/// Waiting on those readers is itself bounded, which is less obvious and just as
+/// load-bearing. A pipe reaches EOF only when *every* writer closes it, and
+/// killing a child does not kill grandchildren that inherited its fds — pip
+/// routinely spawns build backends. So a reader can still be blocked long after
+/// its child is dead, and joining it unconditionally would let a surviving
+/// grandchild hold this call open past the deadline it exists to enforce. The
+/// bytes are accumulated where this function can reach them without the reader's
+/// cooperation, so giving up on a stuck reader costs the tail of the output
+/// rather than the guarantee.
 fn run_bounded(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<BoundedRun> {
     use std::io::Read;
-    use std::thread::JoinHandle;
+    use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    fn drain<R: Read + Send + 'static>(
-        what: &'static str,
-        handle: Option<R>,
-    ) -> Option<JoinHandle<Vec<u8>>> {
+    /// A reader thread, and the bytes it has accumulated so far.
+    struct Drain {
+        /// Shared rather than returned from the thread, so a reader still stuck
+        /// on a pipe someone else holds open cannot keep its bytes hostage.
+        buf: Arc<Mutex<Vec<u8>>>,
+        done: Receiver<()>,
+    }
+
+    fn drain<R: Read + Send + 'static>(what: &'static str, handle: Option<R>) -> Option<Drain> {
         handle.map(|mut h| {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let thread_buf = Arc::clone(&buf);
+            let (tx, done) = channel();
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                // Keep whatever arrived before the failure, and say the read
-                // broke. Silently returning a short buffer would surface as
-                // "pip install failed: " with nothing after it, which reads as
-                // a child that printed nothing rather than output we lost.
-                if let Err(e) = h.read_to_end(&mut buf) {
-                    tracing::warn!("Lost part of a child's {what}: {e}");
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match h.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => thread_buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                        // Keep whatever arrived before the failure, and say the
+                        // read broke. Silently returning a short buffer would
+                        // surface as "pip install failed: " with nothing after
+                        // it, which reads as a child that printed nothing rather
+                        // than output we lost.
+                        Err(e) => {
+                            tracing::warn!("Lost part of a child's {what}: {e}");
+                            break;
+                        }
+                    }
                 }
-                buf
-            })
+                let _ = tx.send(());
+            });
+            Drain { buf, done }
         })
     }
-    fn collect(what: &str, reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
-        match reader.map(JoinHandle::join) {
-            Some(Ok(buf)) => buf,
-            // A panicked reader yields no bytes, which is indistinguishable from
-            // a quiet child unless we say so.
-            Some(Err(_)) => {
-                tracing::warn!("The reader for a child's {what} panicked; treating it as empty");
-                Vec::new()
+
+    fn collect(what: &str, drain: Option<Drain>) -> Vec<u8> {
+        let Some(drain) = drain else {
+            return Vec::new();
+        };
+        match drain.done.recv_timeout(DRAIN_GRACE) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout) => tracing::warn!(
+                "A child's {what} reader did not finish within {DRAIN_GRACE:?}; something that \
+                 inherited the pipe is still holding it open. Returning what arrived."
+            ),
+            // The sender is dropped without sending only if the thread unwound.
+            Err(RecvTimeoutError::Disconnected) => {
+                tracing::warn!("The reader for a child's {what} panicked; returning what arrived.")
             }
-            None => Vec::new(),
         }
+        let mut buf = drain.buf.lock().unwrap();
+        std::mem::take(&mut *buf)
     }
 
     let mut child = cmd.spawn()?;
@@ -3748,7 +3814,8 @@ mod tests {
     fn interpreter_is_usable_false_for_missing_binary() {
         let base = unique_temp_dir("interp-missing");
         let _ = std::fs::remove_dir_all(&base);
-        assert!(!interpreter_is_usable(&base.join("python3")));
+        // A missing interpreter is a definitive "no", not an unanswered question.
+        assert!(!interpreter_is_usable(&base.join("python3")).unwrap());
     }
 
     #[cfg(unix)]
@@ -3765,7 +3832,7 @@ mod tests {
         const ATTEMPTS: usize = 20;
         let mut usable = false;
         for attempt in 0..ATTEMPTS {
-            if interpreter_is_usable(&bin) {
+            if interpreter_is_usable(&bin).unwrap_or(false) {
                 usable = true;
                 break;
             }
@@ -3785,6 +3852,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn interpreter_is_usable_separates_a_failed_check_from_a_failed_interpreter() {
+        // A check we could not make must not read as an interpreter that failed:
+        // callers wipe on the latter, and wiping on the former discards a user's
+        // pinned version over a question nobody answered. A directory is not an
+        // executable, so spawning it fails with something other than NotFound.
+        let base = unique_temp_dir("interp-unanswerable");
+        let dir_not_a_binary = base.join("bin");
+        std::fs::create_dir_all(&dir_not_a_binary).unwrap();
+        assert!(
+            interpreter_is_usable(&dir_not_a_binary).is_err(),
+            "a spawn that fails for reasons other than absence is an unanswered \
+             question, not a verdict"
+        );
+
+        // Whereas absence is a verdict: nothing about it will ever run.
+        assert!(!interpreter_is_usable(&base.join("nope")).unwrap());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn interpreter_is_usable_false_when_imports_fail() {
         // Regression test for the corrupt-stdlib shape: an interpreter
         // whose stdlib is gutted still runs `-c "pass"` cleanly but fails any
@@ -3799,7 +3888,7 @@ mod tests {
             "case \"$2\" in *import*) echo \"ModuleNotFoundError: No module named 'types'\" >&2; exit 1;; esac; exit 0",
         );
         assert!(
-            !interpreter_is_usable(&bin),
+            !interpreter_is_usable(&bin).unwrap(),
             "an interpreter that cannot import its stdlib must not count as usable"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -4092,6 +4181,43 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(30),
             "the deadline did not fire promptly: {:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_surviving_grandchild_cannot_defeat_the_deadline() {
+        // A pipe reaches EOF only when every writer closes it, and killing a
+        // child does not kill grandchildren that inherited its fds -- pip spawns
+        // build backends that do exactly this. Joining the reader unconditionally
+        // would then block forever on a dead child's pipe, and the deadline this
+        // helper exists to enforce would never fire.
+        //
+        // The child here spawns a grandchild that holds stderr open for far
+        // longer than the test could tolerate, then exits itself.
+        let started = std::time::Instant::now();
+        let out = run_python_capture_bounded(
+            Path::new(TEST_PYTHON),
+            [
+                "-c",
+                "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
+                 subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); \
+                 sys.exit(0)",
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the child exited, so this must return");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "a grandchild holding the pipe stalled the call for {:?}",
+            started.elapsed()
+        );
+        assert!(out.status.success());
+        // What the child managed to write before the grandchild pinned the pipe
+        // still comes back.
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("before"),
+            "gave up on the reader without keeping what it had already read"
         );
     }
 

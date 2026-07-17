@@ -104,4 +104,17 @@ jobs:
           ESPHOME_E2E_PYTHON_TREE: ${{ github.workspace }}/build/python-${{ matrix.target }}
         # --ignored runs exactly the tests that need this tree. Single-threaded
         # because the cycle mutates one shared tree in sequence.
-        run: cargo test --all-features -- --ignored --test-threads=1 --nocapture
+        #
+        # Then check the test actually ran. `cargo test` exits 0 when its filter
+        # matches nothing, so a rename, a stray `#[cfg]`, or a dropped `#[ignore]`
+        # would turn this job green while proving nothing — the whole point of it
+        # being here. That is the same "an assertion that can never fire reads as
+        # coverage" trap this workflow avoids for the manifest check above, and
+        # this job is the only evidence that a real command sees the orphan.
+        run: |
+          set -o pipefail
+          cargo test --all-features -- --ignored --test-threads=1 --nocapture 2>&1 | tee result.log
+          grep -q 'test platform::tests::e2e_repair_cycle ... ok' result.log || {
+            echo "::error::e2e_repair_cycle did not run; this job proved nothing"
+            exit 1
+          }

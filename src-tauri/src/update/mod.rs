@@ -1293,11 +1293,12 @@ fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
 /// repair on the strength of it. Hence `Result<bool, JoinError>` rather than the
 /// flattening [`probe_esphome`] does — there, nothing acts on the distinction;
 /// here, the caller has a third arm for exactly it.
-async fn interpreter_usable(
-    python_path: &std::path::Path,
-) -> std::result::Result<bool, tokio::task::JoinError> {
+async fn interpreter_usable(python_path: &std::path::Path) -> Result<bool> {
     let python = python_path.to_path_buf();
-    tokio::task::spawn_blocking(move || platform::interpreter_is_usable(&python)).await
+    tokio::task::spawn_blocking(move || platform::interpreter_is_usable(&python))
+        .await
+        .context("the interpreter usability check panicked or was cancelled")?
+        .context("could not run the interpreter usability check")
 }
 
 /// Run the ESPHome health probe off the async executor.
