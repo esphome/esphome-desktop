@@ -102,10 +102,16 @@ jobs:
         # would turn this job green while proving nothing — the whole point of it
         # being here; this job is the only evidence that a real command sees the
         # orphan.
+        #
+        # The match stops before the verdict: the restore leg's pip child
+        # inherits the job's stdout (production pipes only its stderr), so its
+        # output lands between the harness's "test ... " prefix and the closing
+        # "ok" and the two never share a line. Running-but-failing is already
+        # covered — the pipeline's exit code fails the step before the grep.
         run: |
           set -o pipefail
           cargo test --all-features -- --ignored --test-threads=1 --nocapture 2>&1 | tee result.log
-          grep -q 'test platform::tests::e2e_repair_cycle ... ok' result.log || {
+          grep -qF 'test platform::tests::e2e_repair_cycle ...' result.log || {
             echo "::error::e2e_repair_cycle did not run; this job proved nothing"
             exit 1
           }
