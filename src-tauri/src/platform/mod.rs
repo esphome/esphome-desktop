@@ -2519,13 +2519,14 @@ mod tests {
         }
     }
 
-    /// The kill-on-close semantic itself is the kernel's guarantee, and proving
-    /// it end to end would need a helper binary that outlives the test process.
-    /// What is ours to get wrong is the wiring, so assert that: a real child
-    /// lands in the job, a descendant of it inherits membership, and the job
-    /// actually carries the limit flag that makes membership fatal. Without the
-    /// flag the assignment would still "succeed" and buy us nothing; without
-    /// the inheritance the compile-subtree and `git.exe` story is untrue.
+    /// The wiring half: a real child lands in the job, a descendant of it
+    /// inherits membership, and the job carries the limit flag that makes
+    /// membership fatal. Without the flag the assignment would still "succeed"
+    /// and buy us nothing; without the inheritance the compile-subtree and
+    /// `git.exe` story is untrue.
+    ///
+    /// The other half — that membership actually kills when the owner dies — is
+    /// `job_kills_its_member_when_the_owner_is_force_killed`.
     #[cfg(target_os = "windows")]
     #[test]
     fn daemon_child_lands_in_a_kill_on_close_job() {
@@ -2624,6 +2625,136 @@ mod tests {
         assert!(
             flags.0 & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.0 != 0,
             "job must be kill-on-close, otherwise membership does not outlive-protect anything"
+        );
+    }
+
+    /// Set on the re-executed test binary to put it in helper mode.
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_ENV: &str = "ESPHOME_JOB_KILL_HELPER";
+    /// How the helper hands its member's PID back to the driver.
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_MARKER: &str = "JOB_MEMBER_PID=";
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_TEST: &str = "platform::tests::job_kill_helper";
+
+    /// The owner half of `job_kills_its_member_when_the_owner_is_force_killed`.
+    ///
+    /// `#[ignore]` so a normal `cargo test` never runs it: it is only meaningful
+    /// when the driver re-execs this binary with `--ignored --exact` and
+    /// `JOB_HELPER_ENV` set, and it deliberately blocks until killed. The env
+    /// guard means an `--ignored` run by hand exits immediately rather than
+    /// hanging for two minutes.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn job_kill_helper() {
+        if std::env::var(JOB_HELPER_ENV).is_err() {
+            return;
+        }
+
+        // Spawn the member exactly the way `daemon::start_inner` spawns the
+        // backend — tokio's Command, `configure_daemon_tokio_command`, and the
+        // handle from tokio's `raw_handle()` — so this exercises the real code
+        // path rather than a std::process lookalike that happens to agree.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper: tokio runtime");
+        let child_pid = rt.block_on(async {
+            let mut cmd = tokio::process::Command::new("ping.exe");
+            cmd.args(["-n", "120", "127.0.0.1"]);
+            configure_daemon_tokio_command(&mut cmd);
+            let child = cmd.spawn().expect("helper: failed to spawn member");
+            let handle = child.raw_handle().expect("helper: member has no handle");
+            assert!(
+                assign_to_kill_on_close_job(handle),
+                "helper: could not assign the member to the job"
+            );
+            let pid = child.id().expect("helper: member has no pid");
+            // Leak the Child: dropping it would let tokio reap or kill the
+            // member, and the driver needs it alive until *we* are killed.
+            std::mem::forget(child);
+            pid
+        });
+
+        // Printing the PID is also the driver's signal that assignment is done,
+        // so it can't kill us before the member is actually in the job.
+        println!("{JOB_HELPER_MARKER}{child_pid}");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+
+        // Block until the driver force-kills us. Bounded so a driver that dies
+        // early leaves this to time out rather than wedge CI forever.
+        std::thread::sleep(std::time::Duration::from_secs(120));
+    }
+
+    /// The claim the whole change rests on: when the owning process dies without
+    /// running any of its own code, Windows kills the job's members.
+    ///
+    /// Everything else about this feature is verifiable in-process, but not this
+    /// — the owner has to actually die, and it can't be the test process. So the
+    /// test binary re-execs itself as the owner, waits for it to report a member
+    /// it has assigned, then `TerminateProcess`es it. That is precisely the
+    /// shape of the cases this exists for: the NSIS uninstaller force-killing
+    /// us, a crash, End Task. No `Drop`, no exit handler, no cooperation.
+    ///
+    /// A handle to the member is opened *before* the kill, so the PID can't be
+    /// recycled underneath us and the wait is on the member itself rather than a
+    /// poll for its absence.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn job_kills_its_member_when_the_owner_is_force_killed() {
+        use ::windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use ::windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE,
+        };
+        use std::io::{BufRead, BufReader};
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut owner = std::process::Command::new(exe)
+            .args(["--ignored", "--exact", JOB_HELPER_TEST, "--nocapture"])
+            .env(JOB_HELPER_ENV, "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn the owner helper");
+
+        let stdout = owner.stdout.take().expect("owner stdout");
+        let member_pid = BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|line| {
+                line.strip_prefix(JOB_HELPER_MARKER)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            });
+        let Some(member_pid) = member_pid else {
+            let _ = owner.kill();
+            panic!("the owner never reported a job member; it likely failed to assign one");
+        };
+
+        // SAFETY: `member_pid` was just reported by a live child; the handle is
+        // closed on every path below.
+        let member = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                member_pid,
+            )
+        }
+        .expect("could not open the job member");
+
+        // The point of the whole test: kill the owner outright.
+        owner.kill().expect("failed to kill the owner");
+        let _ = owner.wait();
+
+        // SAFETY: `member` is a live handle we own and close immediately after.
+        let waited = unsafe { WaitForSingleObject(member, 15_000) };
+        let _ = unsafe { CloseHandle(member) };
+
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "the job did not kill its member when the owning process was force-killed; \
+             the backend would survive the desktop and keep holding the install dir open"
         );
     }
 
