@@ -872,6 +872,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
     cmd.stderr(std::process::Stdio::piped());
+    isolate_pip_command(&mut cmd);
     configure_no_window_command(&mut cmd);
 
     let mut child = cmd.spawn().context("Failed to spawn pip install")?;
@@ -1019,16 +1020,18 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Spawn the given Python interpreter with `args`, suppress the console
-/// window on Windows, and capture its output. This only removes the
-/// spawn/capture boilerplate: it adds no flags of its own (callers pass
-/// exactly the flags they need, `-I` included or not), and callers keep their
-/// own policy for exit status, logging, and stdout/stderr interpretation.
+/// window on Windows, isolate it from user site-packages (see
+/// [`isolate_python_command`]), and capture its output. It adds no *flags* of
+/// its own (callers pass exactly the flags they need, `-I` included or not),
+/// and callers keep their own policy for exit status, logging, and
+/// stdout/stderr interpretation.
 pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = std::process::Command::new(python);
     cmd.args(args);
+    isolate_python_command(&mut cmd);
     configure_no_window_command(&mut cmd);
     cmd.output()
 }
@@ -1048,6 +1051,105 @@ pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
     Ok(Some(
         String::from_utf8_lossy(&output.stdout).trim().to_string(),
     ))
+}
+
+/// Env that keeps the managed interpreter on its own tree.
+///
+/// The bundled Python is a plain (non-venv) install, so `site.py` runs
+/// `addusersitepackages()` before `addsitepackages()` and the per-user site
+/// directory (`~/.local/lib/pythonX.Y/site-packages`, or
+/// `%APPDATA%\Python\PythonXY\site-packages` on Windows) lands on `sys.path`
+/// AHEAD of our own `site-packages`. Anyone who has ever run `pip install
+/// --user` against a same-minor system Python therefore shadows our pinned
+/// dependencies with theirs, and the backend dies at import (#318). The
+/// ambient `PYTHON*` vars can redirect the interpreter just as effectively, so
+/// drop them too.
+///
+/// This is an env var rather than a `-s` flag so it also reaches the processes
+/// the backend spawns for itself (esptool, PlatformIO, compilers), which run
+/// against the same tree and have the same exposure. venvs already ignore user
+/// site, so inheriting it costs them nothing.
+const PYTHON_ISOLATION_SET: [(&str, &str); 1] = [("PYTHONNOUSERSITE", "1")];
+
+/// Ambient vars that can redirect the interpreter off its own tree just as
+/// effectively as user site. See [`PYTHON_ISOLATION_SET`].
+const PYTHON_ISOLATION_REMOVE: [&str; 3] = ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"];
+
+/// Point the managed interpreter at its own tree only, per
+/// [`PYTHON_ISOLATION_SET`].
+pub fn isolate_python_command(cmd: &mut std::process::Command) {
+    for (k, v) in PYTHON_ISOLATION_SET {
+        cmd.env(k, v);
+    }
+    for k in PYTHON_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
+}
+
+/// [`isolate_python_command`] for a tokio::process::Command.
+///
+/// tokio's `Command` is a `std::process::Command` plus a `kill_on_drop` flag;
+/// its env methods forward straight to the inner command, and `spawn` runs that
+/// same command. So editing it through `as_std_mut` is what tokio would do
+/// anyway, and the two variants cannot drift apart.
+pub fn isolate_python_tokio_command(cmd: &mut tokio::process::Command) {
+    isolate_python_command(cmd.as_std_mut());
+}
+
+/// pip settings that would send an install somewhere other than the managed
+/// tree [`PYTHON_ISOLATION_SET`] just pinned the interpreter to.
+///
+/// Both are load-bearing rather than theoretical. `user` is a common `sudo pip`
+/// workaround, and it only ever "worked" here because the install went to user
+/// site and user site was importable; with the latter now off, pip aborts the
+/// install outright. `require-virtualenv` fails every pip call we make
+/// regardless of user site, since the bundled tree is not a venv.
+///
+/// These are forced to `0` rather than unset because pip resolves config as
+/// command line > env > config file. Unsetting only clears the ambient env var
+/// and leaves a `user = true` in `~/.config/pip/pip.conf` in force; an explicit
+/// `0` overrides the file too. Note this deliberately does not touch
+/// `PIP_CONFIG_FILE`: dropping it would discard the rest of the user's pip
+/// config (a corporate `index-url`, proxy settings) while still leaving the
+/// default config files to be read, so it neutralizes nothing on its own.
+const PIP_ISOLATION_SET: [(&str, &str); 2] = [("PIP_USER", "0"), ("PIP_REQUIRE_VIRTUALENV", "0")];
+
+/// pip settings that repoint the install directly. Unlike
+/// [`PIP_ISOLATION_SET`], these have no "off" value to force: pip strips empty
+/// config values before it applies the override order (`if v` in
+/// `ConfigOptionParser._get_ordered_configuration_items`), so `PIP_TARGET=""`
+/// never reaches the defaults and the config file wins by fallthrough. Dropping
+/// the ambient var is all that is available.
+///
+/// Known residual gap, deliberately not closed: this only clears the env var,
+/// so a `target`/`prefix` in the user's own pip.conf still redirects the
+/// install off the managed tree, and an ESPHome update then reports success
+/// while landing somewhere this interpreter will never import. The only lever
+/// that would neutralize it is pointing `PIP_CONFIG_FILE` at the platform's
+/// null device (`/dev/null`, `NUL` on Windows), which throws away the rest of
+/// their pip config (see [`PIP_ISOLATION_SET`]); that trade is not worth it for
+/// a config this rare, and the gap predates the isolation work. Note pip's docs
+/// spell that lever `os.devnull`, meaning the *value* of Python's constant: set
+/// literally, it is just a relative path that does not exist, and pip silently
+/// falls back to the default config files rather than erroring.
+const PIP_ISOLATION_REMOVE: [&str; 2] = ["PIP_TARGET", "PIP_PREFIX"];
+
+/// [`isolate_python_command`] plus the `PIP_*` config that would redirect the
+/// install target. For commands running `-m pip`.
+pub fn isolate_pip_command(cmd: &mut std::process::Command) {
+    isolate_python_command(cmd);
+    for (k, v) in PIP_ISOLATION_SET {
+        cmd.env(k, v);
+    }
+    for k in PIP_ISOLATION_REMOVE {
+        cmd.env_remove(k);
+    }
+}
+
+/// [`isolate_pip_command`] for a tokio::process::Command. See
+/// [`isolate_python_tokio_command`] on why editing the wrapped command works.
+pub fn isolate_pip_tokio_command(cmd: &mut tokio::process::Command) {
+    isolate_pip_command(cmd.as_std_mut());
 }
 
 /// Configure std::process::Command to not create a console window on Windows
@@ -1077,11 +1179,14 @@ pub fn configure_no_window_tokio_command(cmd: &mut tokio::process::Command) {
 }
 
 /// Build a tokio `pip install` command for the given Python interpreter,
-/// prefilled with `-m pip install` and the Windows no-window flag. Callers
-/// append their own package specs and flags before running it.
+/// prefilled with `-m pip install` and the Windows no-window flag, and
+/// isolated from the ambient Python/pip environment so the install lands in
+/// the managed tree (see [`isolate_pip_command`]). Callers append their own
+/// package specs and flags before running it.
 pub fn pip_command(python: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(python);
     cmd.args(["-m", "pip", "install"]);
+    isolate_pip_tokio_command(&mut cmd);
     configure_no_window_tokio_command(&mut cmd);
     cmd
 }
@@ -2054,6 +2159,113 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::util::unique_temp_dir;
+
+    /// Collect a command's staged env edits into (set, removed). `get_envs`
+    /// yields `(key, None)` for a var marked for removal and `(key, Some(v))`
+    /// for one that is set.
+    fn env_edits(cmd: &std::process::Command) -> (Vec<(String, String)>, Vec<String>) {
+        let mut set = Vec::new();
+        let mut removed = Vec::new();
+        for (k, v) in cmd.get_envs() {
+            let k = k.to_string_lossy().into_owned();
+            match v {
+                Some(v) => set.push((k, v.to_string_lossy().into_owned())),
+                None => removed.push(k),
+            }
+        }
+        (set, removed)
+    }
+
+    #[test]
+    fn isolate_python_command_disables_user_site() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut cmd);
+        let (set, _) = env_edits(&cmd);
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+    }
+
+    #[test]
+    fn isolate_python_command_strips_ambient_python_vars() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut cmd);
+        let (_, removed) = env_edits(&cmd);
+        for var in ["PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"] {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    /// The tokio variants reach through `as_std_mut`, which holds only because
+    /// tokio's `Command` stages env on the very `std::process::Command` it later
+    /// spawns. Assert the two variants stage identical env rather than
+    /// re-listing the vars, so this fails if that ever stops being true. The
+    /// std-side tests above prove the compared value isn't vacuously empty.
+    #[test]
+    fn isolate_python_tokio_command_matches_std_variant() {
+        let mut std_cmd = std::process::Command::new("python3");
+        isolate_python_command(&mut std_cmd);
+        let mut tokio_cmd = tokio::process::Command::new("python3");
+        isolate_python_tokio_command(&mut tokio_cmd);
+        assert_eq!(env_edits(&std_cmd), env_edits(tokio_cmd.as_std()));
+    }
+
+    /// pip resolves and installs against the same interpreter the backend runs
+    /// on, so it has to see the same `sys.path` the backend will, and it must
+    /// not be redirected off that tree by ambient `PIP_*` config.
+    #[test]
+    fn pip_command_is_isolated() {
+        let cmd = pip_command(Path::new("python3"));
+        let (set, removed) = env_edits(cmd.as_std());
+        assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
+        assert!(set.contains(&("PIP_USER".to_string(), "0".to_string())));
+        assert!(removed.contains(&"PYTHONPATH".to_string()));
+    }
+
+    /// pip isolation is a superset of Python isolation: a pip install that
+    /// lands outside the managed tree is as broken as an import that resolves
+    /// outside it.
+    #[test]
+    fn isolate_pip_command_covers_python_isolation_too() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut cmd);
+        let (set, removed) = env_edits(&cmd);
+        for (k, v) in PYTHON_ISOLATION_SET.iter().chain(&PIP_ISOLATION_SET) {
+            assert!(
+                set.contains(&(k.to_string(), v.to_string())),
+                "{k} not set to {v}"
+            );
+        }
+        for var in PYTHON_ISOLATION_REMOVE.iter().chain(&PIP_ISOLATION_REMOVE) {
+            assert!(removed.contains(&var.to_string()), "{var} not removed");
+        }
+    }
+
+    /// See [`isolate_python_tokio_command_matches_std_variant`].
+    #[test]
+    fn isolate_pip_tokio_command_matches_std_variant() {
+        let mut std_cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut std_cmd);
+        let mut tokio_cmd = tokio::process::Command::new("python3");
+        isolate_pip_tokio_command(&mut tokio_cmd);
+        assert_eq!(env_edits(&std_cmd), env_edits(tokio_cmd.as_std()));
+    }
+
+    /// pip's precedence is command line > env > config file, so forcing `0`
+    /// beats unsetting: a `user = true` in the user's pip.conf survives the
+    /// latter. Pin the values, not just the keys, so a future edit back to
+    /// `env_remove` fails here rather than in the field.
+    #[test]
+    fn pip_isolation_forces_off_rather_than_unsetting() {
+        let mut cmd = std::process::Command::new("python3");
+        isolate_pip_command(&mut cmd);
+        let (set, removed) = env_edits(&cmd);
+        for var in ["PIP_USER", "PIP_REQUIRE_VIRTUALENV"] {
+            assert!(
+                set.contains(&(var.to_string(), "0".to_string())),
+                "{var} must be forced to 0, not unset"
+            );
+            assert!(!removed.contains(&var.to_string()));
+        }
+    }
 
     #[test]
     fn path_with_prepended_puts_dir_first() {

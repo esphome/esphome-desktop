@@ -234,6 +234,11 @@ impl DaemonManager {
         // CTRL_BREAK_EVENT to it on shutdown (see daemon stop/terminate).
         platform::configure_daemon_tokio_command(&mut cmd);
 
+        // Keep the managed interpreter on its own tree: a stale package in the
+        // user site directory otherwise shadows our pinned one and the backend
+        // dies at import before it can serve anything (#318).
+        platform::isolate_python_tokio_command(&mut cmd);
+
         // Set environment variables
         cmd.env("ESPHOME_DASHBOARD", "1");
         // Surface the desktop app version to the backend so it can be shown
