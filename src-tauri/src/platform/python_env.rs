@@ -4,27 +4,35 @@
 //! package versions across a refresh, and the cheap "does the interpreter
 //! run at all" check the repair path uses to aim its diagnosis.
 
+use super::get_bundled_resource_dir;
+#[cfg(not(target_os = "windows"))]
+use super::get_data_dir;
 use super::health::PROBE_TIMEOUT;
 #[cfg(not(target_os = "windows"))]
 use super::health::{bump_counter, read_counter};
 use super::process::run_python_capture_bounded;
 #[cfg(not(target_os = "windows"))]
 use super::process::{pip_install_blocking, run_python_capture, tail_for_log};
-#[cfg(not(target_os = "windows"))]
-use super::{get_bundled_resource_dir, get_data_dir};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tauri::AppHandle;
+#[cfg(not(target_os = "windows"))]
 use tracing::debug;
 
 /// Filename of the marker recording which desktop-app version copied the
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
+// The refresh cluster below is reached only from ensure_user_python's
+// non-Windows body today; #335 puts Windows on the same copy, so it is kept
+// compiled there rather than cfg gated out.
+#[cfg_attr(windows, allow(dead_code))]
 const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
 /// Filename of the counter tracking consecutive launches that deferred the
 /// bundled-Python refresh because the version probe failed on a still-usable
 /// interpreter. Lives inside the user Python tree, so it is reset for free the
 /// moment the tree is wiped. See [`MAX_REFRESH_DEFERS`].
+// See PYTHON_VERSION_MARKER: non-Windows only until #335.
+#[cfg_attr(windows, allow(dead_code))]
 const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 
 /// Maximum consecutive refresh defers before forcing the destructive refresh.
@@ -32,6 +40,8 @@ const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 /// (e.g. a corrupt `.dist-info`) would otherwise defer on every launch,
 /// gating the self-heal behind the very metadata that is broken. After this
 /// many defers we stop deferring and wipe to re-copy a clean bundle.
+// See PYTHON_VERSION_MARKER: non-Windows only until #335.
+#[cfg_attr(windows, allow(dead_code))]
 const MAX_REFRESH_DEFERS: u32 = 3;
 
 /// Why [`ensure_user_python`] was called. The caller always knows; passing it in
@@ -261,6 +271,8 @@ pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Resu
 
 /// User-preferred package versions captured before the bundled Python tree
 /// is wiped during an app-version refresh. See [`ensure_user_python`].
+// See PYTHON_VERSION_MARKER: non-Windows only until #335.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Default)]
 struct PreservedVersions {
     esphome: Option<String>,
@@ -452,6 +464,9 @@ fn parse_probe_output(
 /// copy, flattened the framework layout, and — for a *dangling* link — made
 /// `fs::copy` fail with "No such file", aborting the entire copy and leaving the
 /// app unable to start.
+// See PYTHON_VERSION_MARKER: non-Windows only until #335, which needs exactly
+// this copy on Windows (its symlink branch included; NTFS trees can hold them).
+#[cfg_attr(windows, allow(dead_code))]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     use std::fs;
 
@@ -482,6 +497,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// verbatim — never resolved or followed — so link semantics survive the copy.
 /// On Windows the source-side target is inspected only to pick the link *type*
 /// (`symlink_dir` vs `symlink_file`); the stored target itself is left unchanged.
+// See PYTHON_VERSION_MARKER: non-Windows only until #335.
+#[cfg_attr(windows, allow(dead_code))]
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     let target = std::fs::read_link(src).context("Failed to read symlink target")?;
 

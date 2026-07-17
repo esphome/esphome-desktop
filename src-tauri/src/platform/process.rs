@@ -2,7 +2,9 @@
 //! execution with capture, pip/python environment isolation, window
 //! suppression, and the Windows job-object and console-signal plumbing.
 
-use anyhow::{Context, Result};
+#[cfg(not(target_os = "windows"))]
+use anyhow::Context;
+use anyhow::Result;
 use std::ffi::OsStr;
 use std::path::Path;
 

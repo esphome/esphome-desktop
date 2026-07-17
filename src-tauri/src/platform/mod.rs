@@ -2,8 +2,6 @@
 //!
 //! Provides abstractions for platform-specific paths and behaviors.
 
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -237,6 +235,9 @@ pub fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// split-the-logic pattern `git_check::git_executables_in_path` uses. Going
 /// through `split_paths`/`join_paths` keeps the platform separator correct and
 /// round-trips a non-Unicode `PATH` instead of lossily dropping it.
+// Reached outside tests only through insert_dir_into_path, whose callers are
+// Windows (bundled tools) and macOS (Homebrew).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
     // An empty `existing` (PATH unset) would split into a single empty entry,
     // leaving a trailing "" in the result — which Windows search semantics
@@ -256,6 +257,8 @@ fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
 /// non-Unicode `PATH`). Used to expose Homebrew at the *end* of `PATH` so a
 /// brew-installed tool (e.g. `ccache`) is discoverable without ever shadowing a
 /// system or bundled binary that resolves earlier (see [`ensure_homebrew_on_path`]).
+// Reached outside tests only through insert_dir_into_path; see path_with_prepended.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn path_with_appended(existing: &OsStr, dir: &Path) -> Result<OsString> {
     // An empty `existing` (PATH unset) would split into a single empty entry,
     // leaving a leading "" in the result — which Windows search semantics treat
@@ -269,13 +272,19 @@ fn path_with_appended(existing: &OsStr, dir: &Path) -> Result<OsString> {
 }
 
 /// Where to insert a directory into `PATH`.
+// No caller constructs either variant on Linux.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 #[derive(Clone, Copy)]
 enum PathInsert {
     /// Prepend, so the dir shadows anything already on `PATH`. For bundled tools
     /// we always want to win (MinGit, the bundled ccache).
+    // Constructed only by prepend_bundled_tool, which is Windows only.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Front,
     /// Append, so the dir is only a fallback and never shadows an earlier entry.
     /// For the Homebrew dirs on macOS.
+    // Constructed only by ensure_homebrew_on_path's macOS body.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Back,
 }
 
@@ -289,6 +298,10 @@ enum PathInsert {
 /// Windows environment-size limit. Routed through
 /// [`path_with_prepended`]/[`path_with_appended`] so the platform separator and
 /// a non-Unicode `PATH` are handled correctly.
+// Both callers are cfg gated: prepend_bundled_tool (Windows) and
+// ensure_homebrew_on_path's macOS body. Dead on Linux, deliberately compiled
+// everywhere so all three lint gates see the same code.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn insert_dir_into_path(dir: &Path, position: PathInsert) -> Result<bool> {
     let existing = std::env::var_os("PATH").unwrap_or_default();
     if std::env::split_paths(&existing).any(|p| p == dir) {
