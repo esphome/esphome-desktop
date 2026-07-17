@@ -42,8 +42,6 @@ CAP = 800
 # fails until its entry is deleted, and from then on the cap holds it there.
 EXEMPT: frozenset[str] = frozenset(
     {
-        # ~84 top-level items and no siblings; #342 splits this one.
-        "src-tauri/src/platform/mod.rs",
         "src-tauri/src/update/mod.rs",
         "src-tauri/src/tray/mod.rs",
         "src-tauri/src/control/client.rs",
