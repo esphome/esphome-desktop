@@ -49,6 +49,22 @@ EXEMPT: frozenset[str] = frozenset(
 )
 
 
+def _code_before_comment(line: str) -> str:
+    """`line` with any trailing comment and whitespace removed.
+
+    Only ever applied to the three line shapes this scanner matches on (the
+    attribute, a `mod` declaration, a closing brace), none of which carry a
+    string literal that could contain a `//`. `} // end tests` is valid Rust
+    that rustfmt preserves, so matching the bare shapes alone misses it.
+    """
+    cut = len(line)
+    for marker in ("//", "/*"):
+        found = line.find(marker)
+        if found != -1:
+            cut = min(cut, found)
+    return line[:cut].rstrip()
+
+
 def code_line_count(source: str) -> int:
     """Count the lines of `source` that are not inside a test module.
 
@@ -75,6 +91,9 @@ def code_line_count(source: str) -> int:
         emit (compare `control/server.rs`, which has `pub fn cleanup() {}` at
         column 0). Scanning below it for a `}` finds the *next* item's brace,
         or none, and swallows the file: it scores 0.
+      * A matched line can carry a trailing comment. `} // end tests` is valid
+        Rust and rustfmt keeps it, so an exact `}` match walks past the real
+        terminator to the next one and swallows everything between: another 0.
 
     Finding the end of a block by the next column-0 `}` leans on rustfmt
     putting the closing brace of a top-level item at column 0, which holds
@@ -95,19 +114,20 @@ def code_line_count(source: str) -> int:
     total = 0
     index = 0
     while index < len(lines):
-        # rstrip only, so a leading space disqualifies a nested attribute.
-        if lines[index].rstrip() == "#[cfg(test)]":
+        # No lstrip anywhere here: a leading space means the item is nested
+        # inside another, and only top-level test modules are skipped.
+        if _code_before_comment(lines[index]) == "#[cfg(test)]":
             declaration = index + 1
             while declaration < len(lines) and not lines[declaration].strip():
                 declaration += 1
             if declaration < len(lines) and lines[declaration].startswith("mod "):
                 # `mod tests;` (body in another file) or `mod tests {}` (empty,
                 # the form rustfmt emits): self-contained, no body to skip.
-                if lines[declaration].rstrip().endswith((";", "}")):
+                if _code_before_comment(lines[declaration]).endswith((";", "}")):
                     index = declaration + 1
                     continue
                 end = declaration + 1
-                while end < len(lines) and lines[end].rstrip() != "}":
+                while end < len(lines) and _code_before_comment(lines[end]) != "}":
                     end += 1
                 if end < len(lines):
                     index = end + 1
@@ -161,8 +181,8 @@ def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
             failures.append(
                 f"{relative} has {count} code lines, over the {CAP} cap. Split "
                 f"it into submodules; see CONTRIBUTING.md (Code structure "
-                f"policies). The cap does not count the trailing "
-                f"#[cfg(test)] mod block."
+                f"policies). The cap does not count top-level #[cfg(test)] mod "
+                f"blocks, wherever in the file they sit."
             )
 
     for stale in sorted(exempt - seen):

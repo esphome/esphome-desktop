@@ -173,6 +173,47 @@ def test_test_module_with_an_empty_body_is_self_contained() -> None:
     assert check_file_size.code_line_count(source) == 4
 
 
+@pytest.mark.parametrize(
+    "closing",
+    ["}", "} // end tests", "} // end tests ", "} /* end tests */"],
+)
+def test_a_comment_on_the_closing_brace_still_ends_the_block(closing: str) -> None:
+    """`} // end tests` is valid Rust and rustfmt keeps it.
+
+    Matching a bare `}` walks past the real terminator to the next one and
+    swallows everything between, scoring a 2006-line file as 0.
+    """
+    source = (
+        "#[cfg(test)]\nmod tests {\n    fn t() {}\n"
+        f"{closing}\n"
+        "fn a() {}\nfn b() {\n}\n"
+    )
+    assert check_file_size.code_line_count(source) == 3
+
+
+def test_a_commented_closing_brace_cannot_hide_an_over_cap_file(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "#[cfg(test)]\nmod tests {\n    fn t() {}\n} // end tests\n"
+        + "".join(f"// code {n}\n" for n in range(CAP + 1))
+        + "fn tail() {\n}\n"
+    )
+    write(tmp_path, "a.rs", source)
+    assert len(check_file_size.check(tmp_path, ["a.rs"], set())) == 1
+
+
+def test_a_comment_on_the_declaration_still_reads_as_self_contained() -> None:
+    """Only `fn a` and `fn b`; the attribute and declaration are both skipped."""
+    source = "fn a() {}\n#[cfg(test)]\nmod tests {} // nothing yet\nfn b() {}\n"
+    assert check_file_size.code_line_count(source) == 2
+
+
+def test_a_comment_on_the_attribute_still_matches() -> None:
+    source = "fn a() {}\n#[cfg(test)] // unit tests\nmod tests {\n    fn t() {}\n}\n"
+    assert check_file_size.code_line_count(source) == 1
+
+
 def test_test_module_declared_in_another_file_is_skipped() -> None:
     """`mod tests;` has no braces to match."""
     source = "fn a() {}\n#[cfg(test)]\nmod tests;\nfn b() {}\n"

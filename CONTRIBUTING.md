@@ -16,10 +16,10 @@ the cap; there are no exemptions for new files. `Lint & Test` enforces this
 (`.github/scripts/check_file_size.py`), and a pre-commit hook runs the same
 check locally.
 
-The cap counts code, not tests. The trailing `#[cfg(test)] mod` block does not
-count against it, so a well tested file is never pushed over the cap by its own
-tests. Everything above that block does count, including test modules nested
-inside another `mod`.
+The cap counts code, not tests. A top-level `#[cfg(test)] mod` block does not
+count against it, wherever in the file it sits, so a well tested file is never
+pushed over the cap by its own tests. Everything else does count: code that
+follows a test module, and a test module nested inside another `mod`.
 
 Six files were already over the cap when it landed and are grandfathered in the
 script's `EXEMPT` list. They are allowed to grow, so no in-flight work is
