@@ -494,6 +494,24 @@ impl UpdateChecker {
             }
         };
 
+        // `get_python_path` falls back to a bare system `python3` in development
+        // builds with no bundle. That interpreter fails the probe simply because
+        // ESPHome is not installed in it, which is not damage and not ours to
+        // repair; probing it would only produce a notification telling a
+        // developer their install is broken.
+        if !platform::is_managed_python_tree(&python_path) {
+            debug!("Skipping ESPHome health probe; {python_path:?} is not a managed tree");
+            return;
+        }
+
+        let data_dir = match platform::get_data_dir(app_handle) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("Skipping ESPHome health probe; no data dir: {e:#}");
+                return;
+            }
+        };
+
         let probe_python = python_path.clone();
         let probe =
             tokio::task::spawn_blocking(move || platform::esphome_config_probe(&probe_python))
@@ -514,13 +532,13 @@ impl UpdateChecker {
             }
             Ok(Ok(None)) => {
                 debug!("ESPHome health probe passed");
-                platform::clear_package_reset_count(&python_path);
+                platform::clear_package_reset_count(&data_dir);
                 return;
             }
             Ok(Ok(Some(detail))) => detail,
         };
 
-        if !platform::may_reset_packages(&python_path) {
+        if !platform::may_reset_packages(&data_dir) {
             warn!(
                 "ESPHome install looks broken but the package reset budget is spent, so it is \
                  being left alone. Probe said: {detail}"
@@ -554,7 +572,7 @@ impl UpdateChecker {
         {
             Ok(Ok(None)) => {
                 info!("ESPHome install repaired");
-                platform::clear_package_reset_count(&python_path);
+                platform::clear_package_reset_count(&data_dir);
             }
             Ok(Ok(Some(detail))) => {
                 warn!("ESPHome install still broken after the package reset: {detail}");

@@ -1286,50 +1286,63 @@ fn make_probe_dir() -> Result<PathBuf> {
 }
 
 /// Filename of the counter bounding how many times the health probe may trigger
-/// a package reset. Lives at `<python_root>/.package-reset-count`.
+/// a repair. Lives at `<data_dir>/.package-reset-count`.
+///
+/// Beside the Python tree, never inside it. On macOS and Linux the repair *is*
+/// `remove_dir_all` of the whole tree, so a counter kept within it would be
+/// destroyed by the very repair it exists to bound: every launch would read
+/// zero, wipe, re-copy, and do it again forever — exactly the loop
+/// [`MAX_PACKAGE_RESETS`] is here to stop.
 const PACKAGE_RESET_MARKER: &str = ".package-reset-count";
 
-/// Maximum package resets triggered by a failing health probe before giving up.
+/// Maximum repairs triggered by a failing health probe before giving up.
 ///
 /// The probe reports "something makes a real ESPHome command fail", which is
-/// deliberately broader than "a reset will fix it" — ESPHome tightening
+/// deliberately broader than "a repair will fix it" — ESPHome tightening
 /// validation on [`PROBE_CONFIG`], or a full disk, would fail it just as well.
-/// Unbounded, that would wipe and reinstall every single launch forever. Two
-/// covers the real case (one reset fixes it, the next launch probes clean)
+/// Unbounded, that would wipe and rebuild the tree on every single launch. Two
+/// covers the real case (one repair fixes it, the next launch probes clean)
 /// while turning an unfixable failure into a bounded cost and a loud log.
 const MAX_PACKAGE_RESETS: u32 = 2;
 
-/// Path of the reset counter for the tree `python_bin` belongs to.
-fn package_reset_marker(python_bin: &Path) -> Option<PathBuf> {
-    Some(python_tree_root(python_bin)?.join(PACKAGE_RESET_MARKER))
+/// Path of the repair-attempt counter, given the app data dir.
+fn package_reset_marker(data_dir: &Path) -> PathBuf {
+    data_dir.join(PACKAGE_RESET_MARKER)
 }
 
-/// Whether a failing health probe is allowed to trigger another package reset,
+/// Whether a failing health probe is allowed to trigger another repair,
 /// recording the attempt if so.
 ///
-/// The counter lives in the tree root rather than in `site-packages`, so a reset
-/// (which only clears packages) does not erase its own attempt count, while
-/// replacing the whole tree does reset it — which is the behaviour we want from
-/// both.
-pub fn may_reset_packages(python_bin: &Path) -> bool {
-    let Some(marker) = package_reset_marker(python_bin) else {
-        return false;
-    };
+/// Takes the data dir rather than the tree so the count survives a repair that
+/// replaces the tree wholesale; see [`PACKAGE_RESET_MARKER`]. Nothing resets the
+/// budget implicitly — [`clear_package_reset_count`] does it, once a probe
+/// actually passes.
+pub fn may_reset_packages(data_dir: &Path) -> bool {
+    let marker = package_reset_marker(data_dir);
     let attempts = read_counter(&marker);
     if attempts >= MAX_PACKAGE_RESETS {
         return false;
     }
-    // Record before acting, not after: a reset that dies partway through must
-    // still count, or a crashing reset would retry forever. An unwritable
+    // Record before acting, not after: a repair that dies partway through must
+    // still count, or a crashing repair would retry forever. An unwritable
     // counter can never advance, so treat it as exhausted for the same reason.
     bump_counter(&marker, attempts + 1)
 }
 
-/// Forget any recorded reset attempts, once the tree is proven healthy.
-pub fn clear_package_reset_count(python_bin: &Path) {
-    if let Some(marker) = package_reset_marker(python_bin) {
-        let _ = std::fs::remove_file(marker);
-    }
+/// Forget any recorded repair attempts, once the tree is proven healthy.
+pub fn clear_package_reset_count(data_dir: &Path) {
+    let _ = std::fs::remove_file(package_reset_marker(data_dir));
+}
+
+/// Whether `python_bin` is a Python tree this app manages, as opposed to the
+/// bare `python3`/`python` [`get_python_path`] falls back to in development
+/// builds with no bundle.
+///
+/// The health probe and its repair only make sense for a tree we put there: a
+/// system Python failing `esphome config` (because ESPHome simply is not
+/// installed in it) is not damage, and no repair of ours would touch it.
+pub fn is_managed_python_tree(python_bin: &Path) -> bool {
+    python_tree_root(python_bin).is_some()
 }
 
 /// Check the ESPHome install by running a real `esphome config` validation.
@@ -4010,50 +4023,76 @@ mod tests {
     }
 
     #[test]
-    fn python_tree_root_ignores_the_system_python_fallback() {
+    fn the_system_python_fallback_is_not_a_managed_tree() {
         // `get_python_path` returns a bare command name in dev builds with no
-        // bundle. There is no managed tree behind it, so nothing may be swept
-        // and no marker may be dropped in the working directory.
-        assert!(python_tree_root(Path::new("python3")).is_none());
-        assert!(python_tree_root(Path::new("python")).is_none());
-        assert!(package_reset_marker(Path::new("python3")).is_none());
-        assert!(!may_reset_packages(Path::new("python3")));
+        // bundle. There is no managed tree behind it, so nothing may be swept,
+        // and probing it would tell a developer their install is broken when
+        // all that is true is that ESPHome is not in their system Python.
+        for fallback in ["python3", "python"] {
+            assert!(
+                python_tree_root(Path::new(fallback)).is_none(),
+                "{fallback}"
+            );
+            assert!(!is_managed_python_tree(Path::new(fallback)), "{fallback}");
+        }
 
-        // A real tree still resolves.
+        // A real tree still resolves, and is ours to probe.
         let root = unique_temp_dir("tree-root");
-        assert_eq!(
-            python_tree_root(&interpreter_in_tree(&root)),
-            Some(root.as_path())
-        );
+        let python = interpreter_in_tree(&root);
+        assert_eq!(python_tree_root(&python), Some(root.as_path()));
+        assert!(is_managed_python_tree(&python));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn package_reset_is_bounded() {
         // The probe reports "a real command fails", which is broader than "a
-        // reset fixes it". Without a bound, a failure a reset can't fix would
-        // wipe and reinstall on every single launch, forever.
-        let root = unique_temp_dir("reset-bound");
-        let python_bin = interpreter_in_tree(&root);
-        std::fs::create_dir_all(python_bin.parent().unwrap()).unwrap();
+        // repair fixes it". Without a bound, a failure a repair can't fix would
+        // rebuild the tree on every single launch, forever.
+        let data_dir = unique_temp_dir("reset-bound");
 
         for attempt in 1..=MAX_PACKAGE_RESETS {
             assert!(
-                may_reset_packages(&python_bin),
-                "reset {attempt} should be allowed"
+                may_reset_packages(&data_dir),
+                "repair {attempt} should be allowed"
             );
         }
         assert!(
-            !may_reset_packages(&python_bin),
-            "the budget must run out rather than wipe forever"
+            !may_reset_packages(&data_dir),
+            "the budget must run out rather than rebuild forever"
         );
 
         // A tree that proves healthy starts over, so an unrelated future
         // breakage still gets its full budget.
-        clear_package_reset_count(&python_bin);
-        assert!(may_reset_packages(&python_bin));
+        clear_package_reset_count(&data_dir);
+        assert!(may_reset_packages(&data_dir));
 
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn reset_budget_survives_the_repair_it_bounds() {
+        // On macOS/Linux the repair is `remove_dir_all` of the whole Python
+        // tree. A counter kept inside that tree would be destroyed by the very
+        // repair it bounds, so every launch would read zero and rebuild again:
+        // the unbounded loop MAX_PACKAGE_RESETS exists to prevent.
+        let data_dir = unique_temp_dir("reset-budget-survives");
+        let python_tree = data_dir.join("python");
+        std::fs::create_dir_all(python_tree.join("bin")).unwrap();
+
+        assert!(may_reset_packages(&data_dir), "first repair allowed");
+
+        // The repair replaces the tree.
+        std::fs::remove_dir_all(&python_tree).unwrap();
+        std::fs::create_dir_all(python_tree.join("bin")).unwrap();
+
+        assert!(may_reset_packages(&data_dir), "second repair allowed");
+        assert!(
+            !may_reset_packages(&data_dir),
+            "the budget must not be reset by the repair that spends it"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[cfg(not(target_os = "windows"))]
