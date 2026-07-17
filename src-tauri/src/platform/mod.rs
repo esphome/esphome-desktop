@@ -64,6 +64,27 @@ pub fn data_dir_no_handle() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(BUNDLE_IDENTIFIER))
 }
 
+/// Parent directory of the managed Python tree (`<dir>/python`) and its repair
+/// counter.
+///
+/// Tauri's `app_local_data_dir()`: the same directory as [`get_data_dir`] on
+/// macOS and Linux, but `%LOCALAPPDATA%\io.esphome.builder\` on Windows. The
+/// tree is hundreds of MB of interpreter and packages, all reproducible from
+/// the bundle, so it belongs in machine-local data where a roaming profile
+/// never syncs it. Settings and logs stay under [`get_data_dir`].
+pub fn get_python_parent_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let path = app_handle
+        .path()
+        .app_local_data_dir()
+        .context("Failed to get app local data directory")?;
+
+    // Ensure directory exists
+    std::fs::create_dir_all(&path).context("Failed to create local data directory")?;
+
+    debug!("Python parent directory: {:?}", path);
+    Ok(path)
+}
+
 /// Get the bundled resource directory.
 ///
 /// On Linux we resolve this ourselves so the path is always
@@ -127,8 +148,8 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// Get the path to the user Python executable
 /// On non-Windows platforms, the bundled Python is copied to user data for updates
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
-    let data_dir = get_data_dir(app_handle)?;
-    let python_path = health::interpreter_in_tree(&data_dir.join("python"));
+    let parent_dir = get_python_parent_dir(app_handle)?;
+    let python_path = health::interpreter_in_tree(&parent_dir.join("python"));
 
     if python_path.exists() {
         debug!("Using user Python: {:?}", python_path);
@@ -155,8 +176,8 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
 
 /// Get the Python bin directory (for PATH)
 pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
-    let data_dir = get_data_dir(app_handle)?;
-    let user_python = data_dir.join("python");
+    let parent_dir = get_python_parent_dir(app_handle)?;
+    let user_python = parent_dir.join("python");
 
     #[cfg(target_os = "windows")]
     let bin_dir = user_python.clone(); // On Windows, python.exe is in the root

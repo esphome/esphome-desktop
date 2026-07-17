@@ -504,10 +504,10 @@ impl UpdateChecker {
             return;
         }
 
-        let data_dir = match platform::get_data_dir(app_handle) {
+        let python_parent_dir = match platform::get_python_parent_dir(app_handle) {
             Ok(d) => d,
             Err(e) => {
-                warn!("Skipping ESPHome health probe; no data dir: {e:#}");
+                warn!("Skipping ESPHome health probe; no local data dir: {e:#}");
                 return;
             }
         };
@@ -515,7 +515,7 @@ impl UpdateChecker {
         let detail = match probe_esphome(&python_path).await {
             Ok(None) => {
                 debug!("ESPHome health probe passed");
-                platform::clear_repair_count(&data_dir);
+                platform::clear_repair_count(&python_parent_dir);
                 return;
             }
             Ok(Some(detail)) => detail,
@@ -574,7 +574,7 @@ impl UpdateChecker {
                         app_handle,
                         t_with(
                             "update.repair_incomplete",
-                            &[("hint", &repair_hint(&data_dir, false))],
+                            &[("hint", &repair_hint(&python_parent_dir, false))],
                         ),
                     );
                     return;
@@ -583,7 +583,7 @@ impl UpdateChecker {
             }
         };
 
-        if !platform::may_repair_tree(&data_dir) {
+        if !platform::may_repair_tree(&python_parent_dir) {
             warn!(
                 "ESPHome install looks broken but the repair budget is spent, so it is being \
                  left alone. Probe said: {detail}"
@@ -594,7 +594,7 @@ impl UpdateChecker {
                 app_handle,
                 t_with(
                     "update.repair_incomplete",
-                    &[("hint", &repair_hint(&data_dir, false))],
+                    &[("hint", &repair_hint(&python_parent_dir, false))],
                 ),
             );
             return;
@@ -611,7 +611,10 @@ impl UpdateChecker {
                         ("error", &e.to_string()),
                         (
                             "hint",
-                            &repair_hint(&data_dir, platform::repair_budget_left(&data_dir)),
+                            &repair_hint(
+                                &python_parent_dir,
+                                platform::repair_budget_left(&python_parent_dir),
+                            ),
                         ),
                     ],
                 ),
@@ -625,11 +628,11 @@ impl UpdateChecker {
         match probe_esphome(&python_path).await {
             Ok(None) => {
                 info!("ESPHome install repaired");
-                platform::clear_repair_count(&data_dir);
+                platform::clear_repair_count(&python_parent_dir);
             }
             Ok(Some(detail)) => {
                 warn!("ESPHome install still broken after the repair: {detail}");
-                notify_repair_incomplete(app_handle, &data_dir);
+                notify_repair_incomplete(app_handle, &python_parent_dir);
             }
             // The repair ran but we could not confirm it. Treat that as
             // unrepaired rather than as success: the probe already proved the
@@ -640,7 +643,7 @@ impl UpdateChecker {
             // unconfirmed repair has not earned back its budget.
             Err(e) => {
                 warn!("Could not re-check the ESPHome install after the repair: {e:#}");
-                notify_repair_incomplete(app_handle, &data_dir);
+                notify_repair_incomplete(app_handle, &python_parent_dir);
             }
         }
     }
@@ -1271,7 +1274,7 @@ async fn run_esphome_install(
 /// touches it, since `ensure_user_python` only re-copies when the version marker
 /// changes. What does work there is removing the tree — the next launch finds no
 /// interpreter and re-copies the bundle — so name that, and name the path.
-fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
+fn repair_hint(python_parent_dir: &std::path::Path, retryable: bool) -> String {
     if retryable {
         return t("update.repair_hint_retry");
     }
@@ -1280,7 +1283,10 @@ fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
     } else {
         t_with(
             "update.repair_hint_delete_tree",
-            &[("path", &data_dir.join("python").display().to_string())],
+            &[(
+                "path",
+                &python_parent_dir.join("python").display().to_string(),
+            )],
         )
     }
 }
@@ -1323,13 +1329,13 @@ async fn probe_esphome(python_path: &std::path::Path) -> Result<Option<String>> 
 
 /// Tell the user the tree is still broken after a repair, or that we could
 /// not confirm it is not.
-fn notify_repair_incomplete(app_handle: &AppHandle, data_dir: &std::path::Path) {
-    let retryable = platform::repair_budget_left(data_dir);
+fn notify_repair_incomplete(app_handle: &AppHandle, python_parent_dir: &std::path::Path) {
+    let retryable = platform::repair_budget_left(python_parent_dir);
     notify_repair_needed(
         app_handle,
         t_with(
             "update.repair_incomplete",
-            &[("hint", &repair_hint(data_dir, retryable))],
+            &[("hint", &repair_hint(python_parent_dir, retryable))],
         ),
     );
 }

@@ -7,7 +7,7 @@
 //! subsystem with a pristine-copy refresh once Windows runs from app data.
 
 use super::health::python_tree_root;
-use super::{get_bundled_resource_dir, get_data_dir, get_python_path};
+use super::{get_bundled_resource_dir, get_python_parent_dir, get_python_path};
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -205,7 +205,7 @@ pub fn python_path_for_reset(app_handle: &AppHandle) -> Result<PathBuf> {
         .with_context(|| format!("Cannot resolve a Python tree root from {python:?}"))?;
 
     // The tree we copy to and own, on every platform.
-    let user_root = get_data_dir(app_handle)?.join("python");
+    let user_root = get_python_parent_dir(app_handle)?.join("python");
 
     if is_resettable_tree(root, &user_root, || {
         Ok(get_bundled_resource_dir(app_handle)?.join("python"))

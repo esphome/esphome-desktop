@@ -73,7 +73,8 @@ fn make_probe_dir() -> Result<PathBuf> {
 }
 
 /// Filename of the counter bounding how many times the health probe may trigger
-/// a repair. Lives at `<data_dir>/.repair-count`.
+/// a repair. Lives at `<python parent dir>/.repair-count`
+/// (see [`super::get_python_parent_dir`]).
 ///
 /// Beside the Python tree, never inside it. On macOS and Linux the repair *is*
 /// `remove_dir_all` of the whole tree, so a counter kept within it would be
@@ -95,12 +96,12 @@ const MAX_REPAIRS: u32 = 2;
 /// Whether a failing health probe is allowed to trigger another repair,
 /// recording the attempt if so.
 ///
-/// Takes the data dir rather than the tree so the count survives a repair that
-/// replaces the tree wholesale; see [`REPAIR_COUNT_MARKER`]. Nothing resets the
-/// budget implicitly — [`clear_repair_count`] does it, once a probe
-/// actually passes.
-pub fn may_repair_tree(data_dir: &Path) -> bool {
-    let marker = data_dir.join(REPAIR_COUNT_MARKER);
+/// Takes the tree's parent dir rather than the tree so the count survives a
+/// repair that replaces the tree wholesale; see [`REPAIR_COUNT_MARKER`].
+/// Nothing resets the budget implicitly — [`clear_repair_count`] does it, once
+/// a probe actually passes.
+pub fn may_repair_tree(python_parent_dir: &Path) -> bool {
+    let marker = python_parent_dir.join(REPAIR_COUNT_MARKER);
     let attempts = read_counter(&marker);
     if attempts >= MAX_REPAIRS {
         return false;
@@ -117,8 +118,8 @@ pub fn may_repair_tree(data_dir: &Path) -> bool {
 ///
 /// This is what makes "reopening will try again" a claim we can check rather
 /// than assume: once the budget is spent, nothing retries until a probe passes.
-pub fn repair_budget_left(data_dir: &Path) -> bool {
-    read_counter(&data_dir.join(REPAIR_COUNT_MARKER)) < MAX_REPAIRS
+pub fn repair_budget_left(python_parent_dir: &Path) -> bool {
+    read_counter(&python_parent_dir.join(REPAIR_COUNT_MARKER)) < MAX_REPAIRS
 }
 
 /// Forget any recorded repair attempts, once the tree is proven healthy.
@@ -128,8 +129,8 @@ pub fn repair_budget_left(data_dir: &Path) -> bool {
 /// perfectly fixable breakage is never repaired and the log only ever claims the
 /// budget is spent. That is worth a line, for the same reason [`bump_counter`]
 /// reports its own write failures rather than swallowing them.
-pub fn clear_repair_count(data_dir: &Path) {
-    let marker = data_dir.join(REPAIR_COUNT_MARKER);
+pub fn clear_repair_count(python_parent_dir: &Path) {
+    let marker = python_parent_dir.join(REPAIR_COUNT_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

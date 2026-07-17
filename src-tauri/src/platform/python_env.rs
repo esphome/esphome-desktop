@@ -6,7 +6,7 @@
 
 use super::get_bundled_resource_dir;
 #[cfg(not(target_os = "windows"))]
-use super::get_data_dir;
+use super::get_python_parent_dir;
 use super::health::PROBE_TIMEOUT;
 #[cfg(not(target_os = "windows"))]
 use super::health::{bump_counter, read_counter};
@@ -99,8 +99,8 @@ pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Resu
     {
         use tracing::{info, warn};
 
-        let data_dir = get_data_dir(app_handle)?;
-        let user_python = data_dir.join("python");
+        let parent_dir = get_python_parent_dir(app_handle)?;
+        let user_python = parent_dir.join("python");
         let python_check = user_python.join("bin").join("python3");
         let marker_path = user_python.join(PYTHON_VERSION_MARKER);
         let current_version = env!("CARGO_PKG_VERSION");
