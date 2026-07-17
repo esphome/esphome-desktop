@@ -32,7 +32,7 @@ roughly 2300 code lines; see
 To check before pushing:
 
 ```bash
-python3 .github/scripts/check_file_size.py
+python3 .github/scripts/check_file_size.py   # `python` on Windows
 ```
 
 ## Running the Rust checks locally

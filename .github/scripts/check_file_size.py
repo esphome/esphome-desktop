@@ -3,7 +3,11 @@
 
 Run from the repo root, with no arguments:
 
-    python3 .github/scripts/check_file_size.py
+    python3 .github/scripts/check_file_size.py   # `python` on Windows
+
+(A python.org install on Windows puts `python.exe` on PATH but no
+`python3.exe`; the pre-commit hook sidesteps this by having pre-commit
+provision the interpreter.)
 
 Wired into the `lint-test` job (.github/workflows/lint-test.yml) and mirrored
 by a pre-commit hook. Exits non-zero, with a message naming each offending
@@ -243,7 +247,13 @@ def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
 
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
-    failures = check(root, tracked_rust_files(root), EXEMPT)
+    try:
+        failures = check(root, tracked_rust_files(root), EXEMPT)
+    except RuntimeError as error:
+        # Those raises exist to replace a traceback with a sentence; letting
+        # one escape here would deliver the sentence wrapped in the traceback.
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     for failure in failures:
         print(f"error: {failure}", file=sys.stderr)
     return 1 if failures else 0

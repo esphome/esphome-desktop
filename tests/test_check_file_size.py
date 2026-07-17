@@ -375,6 +375,19 @@ def test_no_matching_files_is_an_error_not_a_pass(tmp_path: Path) -> None:
         check_file_size.tracked_rust_files(tmp_path)
 
 
+def test_main_prints_the_diagnostic_rather_than_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A RuntimeError escaping main() arrives wrapped in the traceback it replaces."""
+
+    def broken(_root: Path) -> list[str]:
+        raise RuntimeError("the tree moved")
+
+    monkeypatch.setattr(check_file_size, "tracked_rust_files", broken)
+    assert check_file_size.main() == 1
+    assert capsys.readouterr().err.strip() == "error: the tree moved"
+
+
 def test_a_tracked_file_missing_from_the_worktree_says_why(tmp_path: Path) -> None:
     """git ls-files reads the index, which can name a file that is not there."""
     with pytest.raises(RuntimeError, match="missing from the working tree"):
