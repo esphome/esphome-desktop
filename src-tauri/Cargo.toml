@@ -83,5 +83,8 @@ libloading = "0.9"
 tauri = { version = "2.11.2", features = ["image-png"] }
 
 [features]
-default = ["custom-protocol"]
+# PROBE ONLY — DO NOT MERGE. Disables the job object assignment so the e2e
+# can be observed failing, proving it discriminates.
+probe-no-job = []
+default = ["custom-protocol", "probe-no-job"]
 custom-protocol = ["tauri/custom-protocol"]

@@ -285,7 +285,9 @@ impl DaemonManager {
         // failure: both mean the same thing to a reader of the log, and the
         // helper has already logged the underlying Win32 error, so this states
         // the consequence once rather than repeating the cause.
-        #[cfg(windows)]
+        // PROBE ONLY — DO NOT MERGE. Disabled to prove the e2e actually
+        // detects the bug rather than passing either way.
+        #[cfg(all(windows, not(feature = "probe-no-job")))]
         if !child
             .raw_handle()
             .is_some_and(platform::assign_to_kill_on_close_job)
