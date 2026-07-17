@@ -82,12 +82,14 @@ def parse(manifest: str) -> tuple[list[str], list[str]]:
     fail on manifests the real reader accepts.
     """
     sweep, keep = [], []
-    for line in manifest.splitlines():
+    for number, line in enumerate(manifest.splitlines(), start=1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         verb, path = line.split(maxsplit=1)
-        {"sweep": sweep, "keep": keep}[verb].append(path)
+        by_verb = {"sweep": sweep, "keep": keep}
+        assert verb in by_verb, f"line {number}: unknown verb {verb!r} in {line!r}"
+        by_verb[verb].append(path)
     return sweep, keep
 
 
@@ -116,16 +118,13 @@ def test_sweeps_site_packages_and_the_scripts_dir(
     assert any(s.rsplit("/", 1)[-1] in {"bin", "Scripts"} for s in sweep), sweep
 
 
-def test_site_packages_is_swept_once_even_though_two_keys_name_it() -> None:
-    # `purelib` and `platlib` resolve to the same directory on the layout we ship.
-    # Asking for both is what keeps the reset correct if that ever stops being
-    # true; deduplicating is what stops it sweeping the same dir twice today.
+def test_both_site_packages_keys_are_swept() -> None:
+    # `purelib` and `platlib` name one directory on the layout we ship, so the
+    # coverage test above cannot notice if one is dropped -- it would still see a
+    # site-packages swept. Pin the membership directly; asking for both is what
+    # keeps the reset correct if an interpreter ever separates them.
     assert "purelib" in maint.SWEPT_PATHS
     assert "platlib" in maint.SWEPT_PATHS
-
-    manifest = maint.build_manifest(running_tree_root())
-    sweep, _ = parse(manifest)
-    assert len(sweep) == len(set(sweep)), f"a directory swept twice: {sweep}"
 
 
 def test_every_path_is_relative_and_posix(

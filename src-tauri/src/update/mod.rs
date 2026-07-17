@@ -519,22 +519,41 @@ impl UpdateChecker {
                 return;
             }
             Ok(Some(detail)) => detail,
-            // The probe could not run at all, or hung past its deadline: the
-            // interpreter itself is wedged, not just its packages. That is still
-            // a tree that fails every build, so treat it as broken wherever we
-            // can actually do something about it.
+            // The probe could not run at all. That does NOT mean the interpreter
+            // is broken: the probe also needs a writable temp dir and somewhere
+            // to put a config, so a full disk fails it just as well. Ask the
+            // interpreter directly rather than inferring it — repairing on a
+            // full disk would delete a working tree and then fail to re-copy it,
+            // turning "builds are failing" into "there is no Python", which is
+            // worse than doing nothing.
             //
-            // Re-copying the bundle is exactly the fix — it replaces the
-            // interpreter and needs nothing from the broken one. The PyPI reset
-            // is not: it drives pip with this very interpreter, so on Windows
-            // there is nothing to try.
+            // A wedged interpreter *is* worth repairing where a bundle re-copy
+            // can: that replaces the interpreter and needs nothing from the
+            // broken one. Windows has no bundle to copy and its reset drives pip
+            // with this same interpreter, so there is nothing to try.
             //
             // Deliberately not left to `ensure_user_python`'s own
             // `interpreter_is_usable` wipe: that only runs when `needs_copy` is
             // true, so a tree that broke without an app update keeps a matching
             // marker and is never reached.
             Err(e) if platform::can_refresh_from_bundle(app_handle) => {
-                format!("the health probe could not run: {e:#}")
+                let unusable = {
+                    let probe_python = python_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        platform::interpreter_is_usable(&probe_python)
+                    })
+                    .await
+                    .map(|usable| !usable)
+                    .unwrap_or(false)
+                };
+                if !unusable {
+                    warn!(
+                        "ESPHome health probe could not run, but the interpreter itself is fine, \
+                         so this is not a tree we can repair: {e:#}"
+                    );
+                    return;
+                }
+                format!("the interpreter could not run the health probe: {e:#}")
             }
             Err(e) => {
                 warn!(

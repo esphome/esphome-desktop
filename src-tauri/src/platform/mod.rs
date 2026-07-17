@@ -723,10 +723,23 @@ fn snapshot_preserved_versions(
 /// Used to split a transient probe error (defer) from a genuinely unusable
 /// interpreter (wipe & recover). A bare `-c "pass"` is NOT enough here: a
 /// gutted stdlib still executes it cleanly while every import fails.
-#[cfg(not(target_os = "windows"))]
-fn interpreter_is_usable(python_bin: &Path) -> bool {
+///
+/// This asks only about the interpreter, which is what makes it the right way to
+/// answer that question. [`esphome_config_probe`] asks a bigger one — "can this
+/// tree build?" — and fails for reasons that have nothing to do with the
+/// interpreter (an unwritable temp dir, a full disk). Inferring "the interpreter
+/// is broken" from *that* failing would condemn a healthy tree.
+///
+/// Bounded, because both callers are on the launch path: an interpreter wedged
+/// rather than broken would otherwise hang the very startup this is meant to
+/// rescue.
+pub fn interpreter_is_usable(python_bin: &Path) -> bool {
     matches!(
-        run_python_capture(python_bin, ["-c", "import importlib.metadata"]),
+        run_python_capture_bounded(
+            python_bin,
+            ["-c", "import importlib.metadata"],
+            PROBE_TIMEOUT,
+        ),
         Ok(o) if o.status.success()
     )
 }
@@ -1156,6 +1169,20 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
 
     if manifest.sweep.is_empty() {
         anyhow::bail!("{BASE_MANIFEST} names no directories to sweep; refusing to use it");
+    }
+
+    // pip must be spared, or the reset deletes the one thing it reinstalls with
+    // and the tree can never be repaired again. The generator asserts this too,
+    // but that runs on a build machine; this runs against a file that has since
+    // been copied, shipped, and sat on a user's disk for months, and is the last
+    // check standing between a bad manifest and `remove_dir_all`. `keep_key` has
+    // already folded `pip-X.Y.dist-info` down to `pip`, so this sees either.
+    if !manifest
+        .keep
+        .iter()
+        .any(|keep| keep.file_name() == Some(OsStr::new("pip")))
+    {
+        anyhow::bail!("{BASE_MANIFEST} does not name pip; refusing to use it");
     }
 
     // Every swept directory must spare something. Checking the keep set only
@@ -3999,12 +4026,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_base_manifest_rejects_a_manifest_that_does_not_name_pip() {
+        // The generator refuses to emit one, but that runs on a build machine.
+        // This runs against a file that has been copied, shipped and sat on disk
+        // since — and it is the last thing between a bad manifest and a
+        // recursive delete of the pip the repair reinstalls with.
+        let err = parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep {TEST_PURELIB}/setuptools\nkeep bin/python3\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pip"), "{err}");
+
+        // Named either way round: `keep_key` folds the versioned metadata dir
+        // down to the distribution name.
+        assert!(parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep {TEST_PURELIB}/pip-26.1.2.dist-info\nkeep bin/python3\n"
+        ))
+        .is_ok());
+    }
+
+    #[test]
     fn parse_base_manifest_rejects_a_sweep_dir_with_nothing_kept() {
         // Checking the keep set only globally would accept this: `bin` names
         // entries, so the manifest looks populated, while site-packages is swept
         // clean — taking the interpreter's own pip with it.
         let err = parse_base_manifest(&format!(
-            "sweep {TEST_PURELIB}\nsweep bin\nkeep bin/python3\n"
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep bin/python3\nkeep bin/pip\n"
         ))
         .unwrap_err()
         .to_string();
@@ -4267,11 +4315,11 @@ mod tests {
     }
 
     #[test]
-    fn package_reset_is_bounded() {
+    fn repairs_are_bounded() {
         // The probe reports "a real command fails", which is broader than "a
         // repair fixes it". Without a bound, a failure a repair can't fix would
         // rebuild the tree on every single launch, forever.
-        let data_dir = unique_temp_dir("reset-bound");
+        let data_dir = unique_temp_dir("repair-bound");
 
         for attempt in 1..=MAX_REPAIRS {
             assert!(
@@ -4298,7 +4346,7 @@ mod tests {
         // tree. A counter kept inside that tree would be destroyed by the very
         // repair it bounds, so every launch would read zero and rebuild again:
         // the unbounded loop MAX_REPAIRS exists to prevent.
-        let data_dir = unique_temp_dir("reset-budget-survives");
+        let data_dir = unique_temp_dir("repair-budget-survives");
         let python_tree = data_dir.join("python");
         std::fs::create_dir_all(python_tree.join("bin")).unwrap();
 
