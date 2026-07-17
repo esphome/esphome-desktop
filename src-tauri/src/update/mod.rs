@@ -560,6 +560,19 @@ impl UpdateChecker {
                     "ESPHome health probe could not run and this platform has no bundle to \
                      restore from, so the repair would need the same broken interpreter: {e:#}"
                 );
+                // Nothing we can do is not nothing to say. This is Windows with
+                // an interpreter we cannot run: every build fails, no repair of
+                // ours applies, and reinstalling — which the hint gives, since
+                // nothing will retry — is the only thing that fixes it. Staying
+                // quiet here would leave the one case where the user is the only
+                // possible actor as the one case we never tell them about.
+                notify_repair_needed(
+                    app_handle,
+                    t_with(
+                        "update.repair_incomplete",
+                        &[("hint", &repair_hint(&data_dir, false))],
+                    ),
+                );
                 return;
             }
         };

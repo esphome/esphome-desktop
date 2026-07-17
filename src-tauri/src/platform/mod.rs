@@ -1557,7 +1557,13 @@ pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
         Ok(Some(tail_for_log(&detail)))
     })();
 
-    let _ = fs::remove_dir_all(&dir);
+    // A leaked probe dir is not harmless: `make_probe_dir` steps over names it
+    // did not create, and it only tries 100 of them. Enough of these and the
+    // probe stops running with "Could not create a probe directory" and nothing
+    // in the log tying it back to the cleanup that quietly never happened.
+    if let Err(e) = fs::remove_dir_all(&dir) {
+        tracing::warn!("Could not remove the probe dir {dir:?}: {e}");
+    }
     result
 }
 
@@ -1676,9 +1682,16 @@ fn run_python_capture_bounded<S: AsRef<OsStr>>(
 
     match run_bounded(cmd, timeout)? {
         BoundedRun::Exited(output) => Ok(output),
-        BoundedRun::TimedOut { .. } => Err(std::io::Error::new(
+        // Carry what it managed to say. `BoundedRun` goes to the trouble of
+        // draining a killed child precisely so this exists; dropping it here
+        // would reduce a hung probe to "timed out after 60s" with no hint as to
+        // what it was doing, which is the whole question at that point.
+        BoundedRun::TimedOut { stderr } => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!("timed out after {timeout:?}"),
+            format!(
+                "timed out after {timeout:?}; partial stderr: {}",
+                tail_for_log(&String::from_utf8_lossy(&stderr))
+            ),
         )),
     }
 }
