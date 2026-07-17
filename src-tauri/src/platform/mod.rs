@@ -969,12 +969,44 @@ fn manifest_path_is_safe(rel: &Path) -> bool {
         && rel.components().any(|c| matches!(c, Component::Normal(_)))
 }
 
+/// Match key for a `site-packages` entry: the distribution name for a
+/// `<name>-<version>.dist-info` directory, the entry name unchanged otherwise.
+///
+/// Comparing versioned metadata dirs by name alone would make the manifest go
+/// stale the moment any base package's version moves — most obviously pip's own,
+/// since `pip install esphome` runs after the manifest is captured and could
+/// bump it. The reset would then not recognise `pip-27.0.dist-info` as pip's,
+/// delete it, and leave pip importable but with no `RECORD` — which is exactly
+/// the state that makes pip abort with `uninstall-no-record-file`. That is the
+/// bug this whole change exists to remove, so the reset must not be able to
+/// manufacture it. Match on identity, not version.
+fn keep_key(name: &str) -> &str {
+    match name.strip_suffix(".dist-info") {
+        Some(stem) => stem.split_once('-').map_or(stem, |(dist, _version)| dist),
+        None => name,
+    }
+}
+
+/// Rewrite a relative path's final component to its [`keep_key`].
+fn keep_path(rel: &Path) -> PathBuf {
+    match rel.file_name().and_then(|n| n.to_str()) {
+        Some(name) => rel.with_file_name(keep_key(name)),
+        // A non-UTF-8 entry name has no version to normalise away; match it
+        // verbatim rather than dropping it from the keep set.
+        None => rel.to_path_buf(),
+    }
+}
+
 /// Parse [`BASE_MANIFEST`] text: `sweep <relpath>` / `keep <relpath>` lines,
 /// `#` comments and blank lines ignored.
 ///
 /// Paths use POSIX separators on every platform. `Path` compares and hashes
 /// component-wise and treats `/` as a separator on Windows too, so the entries
 /// match natively-separated paths without rewriting.
+///
+/// `keep` paths are stored under their [`keep_key`], so the file stays readable
+/// (it names the exact versions that shipped) while matching stays
+/// version-independent.
 fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
     let mut manifest = BaseManifest::default();
 
@@ -997,7 +1029,7 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
         match verb {
             "sweep" => manifest.sweep.push(rel),
             "keep" => {
-                manifest.keep.insert(rel);
+                manifest.keep.insert(keep_path(&rel));
             }
             other => anyhow::bail!("{BASE_MANIFEST} line {}: unknown verb {other:?}", i + 1),
         }
@@ -1065,8 +1097,13 @@ pub fn wipe_installed_packages(python_bin: &Path) -> Result<usize> {
 
         for entry in entries {
             let entry = entry.with_context(|| format!("Failed to read entry in {sweep_dir:?}"))?;
-            let rel = sweep_rel.join(entry.file_name());
-            if manifest.keep.contains(&rel) {
+            // Normalise both sides the same way, so a base package whose version
+            // moved since the manifest was captured is still recognised as the
+            // interpreter's. See `keep_key`.
+            if manifest
+                .keep
+                .contains(&keep_path(&sweep_rel.join(entry.file_name())))
+            {
                 continue;
             }
             let path = entry.path();
@@ -3483,6 +3520,56 @@ mod tests {
     }
 
     #[test]
+    fn wipe_keeps_pip_after_its_version_moves() {
+        // The manifest is captured before `pip install esphome`, so anything in
+        // that dependency tree bumping pip leaves the shipped bundle disagreeing
+        // with its own manifest; a user upgrading pip by hand does the same.
+        // Matching pip's metadata by exact name would then delete it, leaving
+        // pip importable with no RECORD, which is precisely the
+        // `uninstall-no-record-file` state this whole change exists to remove.
+        let root = fake_tree("wipe-pip-upgraded", &fake_manifest());
+        let purelib = root.join(TEST_PURELIB);
+
+        // pip upgrades itself: same package dir, new versioned metadata.
+        std::fs::remove_dir_all(purelib.join("pip-26.1.2.dist-info")).unwrap();
+        std::fs::create_dir_all(purelib.join("pip-27.0.dist-info")).unwrap();
+        std::fs::write(purelib.join("pip-27.0.dist-info").join("RECORD"), "").unwrap();
+
+        wipe_installed_packages(&fake_python_bin(&root)).unwrap();
+
+        assert!(
+            purelib.join("pip-27.0.dist-info").join("RECORD").exists(),
+            "pip's metadata must survive a version bump; deleting it would \
+             recreate the missing-RECORD bug"
+        );
+        assert!(purelib.join("pip").exists());
+        // Ours still goes, version notwithstanding.
+        assert!(!purelib.join("esphome-2026.7.0.dist-info").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keep_key_ignores_dist_info_versions_only() {
+        // Versioned metadata collapses to the distribution name...
+        assert_eq!(keep_key("pip-26.1.2.dist-info"), "pip");
+        assert_eq!(keep_key("pip-27.0.dist-info"), "pip");
+        assert_eq!(keep_key("setuptools-80.9.0.dist-info"), "setuptools");
+        // ...including local/pre-release versions, which contain dashes.
+        assert_eq!(keep_key("foo-1.0-beta.dist-info"), "foo");
+        // Everything else is matched verbatim. `bin/pip3.13` carries Python's
+        // version, not the package's, and is fixed for a given bundle.
+        assert_eq!(keep_key("pip"), "pip");
+        assert_eq!(keep_key("pip3.13"), "pip3.13");
+        assert_eq!(
+            keep_key("distutils-precedence.pth"),
+            "distutils-precedence.pth"
+        );
+        // A dist-info with no version at all still yields its name.
+        assert_eq!(keep_key("weird.dist-info"), "weird");
+    }
+
+    #[test]
     fn wipe_without_a_manifest_deletes_nothing() {
         // A tree built before the manifest existed. Guessing which entries are
         // Python's own risks taking pip with them, so refuse outright.
@@ -3543,10 +3630,14 @@ mod tests {
             vec![PathBuf::from(TEST_PURELIB), PathBuf::from("bin")]
         );
         assert!(manifest.keep.contains(&PathBuf::from("bin/python3")));
+        assert!(manifest.keep.contains(&PathBuf::from("bin/pip3")));
         assert!(manifest
             .keep
             .contains(&PathBuf::from(format!("{TEST_PURELIB}/pip"))));
-        assert_eq!(manifest.keep.len(), 4);
+        // Four `keep` lines collapse to three entries: `pip` and
+        // `pip-26.1.2.dist-info` share the key `pip`, which is the point — it is
+        // what lets pip's metadata survive a version bump.
+        assert_eq!(manifest.keep.len(), 3);
     }
 
     #[test]
