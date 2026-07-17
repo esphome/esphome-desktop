@@ -82,10 +82,15 @@ jobs:
         uses: ./.github/actions/stub-bundle-dirs
 
       # The real thing: downloads python-build-standalone and installs esphome
-      # and esphome-device-builder into it. This is the release path, not a
-      # stand-in for it.
+      # and esphome-device-builder into it, through the same code path a
+      # release build runs. PREPARE_PYTHON_ONLY skips only the release tail
+      # the test never reads (the copy into src-tauri/python; the MinGit,
+      # patch.exe and ccache downloads on Windows) and leaves the stubbed
+      # resource dirs above alone (#336).
       - name: Build a real bundled Python tree
         shell: bash
+        env:
+          PREPARE_PYTHON_ONLY: 1
         run: ./build-scripts/prepare_bundle.sh ${{ matrix.target }}
 
       - name: Run the repair cycle
