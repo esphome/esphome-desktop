@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for .github/scripts/check_file_size.py.
 
-The cap is only as good as its line count, and the two obvious ways to write
-that count are both wrong on this tree. Every shape below was found in
-src-tauri/src, not invented:
+The cap is only as good as its line count, and every obvious way to write
+that count has been wrong. Two of these shapes were found in src-tauri/src
+rather than invented, and the other two shipped as bugs in review:
 
   * `i18n/mod.rs` gates a *function* on `#[cfg(test)]` at column 0, partway up
     the file. Keying on the attribute alone scores the file as 52 lines, and
@@ -11,17 +11,22 @@ src-tauri/src, not invented:
   * `platform/mod.rs` nests `#[cfg(test)] mod tests` inside its per-OS `mod
     macos` / `mod windows` blocks. Keying on any `mod tests` scores it as
     1722.
+  * A test module *mid-file*, with code after it. Truncating at the first one
+    scored a 5005-line file as 1.
+  * `mod tests {}`, the empty body rustfmt produces. Scanning below the
+    declaration for a closing brace finds the next item's, or none, and
+    scored a 2004-line file as 0.
 
-So `test_cfg_gated_function_is_not_the_test_module` and
-`test_nested_test_module_is_not_the_marker` are the regression net for the
-whole rule; the rest cover the exempt-list transitions that let the list
-shrink but never grow back.
+Fixtures here use the spelling `cargo fmt` would actually emit. The `{}` bug
+survived a first fix precisely because the regression test for it pinned
+`{\n}`, which rustfmt rewrites, so no realistic file ever took that path.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from script_loader import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -138,9 +143,19 @@ def test_every_test_module_is_skipped_not_just_the_first() -> None:
     assert check_file_size.code_line_count(source) == 2
 
 
-def test_a_mid_file_test_module_cannot_hide_an_over_cap_file(tmp_path: Path) -> None:
-    """The end-to-end form of the bug: the cap must still fire."""
-    source = "#[cfg(test)]\nmod early {\n}\n" + "".join(
+@pytest.mark.parametrize("empty_body", ["mod early {\n}", "mod early {}"])
+def test_a_mid_file_test_module_cannot_hide_an_over_cap_file(
+    tmp_path: Path, empty_body: str
+) -> None:
+    """The end-to-end form of the bug: the cap must still fire.
+
+    Both spellings, because rustfmt rewrites the first into the second: an
+    empty body is collapsed onto the declaration line, so `mod early {}` is
+    the only form that can exist in this tree (`cargo fmt --check` blocks).
+    Testing only the `{\\n}` form pins the one spelling rustfmt will not
+    produce, which is how the `{}` shape survived the first fix.
+    """
+    source = f"#[cfg(test)]\n{empty_body}\n" + "".join(
         f"// code {n}\n" for n in range(CAP + 1)
     )
     write(tmp_path, "a.rs", source)
@@ -149,24 +164,48 @@ def test_a_mid_file_test_module_cannot_hide_an_over_cap_file(tmp_path: Path) -> 
     assert str(CAP + 1) in failures[0]
 
 
+def test_test_module_with_an_empty_body_is_self_contained() -> None:
+    """`mod tests {}` closes itself; there is no brace below to scan for.
+
+    Scanning below it swallows everything to the next column-0 `}` or EOF.
+    """
+    source = "fn a() {}\n#[cfg(test)]\nmod tests {}\nfn b() {}\nfn c() {\n}\n"
+    assert check_file_size.code_line_count(source) == 4
+
+
 def test_test_module_declared_in_another_file_is_skipped() -> None:
     """`mod tests;` has no braces to match."""
     source = "fn a() {}\n#[cfg(test)]\nmod tests;\nfn b() {}\n"
     assert check_file_size.code_line_count(source) == 2
 
 
-def test_unterminated_test_module_does_not_run_away() -> None:
+def test_unterminated_test_module_counts_as_code() -> None:
+    """No closing brace means the scanner is lost; fail loud, not silent.
+
+    Swallowing to EOF would collapse the count and wave an over-cap file
+    through on nothing but odd formatting.
+    """
     source = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n"
-    assert check_file_size.code_line_count(source) == 1
+    assert check_file_size.code_line_count(source) == 4
+
+
+def test_unterminated_test_module_cannot_hide_an_over_cap_file(
+    tmp_path: Path,
+) -> None:
+    source = "#[cfg(test)]\nmod tests {\n" + "".join(
+        f"    // code {n}\n" for n in range(CAP + 1)
+    )
+    write(tmp_path, "a.rs", source)
+    assert len(check_file_size.check(tmp_path, ["a.rs"], set())) == 1
 
 
 def test_blank_lines_between_attribute_and_mod_are_skipped() -> None:
-    source = "fn a() {}\n#[cfg(test)]\n\n\nmod tests {\n}\n"
+    source = "fn a() {}\n#[cfg(test)]\n\n\nmod tests {\n    fn t() {}\n}\n"
     assert check_file_size.code_line_count(source) == 1
 
 
 def test_trailing_whitespace_on_the_attribute_still_matches() -> None:
-    source = "fn a() {}\n#[cfg(test)]  \nmod tests {\n}\n"
+    source = "fn a() {}\n#[cfg(test)]  \nmod tests {\n    fn t() {}\n}\n"
     assert check_file_size.code_line_count(source) == 1
 
 

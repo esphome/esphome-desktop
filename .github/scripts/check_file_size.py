@@ -70,6 +70,11 @@ def code_line_count(source: str) -> int:
         a 5000-line file scores 1 and passes. That is not hypothetical
         gaming — grouping a test module beside the code it covers, rather than
         at the bottom, is a normal thing to do.
+      * A declaration line can close its own block. rustfmt collapses an empty
+        body onto it, so `mod tests {}` is the only spelling `cargo fmt` will
+        emit (compare `control/server.rs`, which has `pub fn cleanup() {}` at
+        column 0). Scanning below it for a `}` finds the *next* item's brace,
+        or none, and swallows the file: it scores 0.
 
     Finding the end of a block by the next column-0 `}` leans on rustfmt
     putting the closing brace of a top-level item at column 0, which holds
@@ -77,10 +82,14 @@ def code_line_count(source: str) -> int:
     is a line-based heuristic, not a Rust parser, which is proportionate for a
     navigability guardrail.
 
-    Nested (indented) test modules are not matched and so count as code, which
-    overcounts platform/mod.rs by the ~560 lines of its two inner test
-    modules. That is the safe direction: it can only ever report a file as
-    larger than it is, never smaller.
+    Where the heuristic cannot be sure, it counts lines as code, so a
+    surprising input reports a file as too big rather than waving it through.
+    A nested (indented) test module counts as code, which overcounts
+    platform/mod.rs by the ~560 lines of its two inner test modules; so does a
+    block whose closing brace never arrives. There is no general "never
+    undercounts" guarantee to lean on here, and an earlier version of this
+    docstring claimed one: it was written from the nested case, and both the
+    mid-file and `{}` shapes above broke it. Add a test before adding a claim.
     """
     lines = source.splitlines()
     total = 0
@@ -92,15 +101,20 @@ def code_line_count(source: str) -> int:
             while declaration < len(lines) and not lines[declaration].strip():
                 declaration += 1
             if declaration < len(lines) and lines[declaration].startswith("mod "):
-                if lines[declaration].rstrip().endswith(";"):
-                    # `#[cfg(test)] mod tests;` — the body is another file.
+                # `mod tests;` (body in another file) or `mod tests {}` (empty,
+                # the form rustfmt emits): self-contained, no body to skip.
+                if lines[declaration].rstrip().endswith((";", "}")):
                     index = declaration + 1
                     continue
                 end = declaration + 1
                 while end < len(lines) and lines[end].rstrip() != "}":
                     end += 1
-                index = end + 1
-                continue
+                if end < len(lines):
+                    index = end + 1
+                    continue
+                # Ran off the end without finding the brace. Count the rest as
+                # code rather than silently swallowing it; an over-cap file
+                # must not pass because its formatting confused the scanner.
         total += 1
         index += 1
     return total
@@ -114,8 +128,11 @@ def tracked_rust_files(root: Path) -> list[str]:
     an untracked nested checkout of this repo. Neither is ours to measure and
     neither is tracked.
     """
+    # One pathspec, not two: git's fnmatch lets `*` cross `/`, so this already
+    # matches nested files. (`src-tauri/src/**/*.rs` would match only the 14
+    # nested ones, missing lib.rs, main.rs and dialog.rs.)
     out = subprocess.run(
-        ["git", "ls-files", "-z", "src-tauri/src/*.rs", "src-tauri/src/**/*.rs"],
+        ["git", "ls-files", "-z", "src-tauri/src/*.rs"],
         cwd=root,
         check=True,
         capture_output=True,

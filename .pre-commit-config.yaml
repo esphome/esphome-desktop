@@ -52,11 +52,20 @@ repos:
       # absent from the `ci: skip` list above and runs on pre-commit.ci too.
       # The script enumerates its own files with `git ls-files`, so it takes
       # no filenames.
+      #
+      # always_run rather than `types: [rust]`, to mirror lint-test.yml, which
+      # has no paths filter and so gates every PR. pre-commit builds its file
+      # list from staged adds and modifies and drops deletions, so a commit
+      # that only *deletes* a .rs file stages no Rust file and would skip the
+      # hook — and that is exactly the commit that strands an EXEMPT entry.
+      # Editing the script or its list would not trigger it either. It is a
+      # whole-tree check that reads no filenames, so there is nothing to gain
+      # by scoping it.
       - id: check-file-size
         name: file size cap (src-tauri/src)
         entry: python3 .github/scripts/check_file_size.py
         language: system
-        types: [rust]
+        always_run: true
         pass_filenames: false
 
       # Run inside src-tauri so rustup discovers src-tauri/rust-toolchain.toml
