@@ -1055,6 +1055,39 @@ fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
+/// Start of the block in which pip explains a resolution failure.
+const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
+
+/// Build the reported text for a failed pip install from its two streams.
+///
+/// pip splits a resolution failure across both. stderr carries the headline
+/// alone — `ERROR: Cannot install esphome and esphome==2026.7.0 because these
+/// package versions have conflicting dependencies` — because that line is the
+/// only part logged at CRITICAL. The block naming *which* requirements
+/// conflict, and whether one has no distribution for this environment at all,
+/// is logged at INFO and therefore goes to stdout. Reporting stderr alone left
+/// a bug report holding the symptom and none of the cause (#327).
+///
+/// Everything from the marker onwards is that diagnostic, so append that tail
+/// and nothing else: earlier stdout is `Collecting`/`Downloading` progress that
+/// would bury it. A failure pip words differently (a build error, no network)
+/// has no marker and is reported exactly as before.
+fn pip_failure_report(stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim_end();
+    match stdout.find(PIP_CONFLICT_MARKER) {
+        Some(start) => format!("{stderr}\n{}", stdout[start..].trim_end()),
+        None => stderr.to_string(),
+    }
+}
+
+/// [`pip_failure_report`] over a captured pip [`std::process::Output`].
+fn pip_output_report(output: &std::process::Output) -> String {
+    pip_failure_report(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
 /// Run a pip install with the shared broken-RECORD recovery policy (#155/#183).
 ///
 /// `run(false)` performs the normal install (a clean uninstall of the old
@@ -1081,7 +1114,7 @@ where
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !is_missing_record_error(&stderr) {
-        anyhow::bail!("{fail_prefix}: {stderr}");
+        anyhow::bail!("{fail_prefix}: {}", pip_output_report(&output));
     }
 
     info!("{retry_log}");
@@ -1090,7 +1123,7 @@ where
         info!("{success_msg} (--ignore-installed fallback)");
         Ok(())
     } else {
-        anyhow::bail!("{fail_prefix}: {}", String::from_utf8_lossy(&retry.stderr));
+        anyhow::bail!("{fail_prefix}: {}", pip_output_report(&retry));
     }
 }
 
@@ -1523,6 +1556,48 @@ mod tests {
         assert!(is_missing_record_error(
             "error: uninstall-no-record-file\n\n× Cannot uninstall zeroconf None\n╰─> The package's contents are unknown: no RECORD file was found for zeroconf."
         ));
+    }
+
+    /// pip stdout for the #327 failure: progress noise, then the diagnostic.
+    const CONFLICT_STDOUT: &str = "Collecting esphome==2026.7.0\n  Using cached esphome-2026.7.0-py3-none-any.whl\nINFO: pip is looking at multiple versions of esphome\n\nThe conflict is caused by:\n    The user requested esphome==2026.7.0\n    esphome 2026.7.0 depends on some-dep>=2\n\nAdditionally, some packages in these conflicts have no matching distributions available for your environment:\n    some-dep\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n";
+
+    /// pip stderr for the same failure: the headline, and nothing else.
+    const CONFLICT_STDERR: &str = "ERROR: Cannot install esphome and esphome==2026.7.0 because these package versions have conflicting dependencies.\nERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/\n";
+
+    #[test]
+    fn pip_failure_report_keeps_the_conflict_diagnostic() {
+        // #327: stderr alone says two requirements conflict but never which,
+        // so the report must carry stdout's block — including the line naming
+        // the dependency with no distribution for this environment, which is
+        // the whole reason the pinned install cannot resolve.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(report.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(report.contains("The conflict is caused by:"));
+        assert!(report.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(report.contains("no matching distributions available for your environment"));
+    }
+
+    #[test]
+    fn pip_failure_report_drops_progress_noise_before_the_marker() {
+        // Only the diagnostic tail is wanted; the Collecting/Downloading
+        // chatter ahead of it would bury the cause in the dialog and the log.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(!report.contains("Collecting esphome==2026.7.0"));
+        assert!(!report.contains("Using cached"));
+    }
+
+    #[test]
+    fn pip_failure_report_without_a_marker_is_stderr_alone() {
+        // A failure pip words differently (a build error, no network) has no
+        // marker, and must report exactly what it did before.
+        let report = pip_failure_report(
+            "Collecting esphome==2026.7.0\n",
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0\n",
+        );
+        assert_eq!(
+            report,
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0"
+        );
     }
 
     #[test]
