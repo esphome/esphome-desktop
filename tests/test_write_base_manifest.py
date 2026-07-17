@@ -74,13 +74,19 @@ def manifest(real_tree: tuple[Path, Path]) -> tuple[list[str], list[str]]:
 
 
 def parse(manifest: str) -> tuple[list[str], list[str]]:
-    """Split a manifest into its sweep and keep paths, ignoring comments."""
+    """Split a manifest into its sweep and keep paths, ignoring comments.
+
+    Splits on any whitespace, mirroring the Rust parser's
+    `split_once(char::is_whitespace)`. These tests exist to pin the format both
+    sides agree on, so a test-side parser that is stricter than production would
+    fail on manifests the real reader accepts.
+    """
     sweep, keep = [], []
     for line in manifest.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        verb, path = line.split(" ", 1)
+        verb, path = line.split(maxsplit=1)
         {"sweep": sweep, "keep": keep}[verb].append(path)
     return sweep, keep
 

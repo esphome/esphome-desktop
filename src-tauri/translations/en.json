@@ -61,7 +61,7 @@
     "builder_available_title": "Device Builder Update Available",
     "repair_failed_title": "ESPHome Needs Attention",
     "repair_failed": "Your ESPHome install is damaged and could not be repaired automatically.\n\n{error}\n\nBuilds will fail until this is fixed. {hint}",
-    "repair_incomplete": "Your ESPHome install is damaged and repairing it did not fix the problem.\n\nBuilds will fail until this is fixed. {hint}",
+    "repair_incomplete": "Your ESPHome install is damaged and could not be repaired automatically.\n\nBuilds will fail until this is fixed. {hint}",
     "repair_hint_reinstall": "Uninstalling and reinstalling ESPHome Device Builder will recover it.",
     "repair_hint_retry": "Reopening the app will try the repair again."
   },

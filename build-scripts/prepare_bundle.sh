@@ -501,28 +501,35 @@ write_base_manifest() {
 
     # Generate to a temp path and promote only once it checks out, so a failed
     # run cannot leave a half-written manifest in the tree for the reset to read.
-    # Same trap-based cleanup as download_verified, so the partial goes even when
-    # the generator's own asserts abort the script under `set -e` — which is the
-    # case this exists for.
-    trap 'rm -f "$partial"' INT TERM EXIT
-    "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" > "$partial"
+    #
+    # Handle the generator's failure directly rather than with a `trap`: traps are
+    # global in bash, not function-scoped, so setting one here and clearing it
+    # with `trap - EXIT` on the way out would silently drop any EXIT handler the
+    # script gains later. `if !` also disables `set -e` for this one command,
+    # which is exactly what lets us clean up before exiting on the path this
+    # cleanup exists for — the generator's own asserts aborting mid-write.
+    if ! "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" > "$partial"; then
+        rm -f "$partial"
+        echo "ERROR: could not record the base packages" >&2
+        exit 1
+    fi
 
-    # The generator asserts its own output names pip and sweeps nothing empty, and
-    # it is invoked as a plain command so `set -e` acts on that. This re-checks
-    # the file as *written*, which is the artifact that actually ships: it is the
-    # count we print anyway, and `grep -c` exits 1 on zero matches, which a
-    # substitution inside `echo` would throw away where `set -e` cannot see it —
-    # a keep-less manifest would then print "Recorded 0 base entries" and ship,
-    # and surface as a refused repair on a user's machine months later.
+    # The generator already asserts its output names pip and sweeps nothing empty,
+    # and the check above acts on that. This re-checks the file as *written*,
+    # which is the artifact that actually ships: it is the count we print anyway,
+    # and `grep -c` exits 1 on zero matches, which a substitution inside `echo`
+    # would throw away — a keep-less manifest would then print "Recorded 0 base
+    # entries" and ship, and surface as a refused repair on a user's machine
+    # months later.
     local keeps
     keeps=$(grep -c '^keep ' "$partial") || keeps=0
     if [[ "$keeps" -eq 0 ]]; then
+        rm -f "$partial"
         echo "ERROR: base manifest names nothing to keep" >&2
         exit 1
     fi
 
     mv -f "$partial" "$manifest"
-    trap - INT TERM EXIT
     echo "Recorded ${keeps} base entries"
 }
 
