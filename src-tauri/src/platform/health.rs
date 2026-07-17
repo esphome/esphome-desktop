@@ -7,7 +7,6 @@
 //! failed probe may trigger the reset, so a breakage the reset cannot fix
 //! never becomes a wipe-reinstall loop.
 
-use super::base_manifest::python_tree_root;
 use super::process::{run_python_capture_bounded, tail_for_log};
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
@@ -138,6 +137,39 @@ pub fn clear_repair_count(data_dir: &Path) {
             "Could not clear the repair counter at {marker:?} ({e}); a future repair may be \
              refused as budget-spent"
         ),
+    }
+}
+
+/// Resolve the root of a managed Python tree from its interpreter path.
+///
+/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
+/// root from the interpreter rather than rebuilding it from the data dir keeps
+/// this correct for whichever tree [`super::get_python_path`] actually selected.
+pub(super) fn python_tree_root(python_bin: &Path) -> Option<&Path> {
+    let bin_dir = python_bin.parent()?;
+    let root = if cfg!(target_os = "windows") {
+        bin_dir
+    } else {
+        bin_dir.parent()?
+    };
+    // `get_python_path` falls back to a bare `python3`/`python` for development
+    // builds with no bundle. That resolves to an empty root, i.e. the current
+    // directory, which is not a managed tree and must not be swept or marked.
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(root)
+}
+
+/// The interpreter path inside a Python tree laid out the way the real bundle
+/// is on this platform: [`python_tree_root`]'s inverse. One spelling of the
+/// shipped layout, shared between the path resolvers and the tests so a second
+/// copy cannot drift from it.
+pub(super) fn interpreter_in_tree(root: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        root.join("python.exe")
+    } else {
+        root.join("bin").join("python3")
     }
 }
 

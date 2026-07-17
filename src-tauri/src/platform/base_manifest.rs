@@ -6,6 +6,7 @@
 //! reset may touch at all, and the wipe itself. #335 replaces the whole
 //! subsystem with a pristine-copy refresh once Windows runs from app data.
 
+use super::health::python_tree_root;
 use super::{get_bundled_resource_dir, get_data_dir, get_python_path};
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
@@ -25,29 +26,6 @@ struct BaseManifest {
     sweep: Vec<PathBuf>,
     /// Entries to spare, relative to the tree root.
     keep: std::collections::HashSet<PathBuf>,
-}
-
-/// Resolve the root of a managed Python tree from its interpreter path.
-///
-/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
-/// root from the interpreter rather than rebuilding it from the data dir keeps
-/// this correct for whichever tree [`get_python_path`] actually selected, which
-/// is not the same directory on every platform (on Windows it is the install
-/// dir, not app data).
-pub(super) fn python_tree_root(python_bin: &Path) -> Option<&Path> {
-    let bin_dir = python_bin.parent()?;
-    let root = if cfg!(target_os = "windows") {
-        bin_dir
-    } else {
-        bin_dir.parent()?
-    };
-    // `get_python_path` falls back to a bare `python3`/`python` for development
-    // builds with no bundle. That resolves to an empty root, i.e. the current
-    // directory, which is not a managed tree and must not be swept or marked.
-    if root.as_os_str().is_empty() {
-        return None;
-    }
-    Some(root)
 }
 
 /// Reject a manifest path that is absolute or climbs out of the tree.
@@ -357,7 +335,7 @@ pub fn wipe_installed_packages(python_bin: &Path) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::interpreter_in_tree;
+    use super::super::health::interpreter_in_tree;
     use super::*;
     use crate::util::unique_temp_dir;
 

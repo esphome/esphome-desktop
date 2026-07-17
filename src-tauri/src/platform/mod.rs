@@ -128,14 +128,7 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// On non-Windows platforms, the bundled Python is copied to user data for updates
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     let data_dir = get_data_dir(app_handle)?;
-    let user_python = data_dir.join("python");
-
-    // Platform-specific Python path
-    #[cfg(target_os = "windows")]
-    let python_path = user_python.join("python.exe");
-
-    #[cfg(not(target_os = "windows"))]
-    let python_path = user_python.join("bin").join("python3");
+    let python_path = health::interpreter_in_tree(&data_dir.join("python"));
 
     if python_path.exists() {
         debug!("Using user Python: {:?}", python_path);
@@ -144,12 +137,7 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
 
     // Fall back to bundled Python (will be copied on first run)
     let resource_dir = get_bundled_resource_dir(app_handle)?;
-
-    #[cfg(target_os = "windows")]
-    let bundled_python = resource_dir.join("python").join("python.exe");
-
-    #[cfg(not(target_os = "windows"))]
-    let bundled_python = resource_dir.join("python").join("bin").join("python3");
+    let bundled_python = health::interpreter_in_tree(&resource_dir.join("python"));
 
     if bundled_python.exists() {
         debug!("Using bundled Python: {:?}", bundled_python);
@@ -627,7 +615,8 @@ pub fn is_tray_supported() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::base_manifest::{python_tree_root, BASE_MANIFEST};
+    use super::base_manifest::BASE_MANIFEST;
+    use super::health::{interpreter_in_tree, python_tree_root};
     use super::*;
     use crate::util::unique_temp_dir;
 
@@ -748,18 +737,6 @@ mod tests {
         let entries: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(entries[0].as_os_str().as_bytes(), b"/weird\xffdir");
         assert_eq!(entries[1], PathBuf::from("/opt/homebrew/bin"));
-    }
-
-    /// The interpreter path for a Python tree laid out the way the real bundle
-    /// is on this platform, so [`python_tree_root`] resolves back to `root`.
-    /// Used by the real-bundle e2e here and by the fabricated trees in
-    /// `base_manifest`'s tests.
-    pub(super) fn interpreter_in_tree(root: &Path) -> PathBuf {
-        if cfg!(target_os = "windows") {
-            root.join("python.exe")
-        } else {
-            root.join("bin").join("python3")
-        }
     }
 
     /// Env var naming the real bundled Python tree the e2e test runs against.
