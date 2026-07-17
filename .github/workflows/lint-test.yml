@@ -21,8 +21,36 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # On pull requests, skip the Rust lint/test jobs when the PR only touches
+  # documentation or repo meta files (see .github/scripts/determine_jobs.py).
+  # These jobs are not required checks, so a skip simply reports nothing and
+  # never blocks a merge; non-PR events skip this job and run unconditionally.
+  determine-jobs:
+    name: Determine jobs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      lint_test: ${{ steps.determine.outputs.lint_test }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Determine jobs
+        id: determine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output=$(python3 .github/scripts/determine_jobs.py)
+          echo "$output" | jq
+          echo "lint_test=$(echo "$output" | jq -r '.lint_test')" >> "$GITHUB_OUTPUT"
+
   lint-test:
     name: Rust lint & test
+    needs: determine-jobs
+    # Run on a manual dispatch regardless; on a PR, only when code changed.
+    if: github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -107,6 +135,9 @@ jobs:
   # something this file can do.
   lint-test-cross:
     name: Rust lint & test (${{ matrix.os }})
+    needs: determine-jobs
+    # Run on a manual dispatch regardless; on a PR, only when code changed.
+    if: github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read

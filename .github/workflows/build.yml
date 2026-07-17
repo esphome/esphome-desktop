@@ -20,6 +20,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # On pull requests, decide whether the build matrix needs to run at all. A PR
+  # that only touches documentation or repo meta files skips it (the logic and
+  # its fail-safe bias live in .github/scripts/determine_jobs.py). The CI Status
+  # job below turns a skipped build into a passing required check, so a docs-only
+  # PR merges without paying for the ~60 minute matrix. Non-PR events (the
+  # release workflow_run, a manual dispatch) skip this job and build regardless.
+  determine-jobs:
+    name: Determine jobs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.determine.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Determine jobs
+        id: determine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output=$(python3 .github/scripts/determine_jobs.py)
+          echo "$output" | jq
+          echo "build=$(echo "$output" | jq -r '.build')" >> "$GITHUB_OUTPUT"
+
   # Release builds embed every translated locale (src-tauri/build.rs picks up
   # whatever JSON files sit in src-tauri/translations/ at compile time). The
   # download runs in its own small job so the Lokalise API token is only ever
@@ -80,10 +107,11 @@ jobs:
     # must block the release rather than silently shipping English-only
     # binaries. PR/dispatch builds run regardless (translations is skipped
     # there, hence the `always()`).
-    needs: translations
+    needs: [translations, determine-jobs]
     if: >-
       always() && (
-        (github.event_name != 'workflow_run' && needs.translations.result == 'skipped') ||
+        (github.event_name == 'pull_request' && needs.translations.result == 'skipped' && needs.determine-jobs.outputs.build == 'true') ||
+        (github.event_name == 'workflow_dispatch' && needs.translations.result == 'skipped') ||
         (github.event.workflow_run.conclusion == 'success' && needs.translations.result == 'success')
       )
     permissions:
@@ -571,6 +599,30 @@ jobs:
         with:
           path: pr-info.json
           archive: false
+
+  # The single required status check for pull requests. Branch protection
+  # requires this instead of the individual "Build *" matrix legs: a docs-only PR
+  # skips the build job entirely (see determine-jobs), and a skipped matrix leg
+  # never reports its own named check, so requiring those names directly would
+  # leave a docs-only PR waiting forever. This aggregates the PR jobs and passes
+  # only when each one succeeded or was skipped, so a skipped build still merges
+  # while a real build failure (or a cancelled run) blocks the merge.
+  ci-status:
+    name: CI Status
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - determine-jobs
+      - build
+      - pr-info
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | jq
+          echo "$NEEDS_JSON" | jq -e 'all(.result == "success" or .result == "skipped")'
 
   release:
     needs: build
