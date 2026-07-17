@@ -108,8 +108,17 @@ $handles = @($backendPids | ForEach-Object { Get-Process -Id $_ -ErrorAction Sil
 # Force-kill the desktop with no chance to run any shutdown code. This is the
 # NSIS uninstaller, a crash, and End Task. Nothing but the job object can save
 # the backend from being orphaned here.
+if ($app.HasExited) {
+    # Interesting in its own right: the desktop fell over on its own between the
+    # backend coming up and us killing it, so there is a different bug to see.
+    Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the force-kill"
+    throw 'the desktop process exited before it could be force-killed; nothing was tested'
+}
+
 Write-Host "Force-killing the desktop (PID $($app.Id))"
-Stop-Process -Id $app.Id -Force
+# Tolerate a race with the check above rather than throwing past the
+# diagnostics; the WaitForExit below is what actually decides.
+Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
 $app.WaitForExit(30000) | Out-Null
 
 $gone = $false
