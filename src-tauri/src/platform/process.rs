@@ -43,6 +43,25 @@ pub(super) fn tail_for_log(s: &str) -> String {
     )
 }
 
+/// [`tail_for_log`]'s counterpart for text whose interesting part comes
+/// first: `s` trimmed and truncated to the first [`LOG_TAIL_BYTES`] bytes,
+/// with a marker line if anything was dropped.
+fn head_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= LOG_TAIL_BYTES {
+        return trimmed.to_string();
+    }
+    let mut end = LOG_TAIL_BYTES;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n...(truncated to first {} bytes)",
+        &trimmed[..end],
+        LOG_TAIL_BYTES
+    )
+}
+
 /// Start of the block in which pip explains a resolution failure.
 const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 
@@ -56,19 +75,27 @@ const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 /// is logged at INFO and therefore goes to stdout. Reporting stderr alone left
 /// a bug report holding the symptom and none of the cause (#327, #339).
 ///
-/// Everything from the marker onwards is that diagnostic, so append that tail
-/// and nothing else: earlier stdout is `Collecting`/`Downloading` progress that
+/// Everything from the marker onwards is that diagnostic, so append that and
+/// nothing else: earlier stdout is `Collecting`/`Downloading` progress that
 /// would bury it. A failure pip words differently (a build error, no network)
-/// has no marker and is reported exactly as before.
+/// has no marker and reports stderr alone.
+///
+/// Each half is bounded on its own, because their interesting ends differ:
+/// stderr's actionable line is last (tail), while the diagnostic opens with
+/// the conflicting requirements and trails off into generic advice (head).
+/// Bounding the joined report instead would let a long diagnostic evict the
+/// headline and its own opening — the symptom and the cause — keeping only
+/// the boilerplate.
 fn pip_failure_report(stdout: &str, stderr: &str) -> String {
-    let stderr = stderr.trim_end();
+    let stderr = tail_for_log(stderr);
     match stdout.find(PIP_CONFLICT_MARKER) {
-        Some(start) => format!("{stderr}\n{}", stdout[start..].trim_end()),
-        None => stderr.to_string(),
+        Some(start) => format!("{stderr}\n{}", head_for_log(&stdout[start..])),
+        None => stderr,
     }
 }
 
 /// [`pip_failure_report`] over a captured pip [`std::process::Output`].
+/// Already bounded, so callers put it in an error or a log line as is.
 /// `pub` because the update flows report their pip failures through the same
 /// extraction (see `install_with_record_recovery`).
 pub fn pip_output_report(output: &std::process::Output) -> String {
@@ -257,7 +284,7 @@ pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &s
             anyhow::bail!(
                 "pip install {} failed: {}",
                 spec,
-                tail_for_log(&pip_output_report(&output))
+                pip_output_report(&output)
             )
         }
         BoundedRun::TimedOut { stderr } => anyhow::bail!(
@@ -1365,6 +1392,39 @@ mod tests {
         let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
         assert!(!report.contains("Collecting esphome==2026.7.0"));
         assert!(!report.contains("Using cached"));
+    }
+
+    #[test]
+    fn pip_failure_report_bounds_a_huge_diagnostic_without_losing_its_start() {
+        // A real resolution failure can push the conflict block far past the
+        // log cap. Tailing the joined report would evict the stderr headline
+        // and the block's opening — the packages that actually conflict —
+        // keeping only pip's trailing boilerplate advice. Each half is
+        // bounded on its own instead, so both survive.
+        let huge_stdout = format!(
+            "Collecting esphome==2026.7.0\nThe conflict is caused by:\n    \
+             esphome 2026.7.0 depends on some-dep>=2\n{}",
+            "x".repeat(LOG_TAIL_BYTES * 3)
+        );
+        let report = pip_failure_report(&huge_stdout, CONFLICT_STDERR);
+        assert!(report.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(report.contains("The conflict is caused by:"));
+        assert!(report.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(report.contains("...(truncated to first"));
+        assert!(
+            report.len() <= 2 * LOG_TAIL_BYTES + 100,
+            "report is bounded"
+        );
+    }
+
+    #[test]
+    fn head_for_log_does_not_split_a_multibyte_char() {
+        // Mirror of the tail_for_log boundary test: the cut must back up to a
+        // char boundary or the slice panics.
+        let s = "é".repeat(LOG_TAIL_BYTES);
+        let out = head_for_log(&s);
+        assert!(out.starts_with('é'));
+        assert!(out.ends_with("bytes)"));
     }
 
     #[test]
