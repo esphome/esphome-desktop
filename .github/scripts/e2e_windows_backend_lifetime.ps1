@@ -22,6 +22,11 @@ $ErrorActionPreference = 'Stop'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'ESPHome Device Builder'
 $AppDataDir = Join-Path $env:APPDATA 'io.esphome.builder'
 
+# Callers must wrap this in `@(...)`. The `@()` below does not survive the
+# return: PowerShell unwraps a returned array, so no matches comes back as
+# `$null` and one match as a bare object, and `.Count` on either is a hard error
+# under `Set-StrictMode -Version Latest`. That is not hypothetical — it is what
+# broke the first two runs of this script, before it had checked anything.
 function Get-BackendProcesses {
     # Scope by executable path, not image name: the runner has its own Pythons
     # and this must only ever see the bundled one.
@@ -89,7 +94,7 @@ try {
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     $backend = @()
     while ($deadline.Elapsed.TotalSeconds -lt 180) {
-        $backend = Get-BackendProcesses
+        $backend = @(Get-BackendProcesses)
         if ($backend.Count -gt 0) { break }
         if ($app.HasExited) {
             Show-Diagnostics "the desktop exited on its own (code $($app.ExitCode)) before the backend appeared"
@@ -125,7 +130,7 @@ try {
     $gone = $false
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while ($watch.Elapsed.TotalSeconds -lt 30) {
-        if ((Get-BackendProcesses).Count -eq 0) { $gone = $true; break }
+        if (@(Get-BackendProcesses).Count -eq 0) { $gone = $true; break }
         Start-Sleep -Milliseconds 250
     }
 
@@ -142,7 +147,7 @@ finally {
         Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
     }
     # On the failing path the whole point is that these are still alive.
-    foreach ($p in Get-BackendProcesses) {
+    foreach ($p in @(Get-BackendProcesses)) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
