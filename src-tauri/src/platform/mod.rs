@@ -1037,7 +1037,14 @@ fn run_bounded(
                 tracing::warn!("The reader for a child's {what} panicked; returning what arrived.")
             }
         }
-        let mut buf = drain.buf.lock().unwrap();
+        // Recover a poisoned lock rather than unwrapping it. A reader that
+        // panics does so inside `extend_from_slice`, i.e. holding this guard, so
+        // the `Disconnected` arm above and an `unwrap()` here would contradict
+        // each other: the arm promises to return what arrived, and the unwrap
+        // would panic out of `run_bounded` before it could. The bytes are a
+        // `Vec<u8>` with no invariant to break, so there is nothing for the
+        // poison to protect.
+        let mut buf = drain.buf.lock().unwrap_or_else(|p| p.into_inner());
         std::mem::take(&mut *buf)
     }
 
@@ -1331,9 +1338,10 @@ pub fn python_path_for_reset(app_handle: &AppHandle) -> Result<PathBuf> {
 
     // The tree we copy to and own, on every platform.
     let user_root = get_data_dir(app_handle)?.join("python");
-    let resource_root = get_bundled_resource_dir(app_handle)?.join("python");
 
-    if is_resettable_tree(root, &user_root, &resource_root) {
+    if is_resettable_tree(root, &user_root, || {
+        Ok(get_bundled_resource_dir(app_handle)?.join("python"))
+    })? {
         return Ok(python);
     }
 
@@ -1349,18 +1357,31 @@ pub fn python_path_for_reset(app_handle: &AppHandle) -> Result<PathBuf> {
 /// Split out from [`python_path_for_reset`] so the rule itself is testable
 /// without a live app: it is the guard standing between a recursive delete and
 /// the inside of the installed `.app`.
-fn is_resettable_tree(root: &Path, user_root: &Path, resource_root: &Path) -> bool {
+///
+/// `resource_root` is resolved lazily because most answers do not need it, and
+/// resolving it can fail — a dev build with no bundled resources, say. Asking
+/// eagerly would let that failure refuse a reset of the copy we own, on the
+/// strength of a directory the decision never depended on.
+fn is_resettable_tree(
+    root: &Path,
+    user_root: &Path,
+    resource_root: impl FnOnce() -> Result<PathBuf>,
+) -> Result<bool> {
     // The copy in the app data dir is ours everywhere.
     if root == user_root {
-        return true;
+        return Ok(true);
+    }
+    // Everywhere else the resource tree is read-only by design — a signed `.app`
+    // bundle, or a squashfs AppImage mount — so writing to it is damage, not
+    // repair, and there is no need to find out where it is.
+    if !cfg!(target_os = "windows") {
+        return Ok(false);
     }
     // On Windows there is no copy: `ensure_user_python` returns early and the
     // backend runs straight out of the install dir, an ordinary per-user
     // writable directory the installer wrote. So the resource tree is the live
-    // tree there, and repairing it is the whole point. Everywhere else the
-    // resource tree is read-only-by-design — a signed `.app` bundle, or a
-    // squashfs AppImage mount — and writing to it is damage, not repair.
-    cfg!(target_os = "windows") && root == resource_root
+    // tree there, and repairing it is the whole point.
+    Ok(root == resource_root()?)
 }
 
 /// Delete every package we installed, sparing everything that ships with the
@@ -4079,9 +4100,10 @@ mod tests {
     fn only_trees_we_own_may_be_reset() {
         let user_root = Path::new("/data/io.esphome.builder/python");
         let resource_root = Path::new("/Applications/ESPHome.app/Contents/Resources/python");
+        let resources = || Ok(resource_root.to_path_buf());
 
         // The copy in the app data dir is ours to repair, everywhere.
-        assert!(is_resettable_tree(user_root, user_root, resource_root));
+        assert!(is_resettable_tree(user_root, user_root, resources).unwrap());
 
         // The shipped resource tree is a legitimate target only on Windows,
         // where it IS the live tree. Everywhere else `get_python_path` only
@@ -4089,22 +4111,43 @@ mod tests {
         // log-and-continue at startup), and deleting inside a signed `.app` or a
         // read-only AppImage mount turns a transient failure into a reinstall.
         assert_eq!(
-            is_resettable_tree(resource_root, user_root, resource_root),
+            is_resettable_tree(resource_root, user_root, resources).unwrap(),
             cfg!(target_os = "windows"),
             "the bundled resource tree is resettable on Windows and nowhere else"
         );
 
         // Anything else — a system Python, a user's own tree — is never ours.
-        assert!(!is_resettable_tree(
-            Path::new("/usr/local/lib/python3.13"),
-            user_root,
-            resource_root
-        ));
-        assert!(!is_resettable_tree(
-            Path::new("/data/io.esphome.builder"),
-            user_root,
-            resource_root
-        ));
+        assert!(
+            !is_resettable_tree(Path::new("/usr/local/lib/python3.13"), user_root, resources)
+                .unwrap()
+        );
+        assert!(
+            !is_resettable_tree(Path::new("/data/io.esphome.builder"), user_root, resources)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_resource_tree_is_not_resolved_when_the_answer_does_not_need_it() {
+        // Resolving it can fail — a dev build with no bundled resources — and
+        // asking eagerly would let that refuse a reset of the copy we own, on
+        // the strength of a directory the decision never depended on.
+        let user_root = Path::new("/data/io.esphome.builder/python");
+        let asked = std::cell::Cell::new(false);
+        let resources = || {
+            asked.set(true);
+            Ok(PathBuf::from("/never/needed"))
+        };
+
+        assert!(is_resettable_tree(user_root, user_root, resources).unwrap());
+        assert!(
+            !asked.get(),
+            "resolved the resource tree to answer 'that is ours'"
+        );
+
+        // And a resolution failure cannot refuse a tree we own.
+        let boom = || anyhow::bail!("no bundled resources in this build");
+        assert!(is_resettable_tree(user_root, user_root, boom).unwrap());
     }
 
     #[test]
