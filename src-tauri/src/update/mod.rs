@@ -1285,18 +1285,14 @@ fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
     }
 }
 
-/// Run the ESPHome health probe off the async executor.
-///
-/// The probe spawns an interpreter and waits on it, so it cannot run on a tokio
-/// worker. Flattening the `JoinError` into the probe's own error here means
-/// callers get one three-armed answer — healthy, broken, or unknown — instead of
-/// each re-deciding what a panicked task means. The distinction survives in the
-/// error chain, which is where it belongs: nothing acts on it differently.
 /// Ask whether the interpreter itself runs, off the async executor.
 ///
-/// `Err` is a failed check, not a failed interpreter — the caller must not
-/// collapse the two, or a panicking check would read as an affirmative "the
-/// interpreter is fine" that nothing established.
+/// `Err` is a failed check, not a failed interpreter, and the two must not be
+/// collapsed: a panicking check would otherwise read as an affirmative "the
+/// interpreter is fine" that nothing established, and the caller would skip a
+/// repair on the strength of it. Hence `Result<bool, JoinError>` rather than the
+/// flattening [`probe_esphome`] does — there, nothing acts on the distinction;
+/// here, the caller has a third arm for exactly it.
 async fn interpreter_usable(
     python_path: &std::path::Path,
 ) -> std::result::Result<bool, tokio::task::JoinError> {
@@ -1304,6 +1300,19 @@ async fn interpreter_usable(
     tokio::task::spawn_blocking(move || platform::interpreter_is_usable(&python)).await
 }
 
+/// Run the ESPHome health probe off the async executor.
+///
+/// The probe spawns an interpreter and waits on it, so it cannot run on a tokio
+/// worker. Flattening the `JoinError` into the probe's own error here means
+/// callers get one three-armed answer — healthy, broken, or unknown — instead of
+/// each re-deciding what a panicked task means. The distinction survives in the
+/// error chain, which is where it belongs: nothing acts on it differently.
+///
+/// Deliberately the opposite call to [`interpreter_usable`]'s, for a reason that
+/// is easy to lose: a probe that could not run and a probe that ran and found
+/// damage both mean "we have no clean answer", and the caller treats them alike.
+/// Whether the *interpreter* runs is the question the caller then branches on, so
+/// that one must not lose its failure mode.
 async fn probe_esphome(python_path: &std::path::Path) -> Result<Option<String>> {
     let python = python_path.to_path_buf();
     tokio::task::spawn_blocking(move || platform::esphome_config_probe(&python))
