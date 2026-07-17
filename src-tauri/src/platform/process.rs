@@ -2,7 +2,6 @@
 //! execution with capture, pip/python environment isolation, window
 //! suppression, and the Windows job-object and console-signal plumbing.
 
-#[cfg(not(target_os = "windows"))]
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -17,7 +16,6 @@ use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WI
 /// version-restore path. Five minutes is well over the time needed to upgrade
 /// `esphome` on a working connection; bounding it prevents a stalled network
 /// from hanging app startup indefinitely.
-#[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Maximum length of pip stderr included in a failure error message. pip's
@@ -205,7 +203,6 @@ fn run_bounded(
 /// needing `--pre`. On timeout the child is killed and an error is returned;
 /// the caller logs a warning and falls back to the bundled version, so a
 /// stalled pip can't block app launch.
-#[cfg(not(target_os = "windows"))]
 pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
     let spec = format!("{}=={}", package, version);
     let mut cmd = python_command(python_bin, ["-m", "pip", "install", &spec]);
