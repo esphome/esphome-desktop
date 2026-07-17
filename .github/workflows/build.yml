@@ -314,6 +314,20 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # The only check that exercises the installed bundle rather than the
+      # crate: it installs what we just built, starts it, and force-kills the
+      # desktop to prove the real `python.exe` cannot outlive it. The unit tests
+      # cover the job object's mechanics; nothing but this covers the actual
+      # app, and nobody can reproduce it without a Windows machine.
+      #
+      # Runs against the CI bundle only. The release build is signed and
+      # `workflow_run`-triggered, and installing it on the release path would
+      # put a GUI app between a tag and its artifacts for no extra signal.
+      - name: E2E — the backend cannot outlive the desktop (Windows)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_backend_lifetime.ps1
+
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
