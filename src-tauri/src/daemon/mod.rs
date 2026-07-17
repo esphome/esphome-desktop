@@ -267,6 +267,33 @@ impl DaemonManager {
         cmd.env("PYTHONIOENCODING", "utf-8");
 
         let child = cmd.spawn().context("Failed to spawn ESPHome process")?;
+
+        // Tie the backend's lifetime to ours so it can never be orphaned by an
+        // exit path that doesn't run our code (uninstaller force-kill, crash,
+        // Task Manager). See `platform::assign_to_kill_on_close_job` for why
+        // this is needed on Windows specifically and why the job holds only the
+        // child. Best-effort: if the job is unavailable we still have the
+        // graceful CTRL_BREAK path, so log and carry on rather than failing the
+        // start.
+        //
+        // There is a small window between CreateProcess and the assignment in
+        // which a grandchild could escape the job. Closing it properly needs
+        // CREATE_SUSPENDED plus a manual ResumeThread, which tokio doesn't
+        // expose; Python has not spawned anything that early, so accept it.
+        // `raw_handle()` is None only if the child was already reaped, which
+        // needs no assignment either — hence `is_some_and`. The helper logs the
+        // Win32 cause; this logs the consequence.
+        #[cfg(windows)]
+        if !child
+            .raw_handle()
+            .is_some_and(platform::assign_to_kill_on_close_job)
+        {
+            warn!(
+                "{BACKEND_NAME} is not covered by the kill-on-close job; it may outlive \
+                 the desktop if this process is killed without running its shutdown path"
+            );
+        }
+
         if let Some(pid) = child.id() {
             self.dashboard_pid.store(pid as PidInt, Ordering::SeqCst);
         }

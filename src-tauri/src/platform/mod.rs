@@ -1209,6 +1209,131 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Tie a spawned child's lifetime to ours on Windows via a kill-on-close job
+/// object. Returns `true` if the child was assigned to the job.
+///
+/// Every graceful shutdown path we have — `send_ctrl_break`, then
+/// `TerminateProcess` as the fallback — only runs when the desktop gets to run
+/// code. None of it runs when the NSIS uninstaller force-kills us, when we
+/// crash, or when the user ends the task from Task Manager. `kill_on_drop` is
+/// no help either: the normal quit path calls `std::process::exit()`, which
+/// skips `Drop`. The backend is then orphaned, and because Windows runs the
+/// interpreter straight out of the install directory (`ensure_user_python`
+/// returns early rather than copying it to app data), that orphan keeps
+/// `python.exe` — and every file its compile subtree touches, `git.exe`
+/// included — open. A later uninstall or in-place upgrade cannot replace or
+/// remove them, which strands the install tree and breaks the next launch.
+///
+/// A job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` closes that gap
+/// without needing any cooperation from the dying process: when the last
+/// handle to the job goes away, Windows terminates everything in it. The
+/// kernel closes our handles however we exit, so this holds for a crash or a
+/// force-kill just as much as for a clean quit. Descendants inherit job
+/// membership, so the backend's compiler and git children are covered too.
+///
+/// The job deliberately holds only the daemon child, never the desktop process
+/// itself. The updater spawns the NSIS installer as our child and then exits;
+/// a job that included us would kill that installer mid-update.
+///
+/// Nested jobs have been supported since Windows 8, so already being inside
+/// someone else's job (a launcher, a test runner) does not defeat this outright
+/// the way it would have before, when a second assignment always failed. That
+/// is not a guarantee of success: assignment can still fail, for instance if
+/// the job hierarchy can't be formed. Hence best-effort, and hence the caller
+/// gets told whether it worked rather than being allowed to assume it.
+///
+/// This is a floor, not a replacement for the graceful path: `stop()` still
+/// sends `CTRL_BREAK_EVENT` first and gives the backend its full shutdown
+/// window. The job only decides what happens to a child that outlives us.
+#[cfg(target_os = "windows")]
+pub fn assign_to_kill_on_close_job(process: std::os::windows::io::RawHandle) -> bool {
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+    let Some(job) = kill_on_close_job() else {
+        return false;
+    };
+
+    // SAFETY: `job` is a live job handle owned by the process-wide OnceLock
+    // (never closed, see `kill_on_close_job`). `process` is the caller's live
+    // child handle, which tokio's `Child` keeps open for us. Assignment does
+    // not take ownership of either handle.
+    match unsafe { AssignProcessToJobObject(job, HANDLE(process)) } {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Failed to assign backend to kill-on-close job object: {e}");
+            false
+        }
+    }
+}
+
+/// Owns the process-wide job handle. `HANDLE` is a raw pointer and so neither
+/// `Send` nor `Sync`; a job handle is just a kernel object reference with no
+/// thread affinity, so sharing it across threads is sound.
+#[cfg(target_os = "windows")]
+struct JobHandle(::windows::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for JobHandle {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for JobHandle {}
+
+/// The process-wide kill-on-close job, created on first use.
+///
+/// The handle is intentionally never closed. Its lifetime *is* the mechanism:
+/// the job kills its members when the last handle to it closes, and we want
+/// that to happen exactly when our process dies. Leaking it into a `OnceLock`
+/// leaves the close to the kernel at process teardown, which is the one moment
+/// that fires on every exit path including the ones that never run our code.
+///
+/// `None` if the job could not be set up; the caller then just loses the
+/// backstop and keeps the graceful path.
+#[cfg(target_os = "windows")]
+fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
+    use ::windows::core::PCWSTR;
+    use ::windows::Win32::Foundation::CloseHandle;
+    use ::windows::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    static JOB: std::sync::OnceLock<Option<JobHandle>> = std::sync::OnceLock::new();
+
+    JOB.get_or_init(|| {
+        // SAFETY: Win32 job-object FFI. The unnamed job is created with default
+        // security and is owned solely by this closure; on the error path we
+        // close it before returning, so no handle leaks and none escapes except
+        // the one we deliberately keep for the process lifetime.
+        unsafe {
+            let job = match CreateJobObjectW(None, PCWSTR::null()) {
+                Ok(job) => job,
+                Err(e) => {
+                    tracing::warn!("Failed to create job object for the backend: {e}");
+                    return None;
+                }
+            };
+
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+            if let Err(e) = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) {
+                tracing::warn!("Failed to set kill-on-close limit on the backend job object: {e}");
+                let _ = CloseHandle(job);
+                return None;
+            }
+
+            Some(JobHandle(job))
+        }
+    })
+    .as_ref()
+    .map(|job| job.0)
+}
+
 /// Deliver a graceful `CTRL_BREAK_EVENT` to a child process group on Windows.
 ///
 /// Returns `true` if the event was delivered, `false` if it could not be (the
@@ -2265,6 +2390,374 @@ mod tests {
             );
             assert!(!removed.contains(&var.to_string()));
         }
+    }
+    /// PID of `parent`'s child named `exe_name`, via a process snapshot.
+    /// Used to reach the grandchild the test needs to assert on.
+    ///
+    /// Matching on the image name rather than taking the first child: a console
+    /// is still allocated even under `CREATE_NO_WINDOW`, so `conhost.exe` can
+    /// show up parented alongside the process we actually want.
+    #[cfg(target_os = "windows")]
+    fn child_pid_named(parent: u32, exe_name: &str) -> Option<u32> {
+        use ::windows::Win32::Foundation::CloseHandle;
+        use ::windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let mut found = None;
+
+        // SAFETY: the snapshot handle is closed on every exit path, and
+        // `entry` is initialized with the `dwSize` the API requires before
+        // being handed to Process32FirstW/NextW.
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+                return None;
+            };
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut ok = Process32FirstW(snapshot, &mut entry).is_ok();
+            while ok {
+                if entry.th32ParentProcessID == parent {
+                    // Slice at the first NUL rather than converting the whole
+                    // fixed buffer and trimming: `entry` is reused every
+                    // iteration and nothing promises the API zero-fills past
+                    // the terminator, so a short name landing after a longer
+                    // one leaves stale tail bytes ("ping.exe\0er.exe"). Those
+                    // survive a trailing-NUL trim and silently fail the match.
+                    let len = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                    if name.eq_ignore_ascii_case(exe_name) {
+                        found = Some(entry.th32ProcessID);
+                        break;
+                    }
+                }
+                ok = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+        }
+
+        found
+    }
+
+    /// Resume a process spawned with `CREATE_SUSPENDED` by resuming its threads.
+    ///
+    /// `std::process::Command` hands back only a process handle, so reaching the
+    /// initial thread means going through a thread snapshot.
+    #[cfg(target_os = "windows")]
+    fn resume_process(pid: u32) -> bool {
+        use ::windows::Win32::Foundation::CloseHandle;
+        use ::windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+        };
+        use ::windows::Win32::System::Threading::{
+            OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        };
+
+        let mut resumed = false;
+
+        // SAFETY: snapshot and thread handles are closed on every exit path;
+        // `entry` carries the `dwSize` the API requires before first use.
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) else {
+                return false;
+            };
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut ok = Thread32First(snapshot, &mut entry).is_ok();
+            while ok {
+                if entry.th32OwnerProcessID == pid {
+                    if let Ok(thread) = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                    {
+                        // ResumeThread returns the *previous* suspend count, or
+                        // -1 on failure. Only a count of 1 or more is a real
+                        // resume: 0 means the thread was already running, which
+                        // is precisely the state that would make the caller's
+                        // inheritance assertion vacuous rather than wrong, so it
+                        // must not count.
+                        match ResumeThread(thread) {
+                            u32::MAX | 0 => {}
+                            _ => resumed = true,
+                        }
+                        let _ = CloseHandle(thread);
+                    }
+                }
+                ok = Thread32Next(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+        }
+
+        resumed
+    }
+
+    /// Whether `pid` is a member of `job`, and a handle-terminate of it, in one
+    /// pass so the test can both assert on a grandchild and clean it up.
+    #[cfg(target_os = "windows")]
+    fn grandchild_in_job_then_kill(
+        pid: u32,
+        job: ::windows::Win32::Foundation::HANDLE,
+    ) -> Option<bool> {
+        use ::windows::Win32::Foundation::CloseHandle;
+        use ::windows::Win32::System::JobObjects::IsProcessInJob;
+        use ::windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+
+        // SAFETY: the opened handle is closed on every exit path; the BOOL out
+        // param is a live local.
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                pid,
+            )
+            .ok()?;
+            let mut in_job = ::windows::core::BOOL(0);
+            let queried = IsProcessInJob(handle, Some(job), &mut in_job).is_ok();
+            let _ = TerminateProcess(handle, 1);
+            let _ = CloseHandle(handle);
+            queried.then(|| in_job.as_bool())
+        }
+    }
+
+    /// The wiring half: a real child lands in the job, a descendant of it
+    /// inherits membership, and the job carries the limit flag that makes
+    /// membership fatal. Without the flag the assignment would still "succeed"
+    /// and buy us nothing; without the inheritance the compile-subtree and
+    /// `git.exe` story is untrue.
+    ///
+    /// The other half — that membership actually kills when the owner dies — is
+    /// `job_kills_its_member_when_the_owner_is_force_killed`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn daemon_child_lands_in_a_kill_on_close_job() {
+        use ::windows::Win32::System::JobObjects::{
+            IsProcessInJob, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use ::windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+
+        let job = kill_on_close_job().expect("job object should be creatable");
+
+        // `cmd.exe` runs `ping` as a *grandchild*: only cmd is assigned to the
+        // job, so ping is covered purely by the inheritance this asserts on.
+        //
+        // CREATE_SUSPENDED is what makes that assertion deterministic. Job
+        // membership is only inherited by processes created *after* the parent
+        // joins, so if cmd got to run `ping` before the assignment below, ping
+        // would legitimately not be in the job and this would fail as a flake
+        // that reads like a real inheritance bug. Starting cmd suspended means
+        // it cannot spawn anything until we resume it, which is strictly after
+        // the assignment. (The production spawn accepts this same race rather
+        // than paying for it; see the note in `daemon::start_inner`.)
+        //
+        // CREATE_NO_WINDOW is folded in here rather than via
+        // `configure_no_window_command` because `creation_flags` overwrites
+        // rather than accumulates. Without it a local `cargo test` flashes a
+        // console per run.
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.args(["/c", "ping", "-n", "30", "127.0.0.1"]);
+        cmd.creation_flags((CREATE_NO_WINDOW | CREATE_SUSPENDED).0);
+        let mut child = cmd.spawn().expect("failed to spawn test child");
+
+        let assigned = assign_to_kill_on_close_job(child.as_raw_handle());
+        let resumed = resume_process(child.id());
+
+        // Poll rather than sleep a fixed guess, and don't hang the suite if
+        // ping never appears.
+        let mut grandchild = None;
+        for _ in 0..100 {
+            if let Some(pid) = child_pid_named(child.id(), "ping.exe") {
+                grandchild = Some(pid);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Kills the grandchild as it goes; `child.kill()` below reaps only cmd
+        // itself, which would otherwise leave ping running for its full 30s.
+        let grandchild_in_job = grandchild.and_then(|pid| grandchild_in_job_then_kill(pid, job));
+
+        // SAFETY: both handles are live — `job` is the process-wide job and the
+        // child handle is kept open by `child`, which outlives this call.
+        let in_job = unsafe {
+            let mut in_job = ::windows::core::BOOL(0);
+            IsProcessInJob(
+                ::windows::Win32::Foundation::HANDLE(child.as_raw_handle()),
+                Some(job),
+                &mut in_job,
+            )
+            .expect("IsProcessInJob failed");
+            in_job.as_bool()
+        };
+
+        // SAFETY: `job` is a live job handle; the out buffer and its declared
+        // length match `JobObjectExtendedLimitInformation`.
+        let flags = unsafe {
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            QueryInformationJobObject(
+                Some(job),
+                JobObjectExtendedLimitInformation,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                None,
+            )
+            .expect("QueryInformationJobObject failed");
+            info.BasicLimitInformation.LimitFlags
+        };
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(assigned, "child should have been assigned to the job");
+        assert!(
+            resumed,
+            "suspended child was never resumed; the inheritance assertion below \
+             would be vacuous rather than wrong"
+        );
+        assert!(in_job, "child should be a member of the job");
+        assert_eq!(
+            grandchild_in_job,
+            Some(true),
+            "a descendant of the assigned child must inherit job membership; the backend's \
+             compilers and git children are only covered because of this"
+        );
+        assert!(
+            flags.0 & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.0 != 0,
+            "job must be kill-on-close, otherwise membership does not outlive-protect anything"
+        );
+    }
+
+    /// Set on the re-executed test binary to put it in helper mode.
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_ENV: &str = "ESPHOME_JOB_KILL_HELPER";
+    /// How the helper hands its member's PID back to the driver.
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_MARKER: &str = "JOB_MEMBER_PID=";
+    #[cfg(target_os = "windows")]
+    const JOB_HELPER_TEST: &str = "platform::tests::job_kill_helper";
+
+    /// The owner half of `job_kills_its_member_when_the_owner_is_force_killed`.
+    ///
+    /// `#[ignore]` so a normal `cargo test` never runs it: it is only meaningful
+    /// when the driver re-execs this binary with `--ignored --exact` and
+    /// `JOB_HELPER_ENV` set, and it deliberately blocks until killed. The env
+    /// guard means an `--ignored` run by hand exits immediately rather than
+    /// hanging for two minutes.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn job_kill_helper() {
+        if std::env::var(JOB_HELPER_ENV).is_err() {
+            return;
+        }
+
+        // Spawn the member exactly the way `daemon::start_inner` spawns the
+        // backend — tokio's Command, `configure_daemon_tokio_command`, and the
+        // handle from tokio's `raw_handle()` — so this exercises the real code
+        // path rather than a std::process lookalike that happens to agree.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper: tokio runtime");
+        let child_pid = rt.block_on(async {
+            let mut cmd = tokio::process::Command::new("ping.exe");
+            cmd.args(["-n", "120", "127.0.0.1"]);
+            configure_daemon_tokio_command(&mut cmd);
+            let child = cmd.spawn().expect("helper: failed to spawn member");
+            let handle = child.raw_handle().expect("helper: member has no handle");
+            assert!(
+                assign_to_kill_on_close_job(handle),
+                "helper: could not assign the member to the job"
+            );
+            let pid = child.id().expect("helper: member has no pid");
+            // Leak the Child: dropping it would let tokio reap or kill the
+            // member, and the driver needs it alive until *we* are killed.
+            std::mem::forget(child);
+            pid
+        });
+
+        // Printing the PID is also the driver's signal that assignment is done,
+        // so it can't kill us before the member is actually in the job.
+        println!("{JOB_HELPER_MARKER}{child_pid}");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+
+        // Block until the driver force-kills us. Bounded so a driver that dies
+        // early leaves this to time out rather than wedge CI forever.
+        std::thread::sleep(std::time::Duration::from_secs(120));
+    }
+
+    /// The claim the whole change rests on: when the owning process dies without
+    /// running any of its own code, Windows kills the job's members.
+    ///
+    /// Everything else about this feature is verifiable in-process, but not this
+    /// — the owner has to actually die, and it can't be the test process. So the
+    /// test binary re-execs itself as the owner, waits for it to report a member
+    /// it has assigned, then `TerminateProcess`es it. That is precisely the
+    /// shape of the cases this exists for: the NSIS uninstaller force-killing
+    /// us, a crash, End Task. No `Drop`, no exit handler, no cooperation.
+    ///
+    /// A handle to the member is opened *before* the kill, so the PID can't be
+    /// recycled underneath us and the wait is on the member itself rather than a
+    /// poll for its absence.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn job_kills_its_member_when_the_owner_is_force_killed() {
+        use ::windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use ::windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        use std::io::{BufRead, BufReader};
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut owner = std::process::Command::new(exe)
+            .args(["--ignored", "--exact", JOB_HELPER_TEST, "--nocapture"])
+            .env(JOB_HELPER_ENV, "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn the owner helper");
+
+        let stdout = owner.stdout.take().expect("owner stdout");
+        let member_pid = BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .find_map(|line| {
+                line.strip_prefix(JOB_HELPER_MARKER)
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            });
+        let Some(member_pid) = member_pid else {
+            let _ = owner.kill();
+            panic!("the owner never reported a job member; it likely failed to assign one");
+        };
+
+        // SAFETY: `member_pid` was just reported by a live child; the handle is
+        // closed on every path below.
+        let member = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, member_pid) }
+            .expect("could not open the job member");
+
+        // The point of the whole test: kill the owner outright.
+        owner.kill().expect("failed to kill the owner");
+        let _ = owner.wait();
+
+        // SAFETY: `member` is a live handle we own and close immediately after.
+        let waited = unsafe { WaitForSingleObject(member, 15_000) };
+        let _ = unsafe { CloseHandle(member) };
+
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "the job did not kill its member when the owning process was force-killed; \
+             the backend would survive the desktop and keep holding the install dir open"
+        );
     }
 
     #[test]
