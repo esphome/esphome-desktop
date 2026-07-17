@@ -1,38 +1,28 @@
 //! Lifecycle of the user-writable bundled Python tree: the copy from the
-//! read-only bundle on macOS and Linux, the version marker and deferral
-//! bookkeeping that decide when to refresh it, preserving user-pinned
-//! package versions across a refresh, and the cheap "does the interpreter
-//! run at all" check the repair path uses to aim its diagnosis.
+//! read-only bundle, the version marker and deferral bookkeeping that decide
+//! when to refresh it, preserving user-pinned package versions across a
+//! refresh, and the cheap "does the interpreter run at all" check the repair
+//! path uses to aim its diagnosis.
 
 use super::get_bundled_resource_dir;
-#[cfg(not(target_os = "windows"))]
 use super::get_python_parent_dir;
-use super::health::PROBE_TIMEOUT;
-#[cfg(not(target_os = "windows"))]
-use super::health::{bump_counter, read_counter};
-use super::process::run_python_capture_bounded;
-#[cfg(not(target_os = "windows"))]
-use super::process::{pip_install_blocking, run_python_capture, tail_for_log};
+use super::health::{bump_counter, interpreter_in_tree, read_counter, PROBE_TIMEOUT};
+use super::process::{
+    pip_install_blocking, run_python_capture, run_python_capture_bounded, tail_for_log,
+};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::AppHandle;
-#[cfg(not(target_os = "windows"))]
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// Filename of the marker recording which desktop-app version copied the
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
-// The refresh cluster below is reached only from ensure_user_python's
-// non-Windows body today; #335 puts Windows on the same copy, so it is kept
-// compiled there rather than cfg gated out.
-#[cfg_attr(windows, allow(dead_code))]
 const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
 /// Filename of the counter tracking consecutive launches that deferred the
 /// bundled-Python refresh because the version probe failed on a still-usable
 /// interpreter. Lives inside the user Python tree, so it is reset for free the
 /// moment the tree is wiped. See [`MAX_REFRESH_DEFERS`].
-// See PYTHON_VERSION_MARKER: non-Windows only until #335.
-#[cfg_attr(windows, allow(dead_code))]
 const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 
 /// Maximum consecutive refresh defers before forcing the destructive refresh.
@@ -40,8 +30,6 @@ const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 /// (e.g. a corrupt `.dist-info`) would otherwise defer on every launch,
 /// gating the self-heal behind the very metadata that is broken. After this
 /// many defers we stop deferring and wipe to re-copy a clean bundle.
-// See PYTHON_VERSION_MARKER: non-Windows only until #335.
-#[cfg_attr(windows, allow(dead_code))]
 const MAX_REFRESH_DEFERS: u32 = 3;
 
 /// Why [`ensure_user_python`] was called. The caller always knows; passing it in
@@ -71,208 +59,200 @@ pub enum RefreshReason {
 /// changed dependencies). Without this, the first-run copy persisted forever.
 ///
 /// [`RefreshReason::Repair`] additionally forces the copy, which is how a broken
-/// tree is fixed on the platforms that keep a pristine bundle.
+/// tree is fixed on every platform (#335).
 pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        // Windows keeps no copy: the backend runs straight out of the install
-        // dir. Returning Ok to a caller asking for a repair would report a fix
-        // that never happened, so say so instead. `can_refresh_from_bundle`
-        // steers callers away from here, and this makes the silent no-op
-        // impossible rather than merely unlikely.
-        if reason == RefreshReason::Repair {
-            anyhow::bail!(
-                "Windows has no bundled copy to refresh from; the backend runs out of the install dir"
-            );
-        }
-        let resource_dir = get_bundled_resource_dir(app_handle)?;
-        let bundled_python = resource_dir.join("python").join("python.exe");
+    let user_python = get_python_parent_dir(app_handle)?.join("python");
+    refresh_python_tree(
+        &user_python,
+        || Ok(get_bundled_resource_dir(app_handle)?.join("python")),
+        reason,
+    )
+}
+
+/// The refresh itself, parameterized on paths so the repair-cycle e2e can drive
+/// the real copy, marker, and snapshot/restore code against a scratch tree
+/// without an [`AppHandle`]. `bundled_python` resolves the pristine source
+/// lazily: an up-to-date tree never needs it, and resolving it can fail (a dev
+/// build with no bundled resources) — asking eagerly would fail the no-op case
+/// on the strength of a directory it never reads.
+pub(super) fn refresh_python_tree(
+    user_python: &Path,
+    bundled_python: impl FnOnce() -> Result<PathBuf>,
+    reason: RefreshReason,
+) -> Result<()> {
+    let python_check = interpreter_in_tree(user_python);
+    let marker_path = user_python.join(PYTHON_VERSION_MARKER);
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    let marker_matches = std::fs::read_to_string(&marker_path)
+        .map(|s| s.trim() == current_version)
+        .unwrap_or(false);
+
+    // A repair refreshes whatever the marker says: it is called because the
+    // tree has already been proven broken, and its marker will match
+    // whenever the breakage arrived without an app update — which is exactly
+    // the #330 case.
+    let needs_copy = reason == RefreshReason::Repair || !python_check.exists() || !marker_matches;
+
+    if needs_copy {
+        let bundled_python = bundled_python()?;
 
         if !bundled_python.exists() {
             anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
         }
 
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        use tracing::{info, warn};
-
-        let parent_dir = get_python_parent_dir(app_handle)?;
-        let user_python = parent_dir.join("python");
-        let python_check = user_python.join("bin").join("python3");
-        let marker_path = user_python.join(PYTHON_VERSION_MARKER);
-        let current_version = env!("CARGO_PKG_VERSION");
-
-        let marker_matches = std::fs::read_to_string(&marker_path)
-            .map(|s| s.trim() == current_version)
-            .unwrap_or(false);
-
-        // A repair refreshes whatever the marker says: it is called because the
-        // tree has already been proven broken, and its marker will match
-        // whenever the breakage arrived without an app update — which is exactly
-        // the #330 case.
-        let needs_copy =
-            reason == RefreshReason::Repair || !python_check.exists() || !marker_matches;
-
-        if needs_copy {
-            let resource_dir = get_bundled_resource_dir(app_handle)?;
-            let bundled_python = resource_dir.join("python");
-
-            if !bundled_python.exists() {
-                anyhow::bail!("Bundled Python not found at {:?}", bundled_python);
-            }
-
-            // Snapshot the user's pre-existing package versions BEFORE the
-            // wipe so we can restore them after the bundled tree is in place.
-            // Without this, a user who pip-bumped ESPHome past the bundled
-            // version would silently get downgraded by every app self-update.
-            //
-            // For `ClassicMigration` (a user migrating off the removed classic
-            // dashboard), `esphome-device-builder` is left out of the snapshot
-            // so the freshly bundled copy always wins and the user lands on the
-            // current device builder.
-            //
-            // If the probe FAILS (as opposed to the package being absent), we
-            // cannot tell whether the user pinned a newer version, so wiping
-            // the tree now would silently discard it — exactly the downgrade
-            // this snapshot exists to prevent. In that case defer the refresh:
-            // keep the working tree, log a warning, and retry next launch.
-            let preserved = if python_check.exists() {
-                match snapshot_preserved_versions(
-                    &python_check,
-                    reason == RefreshReason::ClassicMigration,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // A probe error means we can't trust a snapshot — but
-                        // WHY matters. If the interpreter itself is unusable
-                        // (can't even run a trivial script), the tree is broken
-                        // and the destructive refresh is the only recovery
-                        // path, so fall through and wipe. If the interpreter
-                        // runs but the probe failed (non-zero exit, possibly
-                        // transient), defer to avoid discarding a user-pinned
-                        // version we just couldn't read.
-                        //
-                        // Deferring is bounded: a usable interpreter whose
-                        // package metadata is *persistently* unreadable would
-                        // otherwise defer forever, gating the self-heal wipe
-                        // behind the very metadata that is broken. After
-                        // MAX_REFRESH_DEFERS consecutive defers we proceed with
-                        // the wipe to re-copy a clean bundle. The counter lives
-                        // inside the tree, so it resets the moment we wipe.
-                        //
-                        // Only a routine `Startup` may defer, because deferring
-                        // answers a question only `Startup` is asking: "is this
-                        // refresh worth the risk of discarding a pinned
-                        // version?" A `ClassicMigration` must land on the
-                        // bundled device builder, and a `Repair` was called
-                        // because the tree is already proven broken — keeping it
-                        // another launch is the wrong answer to both, and the
-                        // caller has no way to tell that its request was
-                        // silently dropped.
-                        // A check we could not make is not a check that failed.
-                        // Wiping on "we could not tell" would discard the user's
-                        // pinned version on the strength of an unanswered
-                        // question — the very downgrade the snapshot above
-                        // exists to prevent. Assume usable and defer; that is
-                        // bounded, so a persistently unanswerable check still
-                        // self-heals after MAX_REFRESH_DEFERS.
-                        let usable = interpreter_is_usable(&python_check).unwrap_or_else(|probe| {
-                            warn!(
-                                "Could not check whether the interpreter at {python_check:?} is \
+        // Snapshot the user's pre-existing package versions BEFORE the
+        // wipe so we can restore them after the bundled tree is in place.
+        // Without this, a user who pip-bumped ESPHome past the bundled
+        // version would silently get downgraded by every app self-update.
+        //
+        // For `ClassicMigration` (a user migrating off the removed classic
+        // dashboard), `esphome-device-builder` is left out of the snapshot
+        // so the freshly bundled copy always wins and the user lands on the
+        // current device builder.
+        //
+        // If the probe FAILS (as opposed to the package being absent), we
+        // cannot tell whether the user pinned a newer version, so wiping
+        // the tree now would silently discard it — exactly the downgrade
+        // this snapshot exists to prevent. In that case defer the refresh:
+        // keep the working tree, log a warning, and retry next launch.
+        let preserved = if python_check.exists() {
+            match snapshot_preserved_versions(
+                &python_check,
+                reason == RefreshReason::ClassicMigration,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    // A probe error means we can't trust a snapshot — but
+                    // WHY matters. If the interpreter itself is unusable
+                    // (can't even run a trivial script), the tree is broken
+                    // and the destructive refresh is the only recovery
+                    // path, so fall through and wipe. If the interpreter
+                    // runs but the probe failed (non-zero exit, possibly
+                    // transient), defer to avoid discarding a user-pinned
+                    // version we just couldn't read.
+                    //
+                    // Deferring is bounded: a usable interpreter whose
+                    // package metadata is *persistently* unreadable would
+                    // otherwise defer forever, gating the self-heal wipe
+                    // behind the very metadata that is broken. After
+                    // MAX_REFRESH_DEFERS consecutive defers we proceed with
+                    // the wipe to re-copy a clean bundle. The counter lives
+                    // inside the tree, so it resets the moment we wipe.
+                    //
+                    // Only a routine `Startup` may defer, because deferring
+                    // answers a question only `Startup` is asking: "is this
+                    // refresh worth the risk of discarding a pinned
+                    // version?" A `ClassicMigration` must land on the
+                    // bundled device builder, and a `Repair` was called
+                    // because the tree is already proven broken — keeping it
+                    // another launch is the wrong answer to both, and the
+                    // caller has no way to tell that its request was
+                    // silently dropped.
+                    // A check we could not make is not a check that failed.
+                    // Wiping on "we could not tell" would discard the user's
+                    // pinned version on the strength of an unanswered
+                    // question — the very downgrade the snapshot above
+                    // exists to prevent. Assume usable and defer; that is
+                    // bounded, so a persistently unanswerable check still
+                    // self-heals after MAX_REFRESH_DEFERS.
+                    let usable = interpreter_is_usable(&python_check).unwrap_or_else(|probe| {
+                        warn!(
+                            "Could not check whether the interpreter at {python_check:?} is \
                                  usable ({probe}); assuming it is rather than wiping a tree that \
                                  may be fine"
-                            );
-                            true
-                        });
-                        if reason == RefreshReason::Startup && usable {
-                            let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
-                            let defers = read_counter(&defer_marker);
-                            if defers < MAX_REFRESH_DEFERS
-                                && bump_counter(&defer_marker, defers + 1)
-                            {
-                                warn!(
-                                    "Could not read existing Python package versions ({e:#}); \
+                        );
+                        true
+                    });
+                    if reason == RefreshReason::Startup && usable {
+                        let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
+                        let defers = read_counter(&defer_marker);
+                        if defers < MAX_REFRESH_DEFERS && bump_counter(&defer_marker, defers + 1) {
+                            warn!(
+                                "Could not read existing Python package versions ({e:#}); \
                                      deferring the bundled-Python refresh to avoid downgrading a \
                                      user-pinned version (defer {}/{}). Will retry on next launch.",
-                                    defers + 1,
-                                    MAX_REFRESH_DEFERS
-                                );
-                                return Ok(());
-                            }
-                            // Either we hit the defer bound, or the counter is
-                            // unwritable so it can never advance to that bound.
-                            // Both mean "stop deferring and self-heal" — wiping
-                            // re-copies a clean bundle and resets the marker.
-                            warn!(
-                                "Could not read existing Python package versions ({e:#}); the \
+                                defers + 1,
+                                MAX_REFRESH_DEFERS
+                            );
+                            return Ok(());
+                        }
+                        // Either we hit the defer bound, or the counter is
+                        // unwritable so it can never advance to that bound.
+                        // Both mean "stop deferring and self-heal" — wiping
+                        // re-copies a clean bundle and resets the marker.
+                        warn!(
+                            "Could not read existing Python package versions ({e:#}); the \
                                  package metadata appears persistently broken (or the defer \
                                  counter is unwritable). Wiping and re-copying the bundled tree \
                                  to recover."
-                            );
-                            PreservedVersions::default()
-                        } else if reason != RefreshReason::Startup {
-                            warn!(
-                                "Could not read existing Python package versions ({e:#}) during a \
+                        );
+                        PreservedVersions::default()
+                    } else if reason != RefreshReason::Startup {
+                        warn!(
+                            "Could not read existing Python package versions ({e:#}) during a \
                                  {reason:?}; refreshing to the bundled tree anyway."
-                            );
-                            PreservedVersions::default()
-                        } else {
-                            warn!(
-                                "Existing Python interpreter at {:?} is unusable ({e:#}); \
+                        );
+                        PreservedVersions::default()
+                    } else {
+                        warn!(
+                            "Existing Python interpreter at {:?} is unusable ({e:#}); \
                                  wiping and re-copying the bundled tree to recover.",
-                                python_check
-                            );
-                            PreservedVersions::default()
-                        }
+                            python_check
+                        );
+                        PreservedVersions::default()
                     }
                 }
-            } else {
-                PreservedVersions::default()
-            };
-
-            if user_python.exists() {
-                info!(
-                    "Removing stale user Python at {:?} (version marker missing or mismatched)",
-                    user_python
-                );
-                std::fs::remove_dir_all(&user_python)
-                    .context("Failed to remove stale user Python directory")?;
             }
-
-            info!(
-                "Copying bundled Python to user data directory (version {})...",
-                current_version
-            );
-
-            // Copy the bundled Python to user data
-            copy_dir_recursive(&bundled_python, &user_python)?;
-
-            // Atomic write: a torn marker could read back as a partial version
-            // string, mismatching on next launch and re-copying the whole tree.
-            crate::util::atomic_write(&marker_path, current_version)
-                .context("Failed to write Python version marker")?;
-
-            restore_preserved_versions(&python_check, &preserved);
-
-            info!("User Python ready at {:?}", user_python);
         } else {
-            debug!(
-                "User Python already up-to-date (version {})",
-                current_version
+            PreservedVersions::default()
+        };
+
+        if user_python.exists() {
+            info!(
+                "Removing stale user Python at {:?} (version marker missing or mismatched)",
+                user_python
             );
+            std::fs::remove_dir_all(user_python)
+                .context("Failed to remove stale user Python directory")?;
         }
 
-        Ok(())
+        info!(
+            "Copying bundled Python to user data directory (version {})...",
+            current_version
+        );
+
+        // Copy the bundled Python to user data. Timed because the cost is
+        // platform-lopsided — tens of thousands of small files, each scanned
+        // by Defender on Windows — and a slow launch should say where the
+        // time went.
+        let copy_started = std::time::Instant::now();
+        copy_dir_recursive(&bundled_python, user_python)?;
+        let copy_elapsed = copy_started.elapsed();
+
+        // Atomic write: a torn marker could read back as a partial version
+        // string, mismatching on next launch and re-copying the whole tree.
+        crate::util::atomic_write(&marker_path, current_version)
+            .context("Failed to write Python version marker")?;
+
+        restore_preserved_versions(&python_check, &preserved);
+
+        info!(
+            "User Python ready at {:?} (copied in {:.1?})",
+            user_python, copy_elapsed
+        );
+    } else {
+        debug!(
+            "User Python already up-to-date (version {})",
+            current_version
+        );
     }
+
+    Ok(())
 }
 
 /// User-preferred package versions captured before the bundled Python tree
 /// is wiped during an app-version refresh. See [`ensure_user_python`].
-// See PYTHON_VERSION_MARKER: non-Windows only until #335.
-#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Default)]
 struct PreservedVersions {
     esphome: Option<String>,
@@ -289,7 +269,6 @@ struct PreservedVersions {
 /// snapshot so the freshly bundled copy is kept as-is on restore (and a probe
 /// failure for it can't trigger a refresh defer either). Used to move a user
 /// off the removed classic dashboard onto the current device builder.
-#[cfg(not(target_os = "windows"))]
 fn snapshot_preserved_versions(
     python_bin: &Path,
     force_device_builder: bool,
@@ -351,10 +330,7 @@ pub fn interpreter_is_usable(python_bin: &Path) -> std::io::Result<bool> {
 /// app's fresher bundle when they haven't explicitly bumped past it). Each
 /// reinstall is best-effort — a network failure here logs a warning and
 /// falls through to the bundled version rather than blocking app start.
-#[cfg(not(target_os = "windows"))]
 fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) {
-    use tracing::{info, warn};
-
     for (package, saved) in [
         ("esphome", preserved.esphome.as_deref()),
         (
@@ -410,7 +386,6 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 ///   from "not installed": callers that snapshot versions before a destructive
 ///   refresh must not treat a flaky probe as "absent" — see
 ///   [`snapshot_preserved_versions`].
-#[cfg(not(target_os = "windows"))]
 fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
     // Written as a single-line literal with explicit `\n` so each Python
     // statement starts at column zero — avoids any ambiguity about whether
@@ -436,7 +411,6 @@ fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<Strin
 /// run with empty stdout means the package is absent (`Ok(None)`); a non-empty
 /// stdout yields the trimmed version; a failed run is an error carrying the
 /// (tail-truncated) stderr.
-#[cfg(not(target_os = "windows"))]
 fn parse_probe_output(
     package: &str,
     success: bool,
@@ -465,9 +439,6 @@ fn parse_probe_output(
 /// copy, flattened the framework layout, and — for a *dangling* link — made
 /// `fs::copy` fail with "No such file", aborting the entire copy and leaving the
 /// app unable to start.
-// See PYTHON_VERSION_MARKER: non-Windows only until #335, which needs exactly
-// this copy on Windows (its symlink branch included; NTFS trees can hold them).
-#[cfg_attr(windows, allow(dead_code))]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     use std::fs;
 
@@ -498,8 +469,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// verbatim — never resolved or followed — so link semantics survive the copy.
 /// On Windows the source-side target is inspected only to pick the link *type*
 /// (`symlink_dir` vs `symlink_file`); the stored target itself is left unchanged.
-// See PYTHON_VERSION_MARKER: non-Windows only until #335.
-#[cfg_attr(windows, allow(dead_code))]
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     let target = std::fs::read_link(src).context("Failed to read symlink target")?;
 
@@ -556,15 +525,102 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    // Every test here exercises the non-Windows copy/refresh path or needs a
-    // unix stub interpreter, so on Windows this module is empty and ungated
-    // imports would trip -D unused-imports. The imports carry the gate rather
-    // than the module, so the file size cap still recognizes the block as
-    // tests and clippy sees no inner/outer attribute mix.
-    #[cfg(not(target_os = "windows"))]
     use super::*;
-    #[cfg(not(target_os = "windows"))]
     use crate::util::unique_temp_dir;
+
+    /// A fake bundled tree: a stand-in interpreter file at this platform's
+    /// layout (`python.exe` at the root on Windows, `bin/python3` elsewhere)
+    /// plus one library file, so a copy has both a nested dir and content to
+    /// prove itself with.
+    fn fake_bundle(base: &Path) -> PathBuf {
+        let bundle = base.join("bundle");
+        let interpreter = interpreter_in_tree(&bundle);
+        std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
+        std::fs::write(&interpreter, "stub").unwrap();
+        std::fs::write(bundle.join("lib.txt"), "lib").unwrap();
+        bundle
+    }
+
+    #[test]
+    fn first_run_copies_the_bundle_and_writes_the_marker() {
+        let base = unique_temp_dir("refresh-first-run");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = base.join("python");
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+
+        assert!(
+            interpreter_in_tree(&user).is_file(),
+            "the interpreter must land at this platform's layout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user.join("lib.txt")).unwrap(),
+            "lib"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user.join(PYTHON_VERSION_MARKER))
+                .unwrap()
+                .trim(),
+            env!("CARGO_PKG_VERSION"),
+            "the marker must record the version that made the copy"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn up_to_date_tree_never_resolves_the_bundle() {
+        // The bundle resolver can fail in a dev build with no resources; an
+        // up-to-date tree must not ask for it, or the routine no-op launch
+        // would fail on the strength of a directory it never reads.
+        let base = unique_temp_dir("refresh-noop");
+        let _ = std::fs::remove_dir_all(&base);
+        let user = base.join("python");
+        let interpreter = interpreter_in_tree(&user);
+        std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
+        std::fs::write(&interpreter, "stub").unwrap();
+        std::fs::write(user.join(PYTHON_VERSION_MARKER), env!("CARGO_PKG_VERSION")).unwrap();
+        let sentinel = user.join("sentinel");
+        std::fs::write(&sentinel, "").unwrap();
+
+        refresh_python_tree(
+            &user,
+            || anyhow::bail!("resolved the bundle for an up-to-date tree"),
+            RefreshReason::Startup,
+        )
+        .unwrap();
+
+        assert!(sentinel.exists(), "a matching marker must be a no-op");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repair_recopies_even_when_the_marker_matches() {
+        // The #330 shape: the tree broke without an app update, so the marker
+        // still matches. A Repair must refresh anyway — the marker is evidence
+        // about versions, and the caller has evidence about damage.
+        let base = unique_temp_dir("refresh-repair");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = base.join("python");
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+        let orphan = user.join("orphan.txt");
+        std::fs::write(&orphan, "damage").unwrap();
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Repair).unwrap();
+
+        assert!(!orphan.exists(), "the repair must wipe before re-copying");
+        assert!(interpreter_in_tree(&user).is_file());
+        assert_eq!(
+            std::fs::read_to_string(user.join(PYTHON_VERSION_MARKER))
+                .unwrap()
+                .trim(),
+            env!("CARGO_PKG_VERSION")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -657,21 +713,18 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_probe_output_reports_version() {
         let v = parse_probe_output("esphome", true, b"2026.5.0\n", b"").unwrap();
         assert_eq!(v, Some("2026.5.0".to_string()));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_probe_output_empty_means_absent() {
         let v = parse_probe_output("esphome", true, b"", b"").unwrap();
         assert_eq!(v, None, "clean exit with no output means not installed");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_probe_output_failure_is_error_not_absent() {
         // A non-zero exit must NOT be conflated with "not installed" — that
@@ -779,7 +832,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn refresh_defer_count_missing_marker_is_zero() {
         let base = unique_temp_dir("defer-missing");
@@ -788,7 +840,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn refresh_defer_count_round_trips_and_bounds_defers() {
         // A persistently failing probe must stop deferring after the bound,

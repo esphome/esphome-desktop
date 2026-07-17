@@ -149,24 +149,11 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
 /// Whether this platform can repair the managed tree by re-copying the bundle
 /// it shipped with, rather than reinstalling from PyPI.
 ///
-/// True on macOS and Linux, where the resource tree is read-only by design (a
-/// signed `.app`, a squashfs AppImage mount) and so [`super::ensure_user_python`]
-/// keeps
-/// a working copy in the app data dir. That copy is exactly what a repair wants:
-/// a known-good tree, already on disk, needing no network.
-///
-/// False on Windows, which has no second copy — the backend runs straight out of
-/// the install dir and `ensure_user_python` returns early — so there is nothing
-/// to re-copy from and the repair has to come from PyPI.
-///
-/// That Windows gap is the only reason the manifest and [`wipe_installed_packages`]
-/// exist. Close it (#335 — give Windows the app-data copy) and this function,
-/// the whole manifest subsystem, and the PyPI reset all go, leaving
-/// `ensure_user_python(.., RefreshReason::Repair)` as the one repair everywhere.
+/// True wherever the shipped bundle is on disk to copy from, which since #335
+/// is every packaged install: [`super::ensure_user_python`] keeps a working
+/// copy in app data on all platforms, and that copy is exactly what a repair
+/// wants — a known-good tree, already on disk, needing no network.
 pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
-    if cfg!(target_os = "windows") {
-        return false;
-    }
     match get_bundled_resource_dir(app_handle) {
         Ok(dir) => dir.join("python").is_dir(),
         Err(e) => {

@@ -145,8 +145,10 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 }
 
-/// Get the path to the user Python executable
-/// On non-Windows platforms, the bundled Python is copied to user data for updates
+/// Get the path to the user Python executable: the copy `ensure_user_python`
+/// keeps under [`get_python_parent_dir`], falling back to the bundled tree
+/// before the first-run copy exists and to a bare system Python in development
+/// builds with no bundle.
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     let parent_dir = get_python_parent_dir(app_handle)?;
     let python_path = health::interpreter_in_tree(&parent_dir.join("python"));

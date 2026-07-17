@@ -410,7 +410,7 @@ pub fn run(cli: Cli) {
                 platform::RefreshReason::Startup
             };
 
-            // Ensure user Python exists (copy from bundled on first run for non-Windows)
+            // Ensure user Python exists (copied from the bundle on first run).
             // This must happen before AppState::new() so paths are correct
             if let Err(e) = platform::ensure_user_python(app.handle(), refresh_reason) {
                 error!("Failed to set up user Python: {}", e);
