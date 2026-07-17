@@ -543,10 +543,7 @@ impl UpdateChecker {
                 "ESPHome install looks broken but the package reset budget is spent, so it is \
                  being left alone. Probe said: {detail}"
             );
-            notify_repair_needed(
-                app_handle,
-                t_with("update.repair_incomplete", &[("hint", &repair_hint())]),
-            );
+            notify_repair_incomplete(app_handle);
             return;
         }
 
@@ -575,14 +572,24 @@ impl UpdateChecker {
                 platform::clear_package_reset_count(&data_dir);
             }
             Ok(Ok(Some(detail))) => {
-                warn!("ESPHome install still broken after the package reset: {detail}");
-                notify_repair_needed(
-                    app_handle,
-                    t_with("update.repair_incomplete", &[("hint", &repair_hint())]),
-                );
+                warn!("ESPHome install still broken after the repair: {detail}");
+                notify_repair_incomplete(app_handle);
             }
-            Ok(Err(e)) => warn!("Could not re-check the ESPHome install after the reset: {e:#}"),
-            Err(e) => warn!("ESPHome health probe task panicked or was cancelled: {e:#}"),
+            // The repair ran but we could not confirm it. Treat that as
+            // unrepaired rather than as success: the probe already proved the
+            // tree was broken, so "we cannot tell" is much closer to "still
+            // broken" than to "fine", and staying quiet here would make an
+            // unverifiable repair the one outcome the user is never told about.
+            // Leaving the counter alone is deliberate for the same reason — an
+            // unconfirmed repair has not earned back its budget.
+            Ok(Err(e)) => {
+                warn!("Could not re-check the ESPHome install after the repair: {e:#}");
+                notify_repair_incomplete(app_handle);
+            }
+            Err(e) => {
+                warn!("ESPHome health probe task panicked or was cancelled: {e:#}");
+                notify_repair_incomplete(app_handle);
+            }
         }
     }
 
@@ -1224,6 +1231,15 @@ fn repair_hint() -> String {
     } else {
         t("update.repair_hint_retry")
     }
+}
+
+/// Tell the user the tree is still broken after a repair, or that we could
+/// not confirm it is not.
+fn notify_repair_incomplete(app_handle: &AppHandle) {
+    notify_repair_needed(
+        app_handle,
+        t_with("update.repair_incomplete", &[("hint", &repair_hint())]),
+    );
 }
 
 /// Tell the user their ESPHome install is broken and we could not fix it.

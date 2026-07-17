@@ -75,11 +75,32 @@ def build_manifest(root: Path) -> str:
     lines = [HEADER]
     lines += [f"sweep {rel.as_posix()}" for rel, _ in swept]
     for rel, path in swept:
+        # A swept directory that does not exist would be recorded with nothing
+        # to keep inside it, and the reset would then clean it out entirely --
+        # which for site-packages means deleting the interpreter's own pip, the
+        # one thing no repair can come back from. Both directories exist at the
+        # point prepare_bundle.sh calls this, so getting here means something
+        # about the tree is not what we think, and guessing is not an option.
         if not path.is_dir():
-            continue
-        for child in sorted(path.iterdir()):
-            lines.append(f"keep {(rel / child.name).as_posix()}")
-    return "\n".join(lines)
+            raise SystemExit(f"{rel.as_posix()} ({path}) is not a directory")
+        children = sorted(path.iterdir())
+        if not children:
+            raise SystemExit(f"{rel.as_posix()} ({path}) is empty")
+        lines += [f"keep {(rel / child.name).as_posix()}" for child in children]
+
+    manifest = "\n".join(lines)
+
+    # The manifest is only useful if it spares pip, since the repair reinstalls
+    # with it. Assert it here, where the artifact is produced and a failure stops
+    # the build, rather than discovering it on a user's machine at the moment
+    # their repair is refused.
+    if not any(
+        line.startswith("keep ") and line.rsplit("/", 1)[-1] == "pip"
+        for line in manifest.splitlines()
+    ):
+        raise SystemExit("manifest does not name pip; refusing to write it")
+
+    return manifest
 
 
 def main(argv: list[str]) -> int:

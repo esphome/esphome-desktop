@@ -1080,15 +1080,26 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
         }
     }
 
-    // A manifest that names nothing to spare would delete the interpreter's own
-    // pip and leave no way to reinstall anything. That can only be a truncated
-    // or mis-generated file, never a real bundle.
-    if manifest.sweep.is_empty() || manifest.keep.is_empty() {
-        anyhow::bail!(
-            "{BASE_MANIFEST} names {} sweep dirs and {} keep entries; refusing to use it",
-            manifest.sweep.len(),
-            manifest.keep.len()
-        );
+    if manifest.sweep.is_empty() {
+        anyhow::bail!("{BASE_MANIFEST} names no directories to sweep; refusing to use it");
+    }
+
+    // Every swept directory must spare something. Checking the keep set only
+    // globally would accept a manifest that sweeps one directory clean because
+    // some *other* directory happened to name entries — and sweeping
+    // site-packages clean takes the interpreter's own pip with it, which is the
+    // one outcome nothing can come back from. A truncated file fails here too.
+    for sweep_rel in &manifest.sweep {
+        if !manifest
+            .keep
+            .iter()
+            .any(|keep| keep.parent() == Some(sweep_rel.as_path()))
+        {
+            anyhow::bail!(
+                "{BASE_MANIFEST} sweeps {} but names nothing to keep in it; refusing to use it",
+                sweep_rel.display()
+            );
+        }
     }
 
     Ok(manifest)
@@ -1114,9 +1125,19 @@ pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
     if cfg!(target_os = "windows") {
         return false;
     }
-    get_bundled_resource_dir(app_handle)
-        .map(|dir| dir.join("python").is_dir())
-        .unwrap_or(false)
+    match get_bundled_resource_dir(app_handle) {
+        Ok(dir) => dir.join("python").is_dir(),
+        Err(e) => {
+            // Say why. Otherwise this is indistinguishable from "this platform
+            // ships no bundle", and the repair quietly downgrades from a free
+            // local copy to a network-dependent PyPI rebuild with nothing in the
+            // log to explain the difference.
+            tracing::warn!(
+                "Cannot locate the bundled Python to repair from ({e:#}); falling back to a reinstall"
+            );
+            false
+        }
+    }
 }
 
 /// Resolve the interpreter the package reset is allowed to delete from,
@@ -1256,6 +1277,12 @@ pub fn wipe_installed_packages(python_bin: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+/// Hard upper bound on the health probe. Measured at ~0.2s against a real
+/// bundled tree, so this is not a budget — it is the line between "slow" and
+/// "never", on a path the user is waiting behind. Without it a wedged
+/// interpreter means the backend never starts and nothing says why.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The config the health probe validates. Any valid config does the job; it
 /// only has to make ESPHome load its component tree.
 const PROBE_CONFIG: &str = "esphome:\n  name: healthprobe\nesp32:\n  board: esp32dev\n";
@@ -1330,8 +1357,22 @@ pub fn may_reset_packages(data_dir: &Path) -> bool {
 }
 
 /// Forget any recorded repair attempts, once the tree is proven healthy.
+///
+/// A missing marker is the normal case and says nothing. Any other failure does:
+/// it pins the counter at [`MAX_PACKAGE_RESETS`] forever, so a later and
+/// perfectly fixable breakage is never repaired and the log only ever claims the
+/// budget is spent. That is worth a line, for the same reason [`bump_counter`]
+/// reports its own write failures rather than swallowing them.
 pub fn clear_package_reset_count(data_dir: &Path) {
-    let _ = std::fs::remove_file(package_reset_marker(data_dir));
+    let marker = package_reset_marker(data_dir);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            "Could not clear the repair counter at {marker:?} ({e}); a future repair may be \
+             refused as budget-spent"
+        ),
+    }
 }
 
 /// Whether `python_bin` is a Python tree this app manages, as opposed to the
@@ -1378,7 +1419,7 @@ pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
         // `-I` matches the other maintenance probes: it keeps user site-packages
         // and PYTHONPATH off sys.path, so the probe can only ever report on the
         // managed tree.
-        let output = run_python_capture(
+        let output = run_python_capture_bounded(
             python_bin,
             [
                 OsStr::new("-I"),
@@ -1387,6 +1428,7 @@ pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
                 OsStr::new("config"),
                 config.as_os_str(),
             ],
+            PROBE_TIMEOUT,
         )
         .context("Failed to run esphome config probe")?;
 
@@ -1508,12 +1550,81 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Spawn the given Python interpreter with `args` and capture its output,
+/// killing it if it outlives `timeout`.
+///
+/// The unbounded [`run_python_capture`] is right for callers who are already
+/// waiting on something else. It is wrong on the launch path: a child that never
+/// exits there means the backend never starts and the tray never says why. This
+/// module already draws that line for `pip install` — "bounding it prevents a
+/// stalled network from hanging app startup indefinitely" — and the same
+/// reasoning applies to anything else we make a user wait behind.
+fn run_python_capture_bounded<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::time::Instant;
+
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(args);
+    isolate_python_command(&mut cmd);
+    configure_no_window_command(&mut cmd);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+
+    // Drain both pipes on their own threads. A child that fills a pipe buffer
+    // blocks on `write` until someone reads, which would outlast the deadline
+    // and defeat the point of having one.
+    fn drain(
+        handle: Option<impl Read + Send + 'static>,
+    ) -> Option<std::thread::JoinHandle<Vec<u8>>> {
+        handle.map(|mut h| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = h.read_to_end(&mut buf);
+                buf
+            })
+        })
+    }
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+    let collect = |reader: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        reader.and_then(|t| t.join().ok()).unwrap_or_default()
+    };
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(std::process::Output {
+                status,
+                stdout: collect(stdout_reader),
+                stderr: collect(stderr_reader),
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("timed out after {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Spawn the given Python interpreter with `args`, suppress the console
 /// window on Windows, isolate it from user site-packages (see
 /// [`isolate_python_command`]), and capture its output. It adds no *flags* of
 /// its own (callers pass exactly the flags they need, `-I` included or not),
 /// and callers keep their own policy for exit status, logging, and
 /// stdout/stderr interpretation.
+///
+/// Unbounded; see [`run_python_capture_bounded`] for callers on the launch path.
 pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
@@ -3833,6 +3944,76 @@ mod tests {
         // `pip-26.1.2.dist-info` share the key `pip`, which is the point — it is
         // what lets pip's metadata survive a version bump.
         assert_eq!(manifest.keep.len(), 3);
+    }
+
+    #[test]
+    fn parse_base_manifest_rejects_a_sweep_dir_with_nothing_kept() {
+        // Checking the keep set only globally would accept this: `bin` names
+        // entries, so the manifest looks populated, while site-packages is swept
+        // clean — taking the interpreter's own pip with it.
+        let err = parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep bin/python3\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(TEST_PURELIB), "{err}");
+
+        // Both covered is fine.
+        assert!(parse_base_manifest(&fake_manifest()).is_ok());
+    }
+
+    #[test]
+    fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
+        // The probe runs in front of daemon.start(); an unbounded child there
+        // means the backend never starts and nothing says why.
+        let Some(python) = system_python_for_test() else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let err = run_python_capture_bounded(
+            &python,
+            ["-c", "import time; time.sleep(600)"],
+            std::time::Duration::from_millis(300),
+        )
+        .expect_err("a sleeping child must hit the deadline");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the deadline did not fire promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn run_python_capture_bounded_returns_output_within_the_deadline() {
+        let Some(python) = system_python_for_test() else {
+            return;
+        };
+        let out = run_python_capture_bounded(
+            &python,
+            ["-c", "print('hi')"],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("a trivial script must not time out");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
+    }
+
+    /// A Python to exercise the process plumbing with, or `None` when the host
+    /// has none — the bounded-capture tests are about the plumbing, not about
+    /// the bundled interpreter, so any Python does.
+    fn system_python_for_test() -> Option<PathBuf> {
+        for name in ["python3", "python"] {
+            if std::process::Command::new(name)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(PathBuf::from(name));
+            }
+        }
+        None
     }
 
     #[test]

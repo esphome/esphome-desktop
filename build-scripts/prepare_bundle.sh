@@ -496,10 +496,35 @@ write_base_manifest() {
     echo ""
     echo "=== Recording base packages (${platform}) ==="
 
-    "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" \
-        > "$python_dir/$BASE_MANIFEST"
+    local manifest="$python_dir/$BASE_MANIFEST"
 
-    echo "Recorded $(grep -c '^keep ' "$python_dir/$BASE_MANIFEST") base entries"
+    # Generate to a temp file and promote only once it checks out, so a failed
+    # run cannot leave a half-written manifest in the tree for the reset to act
+    # on. The generator's own asserts already fail the build; `set -e` sees them
+    # because this is a plain command, not a substitution.
+    "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" \
+        > "${manifest}.partial"
+
+    # `grep -c` exits 1 on zero matches, but a substitution inside `echo` throws
+    # that status away and `set -e` never sees it — so a keep-less manifest would
+    # print "Recorded 0 base entries" and ship, and the failure would surface as
+    # a refused repair on a user's machine months later. Check the count as its
+    # own command, where a bad manifest fails the build that produced it.
+    local keeps
+    keeps=$(grep -c '^keep ' "${manifest}.partial") || keeps=0
+    if [[ "$keeps" -eq 0 ]]; then
+        echo "ERROR: base manifest names nothing to keep" >&2
+        rm -f "${manifest}.partial"
+        exit 1
+    fi
+    if ! grep -q '/pip$' "${manifest}.partial"; then
+        echo "ERROR: base manifest does not name pip; a reset would delete it" >&2
+        rm -f "${manifest}.partial"
+        exit 1
+    fi
+
+    mv -f "${manifest}.partial" "$manifest"
+    echo "Recorded ${keeps} base entries"
 }
 
 # Install ESPHome + ESPHome Device Builder into the standalone Python and

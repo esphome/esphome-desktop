@@ -11,7 +11,9 @@ src-tauri/src/platform/mod.rs, which has its own tests pinning the same grammar.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sysconfig
 import venv
 from pathlib import Path
 
@@ -143,3 +145,48 @@ def test_rejects_a_root_that_is_not_the_running_tree(tmp_path: Path) -> None:
 
 def test_usage_error_without_a_root() -> None:
     assert maint.main([]) == 2
+
+
+def running_tree_root() -> Path:
+    """The root of the interpreter running the tests.
+
+    `build_manifest` reads the *running* interpreter's sysconfig, so it can only
+    be called in-process against that interpreter's own tree — handing it the
+    venv's root trips the "outside the Python tree" guard instead of whatever the
+    test meant to exercise. Derived as the common ancestor of the two paths it
+    records, rather than `sys.prefix`, which symlinks can put somewhere else.
+    """
+    purelib = Path(sysconfig.get_path("purelib")).resolve()
+    scripts = Path(sysconfig.get_path("scripts")).resolve()
+    return Path(os.path.commonpath([purelib, scripts]))
+
+
+def test_rejects_a_swept_path_that_is_not_a_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A swept path that is not a directory would be recorded with nothing to keep
+    # inside it, and the reset would then clean it out entirely -- which for
+    # site-packages means deleting pip, the one thing no repair recovers from.
+    monkeypatch.setattr(maint.Path, "is_dir", lambda self: False)
+    with pytest.raises(SystemExit, match="not a directory"):
+        maint.build_manifest(running_tree_root())
+
+
+def test_refuses_a_manifest_that_does_not_name_pip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The repair reinstalls with pip, so a manifest that fails to spare it is
+    # worse than useless. Fail the build that produced it, rather than the user's
+    # repair months later.
+    root = running_tree_root()
+    if "keep " not in maint.build_manifest(root):
+        pytest.skip("the running interpreter records no packages to keep")
+
+    real_iterdir = maint.Path.iterdir
+    monkeypatch.setattr(
+        maint.Path,
+        "iterdir",
+        lambda self: (p for p in real_iterdir(self) if p.name != "pip"),
+    )
+    with pytest.raises(SystemExit, match="pip"):
+        maint.build_manifest(root)
