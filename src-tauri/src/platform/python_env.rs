@@ -553,12 +553,16 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-// Every test here exercises the non-Windows copy/refresh path or needs a unix
-// stub interpreter, so the whole module is gated off Windows; ungated, its
-// imports alone would trip -D unused-imports there.
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(test)]
 mod tests {
+    // Every test here exercises the non-Windows copy/refresh path or needs a
+    // unix stub interpreter, so on Windows this module is empty and ungated
+    // imports would trip -D unused-imports. The imports carry the gate rather
+    // than the module, so the file size cap still recognizes the block as
+    // tests and clippy sees no inner/outer attribute mix.
+    #[cfg(not(target_os = "windows"))]
     use super::*;
+    #[cfg(not(target_os = "windows"))]
     use crate::util::unique_temp_dir;
 
     #[cfg(unix)]
