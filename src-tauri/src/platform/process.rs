@@ -209,8 +209,11 @@ pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &s
     // The builder isolates the interpreter; pip needs its own env off too, and
     // every edit is an idempotent `env`/`env_remove`, so layering is a no-op.
     isolate_pip_command(&mut cmd);
-    // stderr only: pip's diagnostics go there, and nothing reads its stdout —
-    // which also keeps its resolver output out of the capture buffer entirely.
+    // Both streams: pip logs a resolution failure's headline at CRITICAL
+    // (stderr) but the block explaining WHICH requirements conflict at INFO
+    // (stdout). This is a GUI process, so inherited stdout goes nowhere, and
+    // stderr alone reports the symptom with none of the cause (#339).
+    cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
     let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
@@ -220,7 +223,10 @@ pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &s
             anyhow::bail!(
                 "pip install {} failed: {}",
                 spec,
-                stderr_tail(&output.stderr)
+                tail_for_log(&crate::update::pip_failure_report(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &String::from_utf8_lossy(&output.stderr),
+                ))
             )
         }
         BoundedRun::TimedOut { stderr } => anyhow::bail!(
@@ -1310,4 +1316,39 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     const TEST_PYTHON: &str = "python";
+
+    /// The failure report carries pip's stdout diagnostic through the real
+    /// pipe-and-drain path, not just the pure `pip_failure_report` function: a
+    /// stub pip prints the resolution story the way the real one splits it
+    /// (headline on stderr, "The conflict is caused by:" block on stdout) and
+    /// exits 1. Losing stdout again would reproduce #339, an error holding the
+    /// symptom and none of the cause.
+    #[cfg(unix)]
+    #[test]
+    fn pip_install_blocking_failure_carries_the_stdout_diagnostic() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::util::unique_temp_dir("pip-blocking-diagnostic");
+        std::fs::create_dir_all(&base).unwrap();
+        let bin = base.join("python3");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             echo 'Collecting esphome==2026.7.0'\n\
+             echo 'The conflict is caused by:'\n\
+             echo '    esphome 2026.7.0 depends on some-dep>=2'\n\
+             echo 'ERROR: ResolutionImpossible' >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = pip_install_blocking(&bin, "esphome", "2026.7.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ERROR: ResolutionImpossible"), "{msg}");
+        assert!(msg.contains("The conflict is caused by:"), "{msg}");
+        assert!(msg.contains("some-dep>=2"), "{msg}");
+        // The progress noise ahead of the marker must not reach the log.
+        assert!(!msg.contains("Collecting"), "{msg}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
