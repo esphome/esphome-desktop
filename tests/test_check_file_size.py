@@ -102,6 +102,64 @@ def test_nested_test_module_is_not_the_marker() -> None:
     assert check_file_size.code_line_count(source) == 7
 
 
+def test_code_after_a_test_module_still_counts() -> None:
+    """A mid-file test module must not exempt the rest of the file.
+
+    Truncating at the first test module instead of skipping over it scores
+    this at 1, so a 5000-line file would pass the cap. Grouping tests beside
+    the code they cover rather than at the bottom is ordinary, so this is a
+    correctness bug before it is ever a way to game the cap.
+    """
+    source = (
+        "fn a() {}\n"
+        "#[cfg(test)]\n"
+        "mod a_tests {\n"
+        "    fn t() {}\n"
+        "}\n"
+        "fn b() {}\n"
+        "fn c() {}\n"
+    )
+    assert check_file_size.code_line_count(source) == 3
+
+
+def test_every_test_module_is_skipped_not_just_the_first() -> None:
+    source = (
+        "fn a() {}\n"
+        "#[cfg(test)]\n"
+        "mod a_tests {\n"
+        "    fn t() {}\n"
+        "}\n"
+        "fn b() {}\n"
+        "#[cfg(test)]\n"
+        "mod b_tests {\n"
+        "    fn t() {}\n"
+        "}\n"
+    )
+    assert check_file_size.code_line_count(source) == 2
+
+
+def test_a_mid_file_test_module_cannot_hide_an_over_cap_file(tmp_path: Path) -> None:
+    """The end-to-end form of the bug: the cap must still fire."""
+    source = "#[cfg(test)]\nmod early {\n}\n" + "".join(
+        f"// code {n}\n" for n in range(CAP + 1)
+    )
+    write(tmp_path, "a.rs", source)
+    failures = check_file_size.check(tmp_path, ["a.rs"], set())
+    assert len(failures) == 1
+    assert str(CAP + 1) in failures[0]
+
+
+def test_test_module_declared_in_another_file_is_skipped() -> None:
+    """`mod tests;` has no braces to match."""
+    source = "fn a() {}\n#[cfg(test)]\nmod tests;\nfn b() {}\n"
+    assert check_file_size.code_line_count(source) == 2
+
+
+def test_unterminated_test_module_does_not_run_away() -> None:
+    source = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n"
+    assert check_file_size.code_line_count(source) == 1
+
+
 def test_blank_lines_between_attribute_and_mod_are_skipped() -> None:
     source = "fn a() {}\n#[cfg(test)]\n\n\nmod tests {\n}\n"
     assert check_file_size.code_line_count(source) == 1

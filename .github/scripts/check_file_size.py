@@ -50,14 +50,14 @@ EXEMPT: frozenset[str] = frozenset(
 
 
 def code_line_count(source: str) -> int:
-    """Count the lines of `source` above its trailing test module.
+    """Count the lines of `source` that are not inside a test module.
 
-    The test region starts at the first column-0 `#[cfg(test)]` attribute
-    whose next non-blank line declares a `mod`, and runs to end of file. A
-    file with no such marker counts whole.
+    A test module is a column-0 `#[cfg(test)]` attribute whose next non-blank
+    line declares a `mod`; it ends at the next column-0 `}`. Every such block
+    is skipped and everything else counts, *including* code that follows one.
 
-    Both halves of that rule are load-bearing, and the obvious simpler
-    versions are wrong on this tree:
+    Each part of that is load-bearing, and the simpler versions are all wrong
+    on this tree:
 
       * `mod`, not just the attribute. `i18n/mod.rs` and `util/mod.rs` gate a
         *function* on `#[cfg(test)]` partway up the file; keying on the
@@ -65,28 +65,45 @@ def code_line_count(source: str) -> int:
       * Column 0. `platform/mod.rs` nests `#[cfg(test)] mod tests` blocks
         inside its per-OS `mod macos` / `mod windows` blocks; keying on any
         `mod tests` scores it as 1722.
+      * Skip the block, do not stop at it. Truncating at the first test module
+        means one placed mid-file silently exempts the whole rest of the file:
+        a 5000-line file scores 1 and passes. That is not hypothetical
+        gaming — grouping a test module beside the code it covers, rather than
+        at the bottom, is a normal thing to do.
 
-    Nested test modules therefore count as code, which overcounts
-    platform/mod.rs by the ~560 lines of its two inner test modules. That is
-    the safe direction: the rule can never undercount, so tests cannot be
-    nested to sneak a large file under the cap.
+    Finding the end of a block by the next column-0 `}` leans on rustfmt
+    putting the closing brace of a top-level item at column 0, which holds
+    because `cargo fmt --check` is a blocking gate here (CONTRIBUTING.md). It
+    is a line-based heuristic, not a Rust parser, which is proportionate for a
+    navigability guardrail.
 
-    This is a line-based heuristic, not a Rust parser, which is proportionate
-    for a navigability guardrail; brace matching would add failure modes (raw
-    strings, braces in comments) for accuracy the cap does not need.
+    Nested (indented) test modules are not matched and so count as code, which
+    overcounts platform/mod.rs by the ~560 lines of its two inner test
+    modules. That is the safe direction: it can only ever report a file as
+    larger than it is, never smaller.
     """
     lines = source.splitlines()
-    for index, line in enumerate(lines):
+    total = 0
+    index = 0
+    while index < len(lines):
         # rstrip only, so a leading space disqualifies a nested attribute.
-        if line.rstrip() != "#[cfg(test)]":
-            continue
-        for following in lines[index + 1 :]:
-            if not following.strip():
+        if lines[index].rstrip() == "#[cfg(test)]":
+            declaration = index + 1
+            while declaration < len(lines) and not lines[declaration].strip():
+                declaration += 1
+            if declaration < len(lines) and lines[declaration].startswith("mod "):
+                if lines[declaration].rstrip().endswith(";"):
+                    # `#[cfg(test)] mod tests;` — the body is another file.
+                    index = declaration + 1
+                    continue
+                end = declaration + 1
+                while end < len(lines) and lines[end].rstrip() != "}":
+                    end += 1
+                index = end + 1
                 continue
-            if following.startswith("mod "):
-                return index
-            break  # attribute on something else; keep looking.
-    return len(lines)
+        total += 1
+        index += 1
+    return total
 
 
 def tracked_rust_files(root: Path) -> list[str]:
