@@ -931,40 +931,71 @@ fn run_bounded(
     use std::thread::JoinHandle;
     use std::time::Instant;
 
-    fn drain<R: Read + Send + 'static>(handle: Option<R>) -> Option<JoinHandle<Vec<u8>>> {
+    fn drain<R: Read + Send + 'static>(
+        what: &'static str,
+        handle: Option<R>,
+    ) -> Option<JoinHandle<Vec<u8>>> {
         handle.map(|mut h| {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
-                let _ = h.read_to_end(&mut buf);
+                // Keep whatever arrived before the failure, and say the read
+                // broke. Silently returning a short buffer would surface as
+                // "pip install failed: " with nothing after it, which reads as
+                // a child that printed nothing rather than output we lost.
+                if let Err(e) = h.read_to_end(&mut buf) {
+                    tracing::warn!("Lost part of a child's {what}: {e}");
+                }
                 buf
             })
         })
     }
-    fn collect(reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
-        reader.and_then(|t| t.join().ok()).unwrap_or_default()
+    fn collect(what: &str, reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+        match reader.map(JoinHandle::join) {
+            Some(Ok(buf)) => buf,
+            // A panicked reader yields no bytes, which is indistinguishable from
+            // a quiet child unless we say so.
+            Some(Err(_)) => {
+                tracing::warn!("The reader for a child's {what} panicked; treating it as empty");
+                Vec::new()
+            }
+            None => Vec::new(),
+        }
     }
 
     let mut child = cmd.spawn()?;
-    let stdout_reader = drain(child.stdout.take());
-    let stderr_reader = drain(child.stderr.take());
+    let stdout_reader = drain("stdout", child.stdout.take());
+    let stderr_reader = drain("stderr", child.stderr.take());
 
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(BoundedRun::Exited(std::process::Output {
-                status,
-                stdout: collect(stdout_reader),
-                stderr: collect(stderr_reader),
-            }));
+        // Any early exit from here must still reap the child: a `?` that left it
+        // running would leak the very process this function exists to bound.
+        let polled = child.try_wait();
+        match polled {
+            Ok(Some(status)) => {
+                return Ok(BoundedRun::Exited(std::process::Output {
+                    status,
+                    stdout: collect("stdout", stdout_reader),
+                    stderr: collect("stderr", stderr_reader),
+                }))
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = collect("stdout", stdout_reader);
+                let _ = collect("stderr", stderr_reader);
+                return Err(e);
+            }
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             // Join the stdout reader before returning so the thread cannot
             // outlive the call, even though its bytes go nowhere.
-            let _ = collect(stdout_reader);
+            let _ = collect("stdout", stdout_reader);
             return Ok(BoundedRun::TimedOut {
-                stderr: collect(stderr_reader),
+                stderr: collect("stderr", stderr_reader),
             });
         }
         std::thread::sleep(CHILD_POLL_INTERVAL);

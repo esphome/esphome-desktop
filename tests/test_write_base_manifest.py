@@ -105,10 +105,27 @@ def test_sweeps_site_packages_and_the_scripts_dir(
 ) -> None:
     # Both must be swept, or pip-installed entry points (`esphome`, `esptool`)
     # survive a reset as orphans.
+    #
+    # Deliberately not pinning a count: `purelib` and `platlib` are one directory
+    # on the layout we ship and two on a layout that splits them, and this test
+    # should not be the thing that decides which. Pin the intent — every swept dir
+    # named once, site-packages and the scripts dir both covered.
     sweep, _ = manifest
-    assert len(sweep) == 2, sweep
+    assert len(sweep) == len(set(sweep)), f"a directory swept twice: {sweep}"
     assert any(s.endswith("site-packages") for s in sweep), sweep
     assert any(s.rsplit("/", 1)[-1] in {"bin", "Scripts"} for s in sweep), sweep
+
+
+def test_site_packages_is_swept_once_even_though_two_keys_name_it() -> None:
+    # `purelib` and `platlib` resolve to the same directory on the layout we ship.
+    # Asking for both is what keeps the reset correct if that ever stops being
+    # true; deduplicating is what stops it sweeping the same dir twice today.
+    assert "purelib" in maint.SWEPT_PATHS
+    assert "platlib" in maint.SWEPT_PATHS
+
+    manifest = maint.build_manifest(running_tree_root())
+    sweep, _ = parse(manifest)
+    assert len(sweep) == len(set(sweep)), f"a directory swept twice: {sweep}"
 
 
 def test_every_path_is_relative_and_posix(

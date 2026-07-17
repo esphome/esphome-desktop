@@ -513,19 +513,36 @@ impl UpdateChecker {
         };
 
         let detail = match probe_esphome(&python_path).await {
-            // The probe could not be run at all. A repair needs this same
-            // interpreter to drive pip, and a broken interpreter is not what
-            // this repairs — leave it to the bundled-Python refresh.
-            Err(e) => {
-                warn!("ESPHome health probe could not run: {e:#}");
-                return;
-            }
             Ok(None) => {
                 debug!("ESPHome health probe passed");
                 platform::clear_repair_count(&data_dir);
                 return;
             }
             Ok(Some(detail)) => detail,
+            // The probe could not run at all, or hung past its deadline: the
+            // interpreter itself is wedged, not just its packages. That is still
+            // a tree that fails every build, so treat it as broken wherever we
+            // can actually do something about it.
+            //
+            // Re-copying the bundle is exactly the fix — it replaces the
+            // interpreter and needs nothing from the broken one. The PyPI reset
+            // is not: it drives pip with this very interpreter, so on Windows
+            // there is nothing to try.
+            //
+            // Deliberately not left to `ensure_user_python`'s own
+            // `interpreter_is_usable` wipe: that only runs when `needs_copy` is
+            // true, so a tree that broke without an app update keeps a matching
+            // marker and is never reached.
+            Err(e) if platform::can_refresh_from_bundle(app_handle) => {
+                format!("the health probe could not run: {e:#}")
+            }
+            Err(e) => {
+                warn!(
+                    "ESPHome health probe could not run and this platform has no bundle to \
+                     restore from, so the repair would need the same broken interpreter: {e:#}"
+                );
+                return;
+            }
         };
 
         if !platform::may_repair_tree(&data_dir) {
