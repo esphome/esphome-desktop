@@ -211,9 +211,12 @@ pub(super) fn refresh_python_tree(
     };
 
     if user_python.exists() {
+        // Name the actual trigger: this branch also runs for a Repair (marker
+        // intact) and for a missing interpreter, and a log that always blames
+        // the marker would misdirect exactly the diagnosis a repair log serves.
         info!(
-            "Removing stale user Python at {:?} (version marker missing or mismatched)",
-            user_python
+            "Removing user Python at {:?} before re-copying the bundle ({:?} refresh; marker match: {})",
+            user_python, reason, marker_matches
         );
         std::fs::remove_dir_all(user_python)
             .context("Failed to remove stale user Python directory")?;
