@@ -18,28 +18,63 @@ use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WI
 /// from hanging app startup indefinitely.
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Maximum length of pip stderr included in a failure error message. pip's
-/// resolver and progress output can run to many kilobytes; the actionable
-/// failure reason is almost always at the tail, so we truncate to the last
-/// N bytes to keep log lines (and downstream UI surfaces) bounded.
-const PIP_STDERR_TAIL_BYTES: usize = 4096;
+/// Maximum length of a child's output included in a failure error message.
+/// pip's resolver and progress output can run to many kilobytes; the
+/// actionable failure reason is almost always at the tail, so we truncate to
+/// the last N bytes to keep log lines (and downstream UI surfaces) bounded.
+const LOG_TAIL_BYTES: usize = 4096;
 
-/// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
-/// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
-/// char boundary so the result is always valid `str`.
+/// Return `s` trimmed and truncated to the last [`LOG_TAIL_BYTES`] bytes,
+/// with a marker line if anything was dropped. Backs up to a UTF-8 char
+/// boundary so the result is always valid `str`.
 pub(super) fn tail_for_log(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
+    if trimmed.len() <= LOG_TAIL_BYTES {
         return trimmed.to_string();
     }
-    let mut start = trimmed.len() - PIP_STDERR_TAIL_BYTES;
+    let mut start = trimmed.len() - LOG_TAIL_BYTES;
     while start < trimmed.len() && !trimmed.is_char_boundary(start) {
         start += 1;
     }
     format!(
-        "...(stderr truncated to last {} bytes)\n{}",
-        PIP_STDERR_TAIL_BYTES,
+        "...(truncated to last {} bytes)\n{}",
+        LOG_TAIL_BYTES,
         &trimmed[start..]
+    )
+}
+
+/// Start of the block in which pip explains a resolution failure.
+const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
+
+/// Build the reported text for a failed pip install from its two streams.
+///
+/// pip splits a resolution failure across both. stderr carries the headline
+/// alone — `ERROR: Cannot install esphome and esphome==2026.7.0 because these
+/// package versions have conflicting dependencies` — because that line is the
+/// only part logged at CRITICAL. The block naming *which* requirements
+/// conflict, and whether one has no distribution for this environment at all,
+/// is logged at INFO and therefore goes to stdout. Reporting stderr alone left
+/// a bug report holding the symptom and none of the cause (#327, #339).
+///
+/// Everything from the marker onwards is that diagnostic, so append that tail
+/// and nothing else: earlier stdout is `Collecting`/`Downloading` progress that
+/// would bury it. A failure pip words differently (a build error, no network)
+/// has no marker and is reported exactly as before.
+fn pip_failure_report(stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim_end();
+    match stdout.find(PIP_CONFLICT_MARKER) {
+        Some(start) => format!("{stderr}\n{}", stdout[start..].trim_end()),
+        None => stderr.to_string(),
+    }
+}
+
+/// [`pip_failure_report`] over a captured pip [`std::process::Output`].
+/// `pub` because the update flows report their pip failures through the same
+/// extraction (see `install_with_record_recovery`).
+pub fn pip_output_report(output: &std::process::Output) -> String {
+    pip_failure_report(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
     )
 }
 
@@ -216,24 +251,20 @@ pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &s
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
     match run_bounded(cmd, PIP_INSTALL_TIMEOUT).context("Failed to run pip install")? {
         BoundedRun::Exited(output) if output.status.success() => Ok(()),
         BoundedRun::Exited(output) => {
             anyhow::bail!(
                 "pip install {} failed: {}",
                 spec,
-                tail_for_log(&crate::update::pip_failure_report(
-                    &String::from_utf8_lossy(&output.stdout),
-                    &String::from_utf8_lossy(&output.stderr),
-                ))
+                tail_for_log(&pip_output_report(&output))
             )
         }
         BoundedRun::TimedOut { stderr } => anyhow::bail!(
             "pip install {} timed out after {:?}; partial stderr: {}",
             spec,
             PIP_INSTALL_TIMEOUT,
-            stderr_tail(&stderr)
+            tail_for_log(&String::from_utf8_lossy(&stderr))
         ),
     }
 }
@@ -1199,7 +1230,7 @@ mod tests {
 
     #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
-        let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
+        let s = "a".repeat(LOG_TAIL_BYTES);
         let out = tail_for_log(&s);
         assert_eq!(out, s, "input exactly at the limit must pass through");
         assert!(!out.contains("truncated"), "no marker at the boundary");
@@ -1207,16 +1238,10 @@ mod tests {
 
     #[test]
     fn tail_for_log_truncates_to_the_tail_with_marker() {
-        let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
+        let s = "x".repeat(LOG_TAIL_BYTES + 904);
         let out = tail_for_log(&s);
-        assert!(
-            out.starts_with("...(stderr truncated"),
-            "marker comes first"
-        );
-        assert!(
-            out.ends_with(&s[s.len() - PIP_STDERR_TAIL_BYTES..]),
-            "keeps tail"
-        );
+        assert!(out.starts_with("...(truncated"), "marker comes first");
+        assert!(out.ends_with(&s[s.len() - LOG_TAIL_BYTES..]), "keeps tail");
     }
 
     #[test]
@@ -1229,10 +1254,7 @@ mod tests {
         let out = tail_for_log(&s);
         assert!(out.contains("truncated"), "long input must be marked");
         let tail = out.split_once('\n').unwrap().1;
-        assert!(
-            tail.len() <= PIP_STDERR_TAIL_BYTES,
-            "tail stays within bound"
-        );
+        assert!(tail.len() <= LOG_TAIL_BYTES, "tail stays within bound");
         assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
     }
 
@@ -1317,38 +1339,68 @@ mod tests {
     #[cfg(target_os = "windows")]
     const TEST_PYTHON: &str = "python";
 
-    /// The failure report carries pip's stdout diagnostic through the real
-    /// pipe-and-drain path, not just the pure `pip_failure_report` function: a
-    /// stub pip prints the resolution story the way the real one splits it
-    /// (headline on stderr, "The conflict is caused by:" block on stdout) and
-    /// exits 1. Losing stdout again would reproduce #339, an error holding the
-    /// symptom and none of the cause.
+    /// pip stdout for the #327 failure: progress noise, then the diagnostic.
+    const CONFLICT_STDOUT: &str = "Collecting esphome==2026.7.0\n  Using cached esphome-2026.7.0-py3-none-any.whl\nINFO: pip is looking at multiple versions of esphome\n\nThe conflict is caused by:\n    The user requested esphome==2026.7.0\n    esphome 2026.7.0 depends on some-dep>=2\n\nAdditionally, some packages in these conflicts have no matching distributions available for your environment:\n    some-dep\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n";
+
+    /// pip stderr for the same failure: the headline, and nothing else.
+    const CONFLICT_STDERR: &str = "ERROR: Cannot install esphome and esphome==2026.7.0 because these package versions have conflicting dependencies.\nERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/\n";
+
+    #[test]
+    fn pip_failure_report_keeps_the_conflict_diagnostic() {
+        // #327: stderr alone says two requirements conflict but never which,
+        // so the report must carry stdout's block — including the line naming
+        // the dependency with no distribution for this environment, which is
+        // the whole reason the pinned install cannot resolve.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(report.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(report.contains("The conflict is caused by:"));
+        assert!(report.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(report.contains("no matching distributions available for your environment"));
+    }
+
+    #[test]
+    fn pip_failure_report_drops_progress_noise_before_the_marker() {
+        // Only the diagnostic tail is wanted; the Collecting/Downloading
+        // chatter ahead of it would bury the cause in the dialog and the log.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(!report.contains("Collecting esphome==2026.7.0"));
+        assert!(!report.contains("Using cached"));
+    }
+
+    #[test]
+    fn pip_failure_report_without_a_marker_is_stderr_alone() {
+        // A failure pip words differently (a build error, no network) has no
+        // marker, and must report exactly what it did before.
+        let report = pip_failure_report(
+            "Collecting esphome==2026.7.0\n",
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0\n",
+        );
+        assert_eq!(
+            report,
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0"
+        );
+    }
+
+    /// The wiring the pure tests above cannot see: both streams are actually
+    /// piped and drained into the report. A stub pip prints the resolution
+    /// story the way the real one splits it (headline on stderr, marker block
+    /// on stdout) and exits 1; un-piping stdout again would reproduce #339,
+    /// an error holding the symptom and none of the cause.
     #[cfg(unix)]
     #[test]
     fn pip_install_blocking_failure_carries_the_stdout_diagnostic() {
-        use std::os::unix::fs::PermissionsExt;
         let base = crate::util::unique_temp_dir("pip-blocking-diagnostic");
-        std::fs::create_dir_all(&base).unwrap();
-        let bin = base.join("python3");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\n\
-             echo 'Collecting esphome==2026.7.0'\n\
-             echo 'The conflict is caused by:'\n\
-             echo '    esphome 2026.7.0 depends on some-dep>=2'\n\
+        let bin = crate::platform::python_env::write_stub_interpreter(
+            &base,
+            "echo 'The conflict is caused by:'\n\
              echo 'ERROR: ResolutionImpossible' >&2\n\
-             exit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+             exit 1",
+        );
 
         let err = pip_install_blocking(&bin, "esphome", "2026.7.0").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("ERROR: ResolutionImpossible"), "{msg}");
         assert!(msg.contains("The conflict is caused by:"), "{msg}");
-        assert!(msg.contains("some-dep>=2"), "{msg}");
-        // The progress noise ahead of the marker must not reach the log.
-        assert!(!msg.contains("Collecting"), "{msg}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
