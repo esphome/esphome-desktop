@@ -52,8 +52,14 @@ enum CommandOutcome {
 /// without a shell command. Skipped for non-bundled dev builds, whose
 /// `target/` path would go stale.
 fn install_cli_command() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            tracing::debug!(
+                "Could not determine current executable; skipping CLI command install: {e}"
+            );
+            return;
+        }
     };
     if app_bundle_path().is_none() {
         tracing::debug!("Not running from an .app bundle; skipping CLI command install");
@@ -129,15 +135,25 @@ fn try_install_command_in(dir: &std::path::Path, script: &str) -> std::io::Resul
             // Dangling link: litter nothing can use; reclaim the name.
             std::fs::remove_file(&path)?;
         }
-        Ok(meta) if meta.is_file() => {
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            if !existing.contains(CLI_MARKER) {
+        Ok(meta) if meta.is_file() => match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                if !existing.contains(CLI_MARKER) {
+                    return Ok(CommandOutcome::Foreign);
+                }
+                if existing == script {
+                    return Ok(CommandOutcome::AlreadyInstalled);
+                }
+            }
+            // Not valid UTF-8: it can't be our ASCII wrapper, so it is
+            // genuinely someone else's file; leave it alone.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 return Ok(CommandOutcome::Foreign);
             }
-            if existing == script {
-                return Ok(CommandOutcome::AlreadyInstalled);
-            }
-        }
+            // A transient failure (permissions, EIO) on a file that may
+            // well be ours: propagate so the caller logs it and tries the
+            // next candidate dir, instead of misreporting it as foreign.
+            Err(e) => return Err(e),
+        },
         Ok(_) => return Ok(CommandOutcome::Foreign),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
@@ -335,6 +351,54 @@ mod tests {
             fs::read_to_string(bin.join(CLI_NAME)).expect("read"),
             "someone else's binary"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_utf8_file_is_left_alone() {
+        // A real foreign binary is not valid UTF-8; it still can't be our
+        // ASCII wrapper, so it must be treated as foreign and untouched.
+        let dir = unique_temp_dir("non_utf8");
+        let bin = bin_dir(&dir);
+        let bytes = [0xffu8, 0xfe, 0x00];
+        fs::write(bin.join(CLI_NAME), bytes).expect("foreign binary");
+        let script = wrapper_script(Path::new(
+            "/Applications/A.app/Contents/MacOS/esphome-desktop",
+        ));
+
+        assert!(matches!(
+            try_install_command_in(&bin, &script),
+            Ok(CommandOutcome::Foreign)
+        ));
+        assert_eq!(fs::read(bin.join(CLI_NAME)).expect("read"), bytes);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unreadable_wrapper_is_propagated_not_foreign() {
+        // A transient read failure on a same-named file must propagate as an
+        // error, not collapse to Foreign (which would abandon the remaining
+        // candidate dirs on a misleading "not this app's wrapper" log).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = unique_temp_dir("unreadable");
+        let bin = bin_dir(&dir);
+        let path = bin.join(CLI_NAME);
+        fs::write(&path, "anything").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let script = wrapper_script(Path::new(
+            "/Applications/A.app/Contents/MacOS/esphome-desktop",
+        ));
+
+        // Root bypasses the mode bits, so the unreadable scenario can't be
+        // exercised there; skip rather than fail.
+        if fs::read_to_string(&path).is_ok() {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        assert!(try_install_command_in(&bin, &script).is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }
