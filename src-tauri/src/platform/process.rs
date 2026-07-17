@@ -558,7 +558,7 @@ pub fn assign_to_kill_on_close_job(process: std::os::windows::io::RawHandle) -> 
     match unsafe { AssignProcessToJobObject(job, HANDLE(process)) } {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!("Failed to assign backend to kill-on-close job object: {e}");
+            tracing::warn!("Failed to assign child process to the kill-on-close job object: {e}");
             false
         }
     }
@@ -605,7 +605,7 @@ fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
             let job = match CreateJobObjectW(None, PCWSTR::null()) {
                 Ok(job) => job,
                 Err(e) => {
-                    tracing::warn!("Failed to create job object for the backend: {e}");
+                    tracing::warn!("Failed to create the kill-on-close job object: {e}");
                     return None;
                 }
             };
@@ -619,7 +619,7 @@ fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
                 &info as *const _ as *const std::ffi::c_void,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             ) {
-                tracing::warn!("Failed to set kill-on-close limit on the backend job object: {e}");
+                tracing::warn!("Failed to set the kill-on-close limit on the job object: {e}");
                 let _ = CloseHandle(job);
                 return None;
             }
