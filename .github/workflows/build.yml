@@ -32,6 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # determine_jobs.py reads the PR's changed files via `gh pr diff`; without
+      # pull-requests:read the token is denied, the script fails safe to
+      # run-everything, and the docs-only skip silently never happens.
+      pull-requests: read
     outputs:
       build: ${{ steps.determine.outputs.build }}
     steps:
