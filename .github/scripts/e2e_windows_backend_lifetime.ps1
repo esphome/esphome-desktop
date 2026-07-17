@@ -94,7 +94,15 @@ Write-Host "Launching $($exe.Name)"
 # or throw — leaves nothing of ours running. A leaked GUI app still holding the
 # install directory open is the exact failure mode this script exists to detect,
 # so it must not be one this script can cause.
-$app = Start-Process -FilePath $exe.FullName -PassThru
+# `--no-open-dashboard` is doing two jobs. It keeps a browser from opening on the
+# runner, and — load-bearing — it stops `main.rs` treating this as a bare
+# terminal launch. `Start-Process` hands the app our console, so
+# `attach_parent_console()` succeeds and `is_bare_terminal_launch()` sees
+# from_terminal + no args, prints `--help` and exits 0 without ever starting the
+# backend. That is correct behaviour for someone typing `esphome-desktop` at a
+# prompt, and it is exactly what the first run of this script hit. Any explicit
+# flag falls through to a normal launch, which is what a double-click gets.
+$app = Start-Process -FilePath $exe.FullName -ArgumentList '--no-open-dashboard' -PassThru
 try {
     # The backend is Python importing ESPHome, which is not fast, and this is a
     # cold first run on a CI runner. Fail with diagnostics rather than hang.
