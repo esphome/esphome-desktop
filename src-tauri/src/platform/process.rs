@@ -3,8 +3,7 @@
 //! suppression, and the Windows job-object and console-signal plumbing.
 
 #[cfg(not(target_os = "windows"))]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::Path;
 

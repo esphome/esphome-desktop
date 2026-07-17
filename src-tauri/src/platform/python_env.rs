@@ -553,7 +553,10 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// Every test here exercises the non-Windows copy/refresh path or needs a unix
+// stub interpreter, so the whole module is gated off Windows; ungated, its
+// imports alone would trip -D unused-imports there.
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
