@@ -8,9 +8,13 @@
 # backend to come up, force-kill the desktop the way the uninstaller and Task
 # Manager do, and require the backend to be gone.
 #
-# Without the job object this fails: the backend is reparented and keeps holding
-# `python.exe` (and `git.exe`, and the rest of the compile subtree) open, which
-# is exactly the stranded install directory users reported.
+# This has been observed to fail without the job object, rather than assumed to.
+# PR #332 disabled `daemon::start_inner`'s call to `assign_to_kill_on_close_job`
+# and changed nothing else; this script then reported "the backend outlived the
+# force-killed desktop", with a dashboard still serving on 127.0.0.1:6052 after
+# its desktop was gone — the stranded install directory users reported. If you
+# are changing this script, that pairing is what makes it worth running: a check
+# that would pass either way is worse than no check.
 #
 # Diagnostics are deliberate rather than tidy. This is the one test nobody can
 # reproduce without a Windows machine, so when it fails it has to say why on its
@@ -181,6 +185,33 @@ try {
 
     Write-Host "Backend died with the desktop after $([int]$watch.Elapsed.TotalMilliseconds)ms"
     Write-Host 'PASS: the backend cannot outlive the desktop process'
+
+    # --- and the symptom, not just the mechanism --------------------------
+    # Nobody reported "a process lingers". They reported an install directory
+    # that could not be removed, because the orphan held `python.exe` and
+    # `git.exe` open. That is the assertion that matches the bug report, and it
+    # is only meaningful sitting on top of the one above.
+    $uninstaller = Join-Path $InstallDir 'uninstall.exe'
+    if (-not (Test-Path $uninstaller)) { throw "no uninstaller at $uninstaller" }
+    Write-Host 'Uninstalling to confirm nothing is left holding the tree open'
+
+    # `-Wait` is not enough on its own and the reason matters: a bare `/S`
+    # uninstall copies itself to $TEMP and re-execs, so the process started here
+    # returns immediately while the copy does the work. Poll for the tree.
+    # (Passing `_?=` keeps it in place and makes `-Wait` meaningful, but NSIS
+    # then deliberately leaves `uninstall.exe` behind and the directory never
+    # goes away — that same in-place mode is what made the reverted installer
+    # hooks kill themselves, see #328.)
+    Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
+    $unwatch = [Diagnostics.Stopwatch]::StartNew()
+    while ($unwatch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $InstallDir)) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (Test-Path $InstallDir) {
+        Show-Diagnostics 'the install tree survived the uninstall'
+        throw "$InstallDir still exists after uninstalling; something is holding it open"
+    }
+    Write-Host "PASS: the install directory was removed after $([int]$unwatch.Elapsed.TotalSeconds)s"
 }
 finally {
     if (-not $app.HasExited) {
