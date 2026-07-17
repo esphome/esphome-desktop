@@ -13,6 +13,7 @@ mod health;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod pip;
 mod process;
 mod python_env;
 
@@ -20,11 +21,12 @@ pub use health::{
     clear_repair_count, esphome_config_probe, is_managed_python_tree, may_repair_tree,
     repair_budget_left,
 };
+pub use pip::{pip_command, run_pip};
 #[cfg(target_os = "windows")]
 pub use process::{assign_to_kill_on_close_job, send_ctrl_break};
 pub use process::{
-    configure_daemon_tokio_command, isolate_python_tokio_command, pip_command, run_pip,
-    run_python_capture, run_python_capture_stdout,
+    configure_daemon_tokio_command, isolate_python_tokio_command, run_python_capture,
+    run_python_capture_stdout,
 };
 pub use python_env::{ensure_user_python, interpreter_is_usable, RefreshReason};
 
@@ -967,13 +969,13 @@ mod tests {
     }
 
     /// [`e2e_run`] with the pip env isolation production pip calls layer on
-    /// top ([`process::isolate_pip_command`]). The interpreter isolation alone
+    /// top ([`pip::isolate_pip_command`]). The interpreter isolation alone
     /// is not enough for a pip invocation: an ambient `PIP_REQUIRE_VIRTUALENV`
     /// would fail the install, and a `PIP_TARGET`/`PIP_PREFIX` would aim it
     /// outside the tree under test.
     fn e2e_pip(python: &Path, args: &[&str]) -> (bool, String) {
         let mut cmd = process::python_command(python, args);
-        process::isolate_pip_command(&mut cmd);
+        pip::isolate_pip_command(&mut cmd);
         let output = cmd
             .output()
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
