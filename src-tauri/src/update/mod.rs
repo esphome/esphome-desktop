@@ -1131,7 +1131,9 @@ async fn run_device_builder_install(
     let args = device_builder_install_args(backend, version);
     let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
-    cmd.output().await.context("Failed to run pip install")
+    platform::run_pip(cmd)
+        .await
+        .context("Failed to run pip install")
 }
 
 /// URL of the ESPHome dev-branch source archive installed on the Dev channel.
@@ -1145,7 +1147,9 @@ const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/de
 async fn run_dev_install(python_path: &std::path::Path) -> Result<std::process::Output> {
     let mut cmd = platform::pip_command(python_path);
     cmd.args(["--force-reinstall", ESPHOME_DEV_ZIP_URL]);
-    cmd.output().await.context("Failed to run pip install")
+    platform::run_pip(cmd)
+        .await
+        .context("Failed to run pip install")
 }
 
 /// Run `pip install` for a pinned stable/beta ESPHome release (`esphome==X`).
@@ -1160,7 +1164,9 @@ async fn run_esphome_install(
 ) -> Result<std::process::Output> {
     let mut cmd = platform::pip_command(python_path);
     cmd.arg(format!("esphome=={version}"));
-    cmd.output().await.context("Failed to run pip install")
+    platform::run_pip(cmd)
+        .await
+        .context("Failed to run pip install")
 }
 
 /// What the user can actually do about a tree we could not repair.

@@ -453,6 +453,41 @@ pub fn pip_command(python: &Path) -> tokio::process::Command {
     cmd
 }
 
+/// Run a prepared bundled-interpreter command (e.g. from [`pip_command`]) to
+/// completion, capturing its output and — on Windows — tying the child to the
+/// desktop's lifetime via the kill-on-close job. Without this, an install-dir
+/// `python.exe` spawned during an update or channel switch is orphaned if the
+/// desktop is force-killed mid-run, holding the install tree open and leaving
+/// `site-packages` half-written (issue #333, the #320 failure by a route #320
+/// does not cover).
+///
+/// Replicates [`tokio::process::Command::output`]'s capture (stdin closed,
+/// stdout/stderr piped) rather than calling it, because the child must be
+/// spawned before it can be assigned to the job. Callers parse both streams, so
+/// they must not be inherited.
+///
+/// Best-effort assignment, exactly like the backend spawn in
+/// [`crate::daemon`]: the graceful `CTRL_BREAK`/`TerminateProcess` paths still
+/// apply, so a failed assignment warns and carries on rather than failing the
+/// install. Job membership is a per-child policy, which is why this is a named
+/// seam the pip sites opt into rather than something every spawn inherits.
+pub async fn run_pip(mut cmd: tokio::process::Command) -> std::io::Result<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let child = cmd.spawn()?;
+
+    #[cfg(windows)]
+    if !child.raw_handle().is_some_and(assign_to_kill_on_close_job) {
+        tracing::warn!(
+            "pip is not covered by the kill-on-close job; it may outlive the \
+             desktop if this process is killed without running its shutdown path"
+        );
+    }
+
+    child.wait_with_output().await
+}
+
 /// Configure the daemon child's creation flags on Windows: no console window
 /// AND a new process group. The new process group makes the child its own
 /// group leader (pgid == pid) so we can later deliver a graceful
@@ -765,6 +800,36 @@ mod tests {
         assert!(set.contains(&("PYTHONNOUSERSITE".to_string(), "1".to_string())));
         assert!(set.contains(&("PIP_USER".to_string(), "0".to_string())));
         assert!(removed.contains(&"PYTHONPATH".to_string()));
+    }
+
+    /// run_pip must reproduce `Command::output`'s capture. `pip_command` sets no
+    /// stdio, so a bare `spawn().wait_with_output()` would inherit the streams
+    /// and return them empty, silently blanking the output the update callers
+    /// parse for RECORD recovery and error tails. A plain shell command (not
+    /// `pip_command`) exercises the wrapper's spawn/capture directly.
+    #[tokio::test]
+    async fn run_pip_captures_stdout_and_stderr() {
+        let (program, args) = if cfg!(windows) {
+            ("cmd", ["/c", "echo out& echo err 1>&2& exit 1"])
+        } else {
+            ("sh", ["-c", "echo out; echo err 1>&2; exit 1"])
+        };
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+
+        let output = run_pip(cmd).await.expect("run_pip should spawn and wait");
+        assert!(
+            !output.status.success(),
+            "the non-zero exit must be reported"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("out"),
+            "stdout was not captured"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("err"),
+            "stderr was not captured"
+        );
     }
 
     /// pip isolation is a superset of Python isolation: a pip install that
