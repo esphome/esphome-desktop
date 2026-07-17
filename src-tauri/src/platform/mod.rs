@@ -230,7 +230,12 @@ const GIT_CA_BUNDLE_RELATIVE: [&[&str]; 2] = [
     &["mingw64", "ssl", "certs", "ca-bundle.crt"],
 ];
 
-/// First of MinGit's CA-bundle locations that exists under `git_dir`.
+/// First of MinGit's CA-bundle locations that exists as a regular file under
+/// `git_dir`.
+///
+/// `is_file`, not `exists`: the result is pinned into `GIT_SSL_CAINFO`, and a
+/// directory (or other non-file) at that path would be a value MinGit's OpenSSL
+/// backend can't load, so it must not be treated as a usable bundle.
 ///
 /// Split out from [`bundled_git_ca_bundle`] so the candidate order can be
 /// unit-tested without a Tauri `AppHandle` or a real bundle on disk, the same
@@ -241,7 +246,7 @@ fn first_existing_ca_bundle(git_dir: &Path) -> Option<PathBuf> {
     GIT_CA_BUNDLE_RELATIVE
         .iter()
         .map(|components| git_dir.join(components.iter().collect::<PathBuf>()))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| candidate.is_file())
 }
 
 /// The bundled MinGit CA bundle, if present.
@@ -446,20 +451,30 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
         // ca-bundle.crt that no longer exists; MinGit's OpenSSL backend then
         // fails every fetch with "error adding trust anchors from file". The env
         // var overrides every config file, so the bundled git always finds the
-        // bundled bundle. Log-and-continue if it is somehow absent; an ambient
-        // config may still work.
-        match bundled_git_ca_bundle(app_handle)? {
-            Some(ca_bundle) => {
-                std::env::set_var("GIT_SSL_CAINFO", &ca_bundle);
-                info!(
-                    "Pinned GIT_SSL_CAINFO to bundled CA bundle at {:?}",
-                    ca_bundle
-                );
+        // bundled bundle.
+        //
+        // Only set it when it is not already in the environment: the #350
+        // breakage lives in git *config files*, which an unset env var doesn't
+        // come from, so this still fixes it, while an explicit GIT_SSL_CAINFO
+        // from the user or launcher (e.g. a corporate CA) is left untouched.
+        // Log-and-continue if the bundle is somehow absent; an ambient config
+        // may still work.
+        if std::env::var_os("GIT_SSL_CAINFO").is_some() {
+            info!("GIT_SSL_CAINFO already set in the environment; leaving it in place");
+        } else {
+            match bundled_git_ca_bundle(app_handle)? {
+                Some(ca_bundle) => {
+                    std::env::set_var("GIT_SSL_CAINFO", &ca_bundle);
+                    info!(
+                        "Pinned GIT_SSL_CAINFO to bundled CA bundle at {:?}",
+                        ca_bundle
+                    );
+                }
+                None => warn!(
+                    "Bundled MinGit CA bundle not found; HTTPS clones will rely on \
+                     the ambient git SSL configuration"
+                ),
             }
-            None => warn!(
-                "Bundled MinGit CA bundle not found; HTTPS clones will rely on \
-                 the ambient git SSL configuration"
-            ),
         }
     }
 
@@ -755,6 +770,22 @@ mod tests {
         std::fs::create_dir_all(etc.parent().unwrap()).unwrap();
         std::fs::write(&etc, b"").unwrap();
         assert_eq!(first_existing_ca_bundle(&git_dir), Some(etc));
+    }
+
+    #[test]
+    fn first_existing_ca_bundle_ignores_a_directory() {
+        // is_file, not exists: a directory sitting where the bundle would be is
+        // not a value GIT_SSL_CAINFO can load, so it must be skipped, not pinned.
+        let git_dir = unique_temp_dir("ca-bundle-dir");
+        let dir_at_etc = git_dir.join(GIT_CA_BUNDLE_RELATIVE[0].iter().collect::<PathBuf>());
+        std::fs::create_dir_all(&dir_at_etc).unwrap();
+        assert_eq!(first_existing_ca_bundle(&git_dir), None);
+
+        // A real file at the fallback is still picked over the directory.
+        let plain = git_dir.join(GIT_CA_BUNDLE_RELATIVE[1].iter().collect::<PathBuf>());
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        std::fs::write(&plain, b"").unwrap();
+        assert_eq!(first_existing_ca_bundle(&git_dir), Some(plain));
     }
 
     /// On Windows the resource dir is a backslash path (`C:\...\git`) and the
