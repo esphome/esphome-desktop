@@ -152,6 +152,10 @@ def tracked_rust_files(root: Path) -> list[str]:
     so this already covers nested files. (It is `:(glob)` magic that sets
     FNM_PATHNAME and stops that; `src-tauri/src/**/*.rs` would match only the
     14 nested files and miss lib.rs, main.rs and dialog.rs.)
+
+    Raises RuntimeError rather than returning an empty list or a bare
+    traceback, because every way this can go wrong is a way for the gate to
+    pass while measuring nothing.
     """
     try:
         completed = subprocess.run(
@@ -164,12 +168,31 @@ def tracked_rust_files(root: Path) -> list[str]:
     except subprocess.CalledProcessError as error:
         # capture_output hides git's stderr, and CalledProcessError does not
         # include it in its message, so without this a failure here (not a
-        # repo, no git on PATH, bad pathspec) reaches the log as a bare
-        # traceback saying only that the exit status was non-zero.
+        # repo, a bad pathspec) reaches the log as a bare traceback saying
+        # only that the exit status was non-zero.
         raise RuntimeError(
             f"git ls-files failed ({error.returncode}): {error.stderr.strip()}"
         ) from error
-    return sorted(entry for entry in completed.stdout.split("\0") if entry)
+    except OSError as error:
+        # A missing git raises FileNotFoundError from the exec, never
+        # CalledProcessError, so it does not go through the branch above.
+        raise RuntimeError(f"could not run git: {error}") from error
+
+    files = sorted(entry for entry in completed.stdout.split("\0") if entry)
+    if not files:
+        # `git ls-files` exits 0 and prints nothing when a pathspec matches
+        # nothing; only --error-unmatch makes it fail. So if src-tauri/src is
+        # renamed, the gate would scan zero files and pass, which is the exact
+        # thing this check exists to prevent (see lint-test.yml on #325: a
+        # check that is green whether or not it passes reads as coverage while
+        # providing none). Stale EXEMPT entries would mask it today, but EXEMPT
+        # is meant to shrink to nothing.
+        raise RuntimeError(
+            "git ls-files matched no .rs files under src-tauri/src. Either the "
+            "tree moved and this script's pathspec needs updating, or this is "
+            "not the repo root."
+        )
+    return files
 
 
 def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
@@ -179,7 +202,19 @@ def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
     seen: set[str] = set()
 
     for relative in files:
-        count = code_line_count((root / relative).read_text(encoding="utf-8"))
+        try:
+            source = (root / relative).read_text(encoding="utf-8")
+        except FileNotFoundError as error:
+            # git ls-files reads the index, so it lists a file deleted from the
+            # working tree but not staged. CI is a fresh checkout and
+            # pre-commit stashes, so this only reaches someone running the
+            # script by hand in a dirty tree — which is what CONTRIBUTING.md
+            # tells them to do.
+            raise RuntimeError(
+                f"{relative} is tracked but missing from the working tree; "
+                f"`git status` should say why."
+            ) from error
+        count = code_line_count(source)
         if relative in exempt:
             seen.add(relative)
             if count <= CAP:

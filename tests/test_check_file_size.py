@@ -24,6 +24,7 @@ survived a first fix precisely because the regression test for it pinned
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -334,13 +335,50 @@ def test_repo_is_clean() -> None:
 def test_a_git_failure_says_why(tmp_path: Path) -> None:
     """`check=True` + `capture_output` hides git's stderr from the message.
 
-    Without re-raising, a failure here (not a repo, no git on PATH, a bad
-    pathspec) reaches the CI log as a bare traceback saying only that the exit
-    status was non-zero.
+    Without re-raising, a failure here (not a repo, a bad pathspec) reaches
+    the CI log as a bare traceback saying only that the exit status was
+    non-zero.
+
+    Asserts the prefix and exit code this script controls, plus that *some*
+    stderr came through — not git's own wording, which gettext localizes, so
+    pinning the English would fail this suite in another locale while the
+    behaviour was perfectly correct.
     """
-    with pytest.raises(RuntimeError, match="git ls-files failed") as caught:
+    with pytest.raises(RuntimeError, match=r"git ls-files failed \(128\)") as caught:
         check_file_size.tracked_rust_files(tmp_path)
-    assert "not a git repository" in str(caught.value)
+    _, _, reason = str(caught.value).partition("): ")
+    assert reason.strip(), "expected git's stderr to be carried into the message"
+
+
+def test_a_missing_git_says_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing git raises FileNotFoundError, not CalledProcessError.
+
+    So it does not go through the branch that handles a git *failure*, and
+    without a second handler it is a bare traceback naming an errno.
+    """
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(RuntimeError, match="could not run git"):
+        check_file_size.tracked_rust_files(tmp_path)
+
+
+def test_no_matching_files_is_an_error_not_a_pass(tmp_path: Path) -> None:
+    """An empty match must never be a quiet exit 0.
+
+    `git ls-files` exits 0 and prints nothing when a pathspec matches nothing,
+    so a renamed src-tauri/src would otherwise scan zero files and pass: a
+    green gate enforcing nothing.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    with pytest.raises(RuntimeError, match="matched no .rs files"):
+        check_file_size.tracked_rust_files(tmp_path)
+
+
+def test_a_tracked_file_missing_from_the_worktree_says_why(tmp_path: Path) -> None:
+    """git ls-files reads the index, which can name a file that is not there."""
+    with pytest.raises(RuntimeError, match="missing from the working tree"):
+        check_file_size.check(tmp_path, ["src-tauri/src/deleted.rs"], set())
 
 
 def test_tracked_rust_files_reaches_nested_modules() -> None:
