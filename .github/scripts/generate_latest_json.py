@@ -15,6 +15,10 @@ with:
 The manifest is uploaded as a release asset and mirrored to
 https://desktop.esphome.io/latest.json by the deploy-pages workflow.
 
+Exits non-zero if any expected updater platform is missing from
+`platforms`, rather than publishing a manifest that silently withholds
+self-updates from that platform. See `main`.
+
 Usage in CI (TAG / REPO / GH_TOKEN from env):
 
     python3 .github/scripts/generate_latest_json.py
@@ -51,9 +55,14 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _gha import error as _error  # noqa: E402
 from _gha import warn as _warn  # noqa: E402
 
 # (Tauri updater target, regex matching the .sig asset name)
+# This list is the expected set for a release: it mirrors the `updater_target`
+# legs of the build matrix in .github/workflows/build.yml one-for-one, and the
+# release job only runs once every leg is green. Anything missing here is a
+# drift between the two, not a legitimately partial build — see `main`.
 # fmt: off
 PLATFORM_SIG_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("windows-x86_64", re.compile(r".+-setup\.exe\.sig$")),
@@ -282,6 +291,25 @@ def main() -> int:
         release = fetch_release(args.tag, args.repo)
 
     manifest = build_manifest(release, args.repo, args.tag, args.artifacts_dir)
+
+    # A platform that drops out of `platforms` costs nothing at release time
+    # and never recovers: tauri-plugin-updater reads an absent platform key as
+    # "up to date", so those users simply stop being offered updates, in
+    # silence, until someone notices. The schema can't catch it (`platforms`
+    # only requires one entry, deliberately — it describes the format for every
+    # consumer, not this repo's release policy), so enforce the policy here,
+    # where the expected set is known.
+    missing = [
+        plat for plat, _ in PLATFORM_SIG_MATCHERS if plat not in manifest["platforms"]
+    ]
+    if missing:
+        _error(
+            f"latest.json is missing updater platforms: {', '.join(missing)}. "
+            "Refusing to publish a manifest that would silently strip "
+            "self-updates for those platforms. See the warnings above for the "
+            "assets that could not be matched."
+        )
+        return 1
 
     rendered = json.dumps(manifest, indent=2)
     args.output.write_text(rendered)
