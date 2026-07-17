@@ -963,6 +963,25 @@ mod tests {
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
         let output = run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        e2e_verdict(output)
+    }
+
+    /// [`e2e_run`] with the pip env isolation production pip calls layer on
+    /// top ([`process::isolate_pip_command`]). The interpreter isolation alone
+    /// is not enough for a pip invocation: an ambient `PIP_REQUIRE_VIRTUALENV`
+    /// would fail the install, and a `PIP_TARGET`/`PIP_PREFIX` would aim it
+    /// outside the tree under test.
+    fn e2e_pip(python: &Path, args: &[&str]) -> (bool, String) {
+        let mut cmd = process::python_command(python, args);
+        process::isolate_pip_command(&mut cmd);
+        let output = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        e2e_verdict(output)
+    }
+
+    /// Collapse a finished child to (success, stdout+stderr).
+    fn e2e_verdict(output: std::process::Output) -> (bool, String) {
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         (output.status.success(), combined)
@@ -983,7 +1002,8 @@ mod tests {
 
     /// The whole repair lifecycle against a real bundled Python tree: the
     /// first-run copy, detect the orphan, wipe and re-copy from the pristine
-    /// bundle, prove it is fixed.
+    /// bundle, prove it is fixed, then prove a refresh from an older bundle
+    /// restores the newer version the user tree already had.
     ///
     /// Ignored by default because it needs the genuine article — the
     /// python-build-standalone tree with esphome in it that
@@ -996,10 +1016,13 @@ mod tests {
     /// [`interpreter_in_tree`]/[`python_tree_root`] would go untested against
     /// what we actually ship. This uses the shipped layout.
     ///
-    /// No leg forces the pinned-version restore through pip: that would need a
-    /// PyPI release newer than the tree the workflow just built, which
-    /// generally does not exist. The snapshot and the compare-and-skip half of
-    /// the restore still run for real in the repair leg below.
+    /// The final leg forces the pinned-version restore through a real
+    /// `pip install` (#353). Nothing newer than the tree the workflow just
+    /// built exists on PyPI to pin the user tree to, so the version asymmetry
+    /// is built from the other side: a second bundle source, copied from the
+    /// first and pip-downgraded, so the snapshot beats the incoming bundle and
+    /// the restore must reinstall. The repair leg itself stays offline; the
+    /// downgrade and the restore are where this test reaches PyPI.
     ///
     /// One test rather than several because each step depends on the last
     /// leaving the tree in a particular state, and Rust does not order tests.
@@ -1101,6 +1124,73 @@ mod tests {
         );
         let (ok, out) = e2e_run(&python, &["-m", "esphome", "version"]);
         assert!(ok, "esphome does not run after the repair: {out}");
+
+        // 8. Build a second bundle source that is older than the user tree:
+        //    copy the pristine bundle, then downgrade esphome inside the copy.
+        //    `--no-deps` keeps the copy on the current dependency set, so the
+        //    restore in step 9 resolves against already-satisfied deps and
+        //    fetches exactly one wheel.
+        let current = python_env::read_package_version(&python, "esphome")
+            .expect("could not probe the user tree's esphome version")
+            .expect("esphome missing from the user tree");
+        let old_bundle = base.join("old-bundle");
+        python_env::copy_dir_recursive(&bundle, &old_bundle)
+            .expect("could not copy the bundle to a second source");
+        let old_python = interpreter_in_tree(&old_bundle);
+        let downgrade_spec = format!("esphome<{current}");
+        let (ok, out) = e2e_pip(
+            &old_python,
+            &["-m", "pip", "install", "--no-deps", downgrade_spec.as_str()],
+        );
+        assert!(
+            ok,
+            "could not downgrade esphome in the second source: {out}"
+        );
+        let downgraded = python_env::read_package_version(&old_python, "esphome")
+            .expect("could not probe the downgraded source")
+            .expect("esphome missing from the downgraded source");
+        // The test's premise, checked with the comparator the restore uses.
+        assert!(
+            crate::update::is_newer_version(&current, &downgraded),
+            "the downgrade produced {downgraded}, which is not older than {current}"
+        );
+
+        // 9. Refresh from the older source. The snapshot reads the newer
+        //    version from the user tree, the copy lands the older one, and the
+        //    restore must notice the downgrade and pip-reinstall the newer
+        //    from PyPI — the one branch of the refresh the offline legs above
+        //    cannot reach.
+        python_env::refresh_python_tree(
+            &user_tree,
+            || Ok(old_bundle.clone()),
+            RefreshReason::Repair,
+        )
+        .expect("refresh from the downgraded source failed");
+
+        // 10. No silent downgrade. The restore is deliberately best-effort in
+        //     production (a failed pip install only warns and keeps the
+        //     bundled version), so this read is the only place a restore
+        //     failure can surface.
+        let restored = python_env::read_package_version(&python, "esphome")
+            .expect("could not probe the user tree after the restore")
+            .expect("esphome missing after the restore");
+        assert_eq!(
+            restored, current,
+            "the refresh downgraded esphome; if this reads {downgraded}, the pip \
+             reinstall of {current} failed (PyPI unreachable?) and the restore \
+             warning above says why"
+        );
+        assert_eq!(
+            esphome_config_probe(&python).expect("probe could not run"),
+            None,
+            "the tree is broken after the restore"
+        );
+        let (ok, out) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(ok, "esphome does not run after the restore: {out}");
+        assert!(
+            out.contains(&current),
+            "esphome reports a version other than {current} after the restore: {out}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

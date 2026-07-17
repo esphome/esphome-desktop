@@ -385,7 +385,7 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 ///   from "not installed": callers that snapshot versions before a destructive
 ///   refresh must not treat a flaky probe as "absent" — see
 ///   [`snapshot_preserved_versions`].
-fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
+pub(super) fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
     // Written as a single-line literal with explicit `\n` so each Python
     // statement starts at column zero — avoids any ambiguity about whether
     // a Rust line-continuation strips the source-line indentation. A clean
@@ -438,7 +438,7 @@ fn parse_probe_output(
 /// copy, flattened the framework layout, and — for a *dangling* link — made
 /// `fs::copy` fail with "No such file", aborting the entire copy and leaving the
 /// app unable to start.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     use std::fs;
 
     if !dst.exists() {

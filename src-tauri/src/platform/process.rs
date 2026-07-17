@@ -272,7 +272,7 @@ pub(super) fn run_python_capture_bounded<S: AsRef<OsStr>>(
 ///
 /// One home for that setup, so "every Python we spawn is isolated" is a property
 /// of the builder rather than something each caller has to remember.
-fn python_command<S: AsRef<OsStr>>(
+pub(super) fn python_command<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
 ) -> std::process::Command {

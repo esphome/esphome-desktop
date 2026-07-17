@@ -11,8 +11,11 @@ name: Python Tree Repair
 # What it proves, in one pass: the first-run copy of a freshly built bundle is
 # self-contained and healthy; an orphaned component directory (exactly what the
 # removed `--ignore-installed` fallback left behind, and what broke every
-# compile on 2026.7) fails the health probe; and the repair re-copy removes it
-# with no network.
+# compile on 2026.7) fails the health probe; the repair re-copy removes it with
+# no network; and a refresh from an older bundle does not silently downgrade a
+# newer esphome the tree already had — the restore reinstalls it through a real
+# `pip install` (#353). That last leg is why the job needs PyPI; the repair
+# itself stays offline.
 #
 # A venv would be cheaper but would not do: on Windows a venv puts python.exe in
 # Scripts\ while the real bundle has it at the tree root, so the layout the copy
@@ -99,10 +102,22 @@ jobs:
         # would turn this job green while proving nothing — the whole point of it
         # being here; this job is the only evidence that a real command sees the
         # orphan.
+        #
+        # The match stops before the verdict: the restore leg's pip child
+        # inherits the job's stdout (production pipes only its stderr), so its
+        # output lands between the harness's "test ... " prefix and the closing
+        # "ok" and the two never share a line. Running-but-failing is already
+        # covered — the pipeline's exit code fails the step before the grep.
         run: |
           set -o pipefail
           cargo test --all-features -- --ignored --test-threads=1 --nocapture 2>&1 | tee result.log
-          grep -q 'test platform::tests::e2e_repair_cycle ... ok' result.log || {
+          grep -qF 'test platform::tests::e2e_repair_cycle ...' result.log || {
             echo "::error::e2e_repair_cycle did not run; this job proved nothing"
             exit 1
           }
+          # The prefix also matches the "... ignored" listing a run without
+          # `--ignored` would print, so reject that verdict explicitly.
+          if grep -qF 'test platform::tests::e2e_repair_cycle ... ignored' result.log; then
+            echo "::error::e2e_repair_cycle was listed as ignored, not run"
+            exit 1
+          fi
