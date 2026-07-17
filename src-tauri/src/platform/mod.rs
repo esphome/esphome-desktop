@@ -216,6 +216,42 @@ pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(resource_dir.join("git").join("patch"))
 }
 
+/// MinGit's CA-bundle locations relative to the `git` resource dir, in the order
+/// MinGit's own `etc/gitconfig` and layout prefer. `prepare_bundle.sh` extracts
+/// the MinGit tree whole, so one of these is always shipped.
+const GIT_CA_BUNDLE_RELATIVE: [&[&str]; 2] = [
+    &["mingw64", "etc", "ssl", "certs", "ca-bundle.crt"],
+    &["mingw64", "ssl", "certs", "ca-bundle.crt"],
+];
+
+/// First of MinGit's CA-bundle locations that exists under `git_dir`.
+///
+/// Split out from [`bundled_git_ca_bundle`] so the candidate order can be
+/// unit-tested without a Tauri `AppHandle` or a real bundle on disk, the same
+/// split-the-logic pattern [`path_with_prepended`] uses. Joined component by
+/// component so the path is correct (and the test runs) on any OS.
+// Reached outside tests only through bundled_git_ca_bundle, which is Windows only.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn first_existing_ca_bundle(git_dir: &Path) -> Option<PathBuf> {
+    GIT_CA_BUNDLE_RELATIVE.iter().find_map(|components| {
+        let mut candidate = git_dir.to_path_buf();
+        candidate.extend(*components);
+        candidate.exists().then_some(candidate)
+    })
+}
+
+/// The bundled MinGit CA bundle, if present.
+///
+/// MinGit ships a CA bundle at `mingw64/etc/ssl/certs/ca-bundle.crt` (with a
+/// duplicate at `mingw64/ssl/certs/ca-bundle.crt`). [`ensure_git_on_path`] pins
+/// `GIT_SSL_CAINFO` at it so HTTPS clones validate against the bundled bundle
+/// instead of whatever `http.sslCAInfo` the ambient git config names (#350).
+#[cfg(target_os = "windows")]
+fn bundled_git_ca_bundle(app_handle: &AppHandle) -> Result<Option<PathBuf>> {
+    let resource_dir = get_bundled_resource_dir(app_handle)?;
+    Ok(first_existing_ca_bundle(&resource_dir.join("git")))
+}
+
 /// Directory inside the bundled `ccache` resource that holds `ccache.exe`.
 ///
 /// `prepare_bundle.sh` extracts a single static `ccache.exe` into `ccache/`.
@@ -364,11 +400,17 @@ fn prepend_bundled_tool(
 /// add the complexity of preferring (and validating) whatever git a user
 /// happens to have.
 ///
+/// It also pins `GIT_SSL_CAINFO` at MinGit's own bundled CA bundle so HTTPS
+/// clones don't depend on the ambient git SSL configuration (issue #350),
+/// inherited by the daemon the same way `PATH` is.
+///
 /// No-op on macOS (the Command Line Tools prompt covers a missing git) and
 /// Linux (git ships on all but the most minimal installs).
 pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
+        use tracing::{info, warn};
+
         let git_dir = get_bundled_git_dir(app_handle)?;
         if !prepend_bundled_tool(
             &git_dir,
@@ -391,6 +433,30 @@ pub fn ensure_git_on_path(app_handle: &AppHandle) -> Result<()> {
             "patch",
             "micro-opus and other components that need `patch` will fail to build",
         )?;
+
+        // Pin GIT_SSL_CAINFO to MinGit's own bundled CA bundle so HTTPS clones
+        // validate against it rather than whatever `http.sslCAInfo` the ambient
+        // git config happens to name (issue #350). A machine-wide config left
+        // by a previously-installed, since-removed Git for Windows survives the
+        // uninstall and can point sslCAInfo at a `C:/Program Files/Git/...`
+        // ca-bundle.crt that no longer exists; MinGit's OpenSSL backend then
+        // fails every fetch with "error adding trust anchors from file". The env
+        // var overrides every config file, so the bundled git always finds the
+        // bundled bundle. Log-and-continue if it is somehow absent; an ambient
+        // config may still work.
+        match bundled_git_ca_bundle(app_handle)? {
+            Some(ca_bundle) => {
+                std::env::set_var("GIT_SSL_CAINFO", &ca_bundle);
+                info!(
+                    "Pinned GIT_SSL_CAINFO to bundled CA bundle at {:?}",
+                    ca_bundle
+                );
+            }
+            None => warn!(
+                "Bundled MinGit CA bundle not found; HTTPS clones will rely on \
+                 the ambient git SSL configuration"
+            ),
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -663,6 +729,26 @@ mod tests {
                 PathBuf::from("/usr/bin"),
             ],
         );
+    }
+
+    #[test]
+    fn first_existing_ca_bundle_prefers_etc_then_falls_back() {
+        let git_dir = unique_temp_dir("ca-bundle");
+        let etc = git_dir.join("mingw64/etc/ssl/certs/ca-bundle.crt");
+        let plain = git_dir.join("mingw64/ssl/certs/ca-bundle.crt");
+
+        // Neither present: nothing to point GIT_SSL_CAINFO at.
+        assert_eq!(first_existing_ca_bundle(&git_dir), None);
+
+        // Only the non-`etc` variant: fall back to it.
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        std::fs::write(&plain, b"").unwrap();
+        assert_eq!(first_existing_ca_bundle(&git_dir), Some(plain.clone()));
+
+        // Both present: the `etc` variant MinGit's own gitconfig names wins.
+        std::fs::create_dir_all(etc.parent().unwrap()).unwrap();
+        std::fs::write(&etc, b"").unwrap();
+        assert_eq!(first_existing_ca_bundle(&git_dir), Some(etc));
     }
 
     #[test]
