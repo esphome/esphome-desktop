@@ -216,13 +216,18 @@ pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(resource_dir.join("git").join("patch"))
 }
 
-/// MinGit's CA-bundle locations relative to the `git` resource dir, in the order
-/// MinGit's own `etc/gitconfig` and layout prefer. `prepare_bundle.sh` extracts
-/// the MinGit tree whole, so one of these is always shipped. `Path::join` treats
-/// `/` as a separator on Windows too, so these resolve correctly on every OS.
-const GIT_CA_BUNDLE_RELATIVE: [&str; 2] = [
-    "mingw64/etc/ssl/certs/ca-bundle.crt",
-    "mingw64/ssl/certs/ca-bundle.crt",
+/// MinGit's CA-bundle locations under the `git` resource dir, as path
+/// components in the order MinGit's own `etc/gitconfig` and layout prefer.
+/// `prepare_bundle.sh` extracts the MinGit tree whole, so one is always shipped.
+///
+/// Stored as components, not a `/`-joined literal, so [`first_existing_ca_bundle`]
+/// can join them onto the resource dir with the native separator. On Windows the
+/// resource dir is a backslash path (`C:\...\git`); a `/`-joined literal would
+/// yield a mixed `C:\...\git\mingw64/etc/...`, and the value ends up in
+/// `GIT_SSL_CAINFO`, so it must be a clean native path git can consume.
+const GIT_CA_BUNDLE_RELATIVE: [&[&str]; 2] = [
+    &["mingw64", "etc", "ssl", "certs", "ca-bundle.crt"],
+    &["mingw64", "ssl", "certs", "ca-bundle.crt"],
 ];
 
 /// First of MinGit's CA-bundle locations that exists under `git_dir`.
@@ -234,8 +239,8 @@ const GIT_CA_BUNDLE_RELATIVE: [&str; 2] = [
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn first_existing_ca_bundle(git_dir: &Path) -> Option<PathBuf> {
     GIT_CA_BUNDLE_RELATIVE
-        .into_iter()
-        .map(|relative| git_dir.join(relative))
+        .iter()
+        .map(|components| git_dir.join(components.iter().collect::<PathBuf>()))
         .find(|candidate| candidate.exists())
 }
 
@@ -733,8 +738,10 @@ mod tests {
     #[test]
     fn first_existing_ca_bundle_prefers_etc_then_falls_back() {
         let git_dir = unique_temp_dir("ca-bundle");
-        let etc = git_dir.join("mingw64/etc/ssl/certs/ca-bundle.crt");
-        let plain = git_dir.join("mingw64/ssl/certs/ca-bundle.crt");
+        // Build the fixtures from the same component lists the code joins, so the
+        // test tracks the constant and mirrors the native-separator join.
+        let etc = git_dir.join(GIT_CA_BUNDLE_RELATIVE[0].iter().collect::<PathBuf>());
+        let plain = git_dir.join(GIT_CA_BUNDLE_RELATIVE[1].iter().collect::<PathBuf>());
 
         // Neither present: nothing to point GIT_SSL_CAINFO at.
         assert_eq!(first_existing_ca_bundle(&git_dir), None);
@@ -748,6 +755,32 @@ mod tests {
         std::fs::create_dir_all(etc.parent().unwrap()).unwrap();
         std::fs::write(&etc, b"").unwrap();
         assert_eq!(first_existing_ca_bundle(&git_dir), Some(etc));
+    }
+
+    /// On Windows the resource dir is a backslash path (`C:\...\git`) and the
+    /// result is handed to `GIT_SSL_CAINFO`, so the join must come back a clean
+    /// native path, not a mixed `C:\...\git\mingw64/etc/...` one. `unique_temp_dir`
+    /// gives a real backslash base here, exercising exactly that join; a
+    /// `/`-joined candidate literal would fail the tail assertion. Runs only in
+    /// the `windows-latest` CI job (lint-test-cross), the sole place Windows-gated
+    /// code is compiled and tested.
+    #[cfg(windows)]
+    #[test]
+    fn first_existing_ca_bundle_yields_native_windows_path() {
+        let git_dir = unique_temp_dir("ca-bundle-native");
+        let etc = git_dir.join(GIT_CA_BUNDLE_RELATIVE[0].iter().collect::<PathBuf>());
+        std::fs::create_dir_all(etc.parent().unwrap()).unwrap();
+        std::fs::write(&etc, b"").unwrap();
+
+        let found =
+            first_existing_ca_bundle(&git_dir).expect("bundle resolves under a backslash base");
+        assert!(
+            found
+                .to_str()
+                .unwrap()
+                .ends_with(r"mingw64\etc\ssl\certs\ca-bundle.crt"),
+            "GIT_SSL_CAINFO must use native separators, got {found:?}"
+        );
     }
 
     #[test]
