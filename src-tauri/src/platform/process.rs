@@ -152,25 +152,48 @@ pub(super) fn run_bounded(
         std::mem::take(&mut *buf)
     }
 
+    // Unix: put the child in its own process group so the whole tree can be
+    // signalled on the bound (matches `daemon::start_inner`). Windows: nothing
+    // here; the per-call job is created and assigned after spawn. Do NOT touch
+    // creation flags on Windows -- the callers set CREATE_NO_WINDOW and
+    // `creation_flags` overwrites rather than accumulates.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd.spawn()?;
+    // Tie the child's descendants to this call so a survivor -- a pip PEP 517
+    // build backend that inherited the pipe, say -- can't outlive the bound.
+    // Dropped on every return below (including a `?`), so it is also the
+    // backstop the old "any early exit must reap the child" note described, now
+    // for the whole tree rather than just the direct child.
+    let reaper = Reaper::new(&child);
     let stdout_reader = drain("stdout", child.stdout.take());
     let stderr_reader = drain("stderr", child.stderr.take());
 
     let deadline = Instant::now() + timeout;
     loop {
-        // Any early exit from here must still reap the child: a `?` that left it
-        // running would leak the very process this function exists to bound.
-        let polled = child.try_wait();
-        match polled {
+        match child.try_wait() {
             Ok(Some(status)) => {
+                // Reap the tree BEFORE collect: killing it closes the inherited
+                // pipe so the readers hit EOF at once instead of each costing a
+                // full DRAIN_GRACE. The leader has already exited; this takes
+                // any descendants it left holding the pipe.
+                reaper.kill_tree();
                 return Ok(BoundedRun::Exited(std::process::Output {
                     status,
                     stdout: collect("stdout", stdout_reader),
                     stderr: collect("stderr", stderr_reader),
-                }))
+                }));
             }
             Ok(None) => {}
             Err(e) => {
+                reaper.kill_tree();
+                // Fallback for a failed Windows job assignment (the reaper is a
+                // no-op then); redundant-but-harmless where `killpg` already
+                // took the leader.
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = collect("stdout", stdout_reader);
@@ -179,16 +202,118 @@ pub(super) fn run_bounded(
             }
         }
         if Instant::now() >= deadline {
+            reaper.kill_tree();
             let _ = child.kill();
             let _ = child.wait();
-            // Join the stdout reader before returning so the thread cannot
-            // outlive the call, even though its bytes go nowhere.
+            // The tree kill above closed the pipe, so draining the stdout reader
+            // returns at once; a descendant that left the group (`setsid` /
+            // CREATE_NEW_PROCESS_GROUP) is bounded by DRAIN_GRACE, not joined.
             let _ = collect("stdout", stdout_reader);
             return Ok(BoundedRun::TimedOut {
                 stderr: collect("stderr", stderr_reader),
             });
         }
         std::thread::sleep(CHILD_POLL_INTERVAL);
+    }
+}
+
+/// Reaps a bounded child's whole process tree, so a descendant that inherited
+/// the child's pipe cannot outlive the bounded call. Held by [`run_bounded`]
+/// for the duration of the call; [`Reaper::kill_tree`] does the kill and `Drop`
+/// is the backstop for the `?`-early-return paths.
+///
+/// Unix uses the child's process group (`process_group(0)` gives pgid == pid);
+/// Windows uses a per-call kill-on-close job the child is assigned to.
+struct Reaper {
+    #[cfg(unix)]
+    pgid: i32,
+    #[cfg(windows)]
+    job: Option<JobHandle>,
+    /// So the kill fires exactly once: the explicit `kill_tree()` on each exit
+    /// path does the work, and the `Drop` below is then a no-op. Load-bearing on
+    /// Unix -- see the pgid-reuse note on `kill_tree`; a second `killpg` from
+    /// `Drop` would widen that window for no benefit.
+    killed: std::cell::Cell<bool>,
+}
+
+impl Reaper {
+    #[cfg(unix)]
+    fn new(child: &std::process::Child) -> Self {
+        // pgid == pid because the child was spawned with `process_group(0)`.
+        Reaper {
+            pgid: child.id() as i32,
+            killed: std::cell::Cell::new(false),
+        }
+    }
+
+    #[cfg(windows)]
+    fn new(child: &std::process::Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        let job = create_kill_on_close_job();
+        // Accept the small CreateProcess->assign race (a descendant spawned in
+        // that window escapes the job), exactly as `daemon::start_inner` does:
+        // closing it needs CREATE_SUSPENDED + a thread handle std does not
+        // expose, and the callers spawn Python, which spawns nothing that early.
+        // `assign_process_to_job` / `create_kill_on_close_job` log the Win32
+        // cause; this logs the consequence.
+        let covered = job
+            .as_ref()
+            .is_some_and(|j| assign_process_to_job(j.0, child.as_raw_handle()));
+        if !covered {
+            tracing::warn!(
+                "A bounded child is not covered by a kill-on-close job; a descendant \
+                 it spawns may outlive the call"
+            );
+        }
+        Reaper {
+            job,
+            killed: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Kill the child and every descendant still in its group/job. Idempotent:
+    /// the first call kills, later calls (e.g. from `Drop`) are no-ops.
+    fn kill_tree(&self) {
+        if self.killed.replace(true) {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{killpg, Signal};
+            use nix::unistd::Pid;
+            // SIGKILL, not the daemon's graceful SIGTERM: this is the bound
+            // firing, and the point is that nothing survives it.
+            //
+            // On the Exited path the leader is already reaped, so in principle
+            // its pgid could be recycled before this runs -- but only once the
+            // group is EMPTY, i.e. exactly when there is nothing left to kill.
+            // While any descendant survives (the case this exists for) the group
+            // is non-empty, so the kernel keeps the pgid reserved and the signal
+            // reaches our tree. The daemon accepts the same class of window.
+            let _ = killpg(Pid::from_raw(self.pgid), Signal::SIGKILL);
+        }
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            use ::windows::Win32::System::JobObjects::TerminateJobObject;
+            // SAFETY: `job.0` is a live job handle owned by this Reaper.
+            unsafe {
+                let _ = TerminateJobObject(job.0, 1);
+            }
+        }
+    }
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        self.kill_tree();
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            use ::windows::Win32::Foundation::CloseHandle;
+            // SAFETY: close the sole handle to this per-call job exactly once.
+            unsafe {
+                let _ = CloseHandle(job.0);
+            }
+        }
     }
 }
 
@@ -400,21 +525,32 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
 /// window. The job only decides what happens to a child that outlives us.
 #[cfg(target_os = "windows")]
 pub fn assign_to_kill_on_close_job(process: std::os::windows::io::RawHandle) -> bool {
+    // The process-wide OnceLock job (never closed, see `kill_on_close_job`).
+    match kill_on_close_job() {
+        Some(job) => assign_process_to_job(job, process),
+        None => false,
+    }
+}
+
+/// Assign a live child process to `job`, warning with the Win32 cause and
+/// returning `false` on failure. Shared by the process-wide singleton
+/// ([`assign_to_kill_on_close_job`]) and `run_bounded`'s per-call [`Reaper`]:
+/// which job to use is the caller's choice, the assignment itself is identical.
+/// Takes ownership of neither handle.
+#[cfg(target_os = "windows")]
+fn assign_process_to_job(
+    job: ::windows::Win32::Foundation::HANDLE,
+    process: std::os::windows::io::RawHandle,
+) -> bool {
     use ::windows::Win32::Foundation::HANDLE;
     use ::windows::Win32::System::JobObjects::AssignProcessToJobObject;
 
-    let Some(job) = kill_on_close_job() else {
-        return false;
-    };
-
-    // SAFETY: `job` is a live job handle owned by the process-wide OnceLock
-    // (never closed, see `kill_on_close_job`). `process` is the caller's live
-    // child handle, which tokio's `Child` keeps open for us. Assignment does
-    // not take ownership of either handle.
+    // SAFETY: `job` is a live job handle owned by the caller, and `process` is a
+    // live child handle the caller keeps open; assignment borrows both.
     match unsafe { AssignProcessToJobObject(job, HANDLE(process)) } {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!("Failed to assign child process to the kill-on-close job object: {e}");
+            tracing::warn!("Failed to assign a child process to a kill-on-close job object: {e}");
             false
         }
     }
@@ -443,6 +579,22 @@ unsafe impl Sync for JobHandle {}
 /// backstop and keeps the graceful path.
 #[cfg(target_os = "windows")]
 fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
+    static JOB: std::sync::OnceLock<Option<JobHandle>> = std::sync::OnceLock::new();
+
+    // The singleton's handle is intentionally never closed (see the doc above);
+    // leaking it into the OnceLock leaves the close to the kernel at teardown.
+    JOB.get_or_init(create_kill_on_close_job)
+        .as_ref()
+        .map(|job| job.0)
+}
+
+/// Create a fresh kill-on-close job object, or `None` on failure. Shared by the
+/// process-wide singleton above and the per-call jobs [`run_bounded`] uses to
+/// reap a bounded child's descendants, so the `KILL_ON_JOB_CLOSE` limit has one
+/// home. The caller owns the returned handle and decides when to close it (the
+/// singleton never does; `run_bounded`'s [`Reaper`] does on drop).
+#[cfg(target_os = "windows")]
+fn create_kill_on_close_job() -> Option<JobHandle> {
     use ::windows::core::PCWSTR;
     use ::windows::Win32::Foundation::CloseHandle;
     use ::windows::Win32::System::JobObjects::{
@@ -450,41 +602,34 @@ fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
-    static JOB: std::sync::OnceLock<Option<JobHandle>> = std::sync::OnceLock::new();
-
-    JOB.get_or_init(|| {
-        // SAFETY: Win32 job-object FFI. The unnamed job is created with default
-        // security and is owned solely by this closure; on the error path we
-        // close it before returning, so no handle leaks and none escapes except
-        // the one we deliberately keep for the process lifetime.
-        unsafe {
-            let job = match CreateJobObjectW(None, PCWSTR::null()) {
-                Ok(job) => job,
-                Err(e) => {
-                    tracing::warn!("Failed to create the kill-on-close job object: {e}");
-                    return None;
-                }
-            };
-
-            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            if let Err(e) = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            ) {
-                tracing::warn!("Failed to set the kill-on-close limit on the job object: {e}");
-                let _ = CloseHandle(job);
+    // SAFETY: Win32 job-object FFI. The unnamed job is created with default
+    // security and is owned solely by the caller; on the error path we close it
+    // before returning, so no handle leaks.
+    unsafe {
+        let job = match CreateJobObjectW(None, PCWSTR::null()) {
+            Ok(job) => job,
+            Err(e) => {
+                tracing::warn!("Failed to create the kill-on-close job object: {e}");
                 return None;
             }
+        };
 
-            Some(JobHandle(job))
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+        if let Err(e) = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            tracing::warn!("Failed to set the kill-on-close limit on the job object: {e}");
+            let _ = CloseHandle(job);
+            return None;
         }
-    })
-    .as_ref()
-    .map(|job| job.0)
+
+        Some(JobHandle(job))
+    }
 }
 
 /// Deliver a graceful `CTRL_BREAK_EVENT` to a child process group on Windows.
@@ -1084,23 +1229,79 @@ mod tests {
         );
     }
 
+    /// Extract the grandchild pid the test child reports as `GRANDCHILD_PID=<n>`,
+    /// tolerating surrounding text (the timeout error wraps it in a message).
+    fn parse_grandchild_pid(bytes: &[u8]) -> Option<u32> {
+        let s = String::from_utf8_lossy(bytes);
+        let (_, after) = s.split_once("GRANDCHILD_PID=")?;
+        after
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn pid_is_alive(pid: u32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        // Signal 0 probes existence; ESRCH means gone (and reaped). A zombie
+        // still reports alive, which is why the caller polls until it clears.
+        !matches!(
+            kill(Pid::from_raw(pid as i32), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    fn pid_is_alive(pid: u32) -> bool {
+        use ::windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use ::windows::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // SAFETY: OpenProcess by pid; the handle is closed on every path.
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
+                return false; // no such process -> gone
+            };
+            let waited = WaitForSingleObject(handle, 0);
+            let _ = CloseHandle(handle);
+            waited != WAIT_OBJECT_0 // signaled == terminated == not alive
+        }
+    }
+
+    /// Assert `pid` is no longer a live process, polling briefly: a SIGKILL'd
+    /// grandchild is reaped by init asynchronously on Unix, so it does not vanish
+    /// the instant the bounded call returns.
+    fn assert_pid_reaped(pid: u32) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pid_is_alive(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild pid {pid} survived the bounded call; the tree was not reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     #[test]
-    fn a_surviving_grandchild_cannot_defeat_the_deadline() {
-        // A pipe reaches EOF only when every writer closes it, and killing a
-        // child does not kill grandchildren that inherited its fds -- pip spawns
-        // build backends that do exactly this. Joining the reader unconditionally
-        // would then block forever on a dead child's pipe, and the deadline this
-        // helper exists to enforce would never fire.
-        //
-        // The child here spawns a grandchild that holds stderr open for far
-        // longer than the test could tolerate, then exits itself.
+    fn run_bounded_reaps_a_grandchild_after_the_child_exits() {
+        // pip on the SUCCESS path spawns PEP 517 build backends that inherit its
+        // pipes and can outlive it. The child here models that: it writes to
+        // stderr, spawns a grandchild that holds the pipe open and sleeps far
+        // longer than the test tolerates, reports the grandchild pid, then exits
+        // 0. The deadline must not stall (a grandchild on the pipe is why the
+        // reader wait is bounded), the child's partial stderr must survive, and
+        // -- the point of #344 -- the grandchild must be dead afterwards.
         let started = std::time::Instant::now();
         let out = run_python_capture_bounded(
             Path::new(TEST_PYTHON),
             [
                 "-c",
                 "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
-                 subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); \
+                 p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); \
+                 sys.stdout.write('GRANDCHILD_PID=%d\\n'%p.pid); sys.stdout.flush(); \
                  sys.exit(0)",
             ],
             std::time::Duration::from_secs(60),
@@ -1119,6 +1320,33 @@ mod tests {
             String::from_utf8_lossy(&out.stderr).contains("before"),
             "gave up on the reader without keeping what it had already read"
         );
+        let pid = parse_grandchild_pid(&out.stdout)
+            .expect("the child must report its grandchild's pid on stdout");
+        assert_pid_reaped(pid);
+    }
+
+    #[test]
+    fn run_bounded_reaps_a_grandchild_on_timeout() {
+        // The child never exits (sleeps well past the bound) and leaves a
+        // grandchild that would too; the bound must fire AND leave neither
+        // behind. The grandchild pid goes to stderr, which the timed-out error
+        // carries in its message.
+        let out = run_python_capture_bounded(
+            Path::new(TEST_PYTHON),
+            [
+                "-c",
+                "import subprocess,sys,time; \
+                 p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(600)']); \
+                 sys.stderr.write('GRANDCHILD_PID=%d\\n'%p.pid); sys.stderr.flush(); \
+                 time.sleep(600)",
+            ],
+            std::time::Duration::from_secs(2),
+        );
+        let err = out.expect_err("the child never exits, so this must time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let pid = parse_grandchild_pid(err.to_string().as_bytes())
+            .expect("the timed-out child must have reported its grandchild's pid");
+        assert_pid_reaped(pid);
     }
 
     #[test]
