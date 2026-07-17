@@ -613,6 +613,17 @@ pub fn run(cli: Cli) {
                     control::ops::UpdateGuard::acquire_wait(daemon_state.update_in_flight.clone())
                         .await;
 
+                // Repair a Python tree that a previous `--ignore-installed`
+                // fallback left with orphaned files, which breaks every compile
+                // (#330). Runs here rather than in `setup()` so it can await the
+                // reinstall without blocking the launch, and inside the guard,
+                // before the daemon exists: nothing is holding the packages open
+                // yet, and a broken tree has nothing worth serving.
+                daemon_state
+                    .update_checker
+                    .repair_python_tree_if_broken(&daemon_app)
+                    .await;
+
                 // If a CLI override switched us into a builder backend, ensure
                 // the package is installed/upgraded before starting the daemon.
                 if cli_override_needs_install {

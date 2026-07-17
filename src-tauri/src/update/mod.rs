@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::control::protocol::channel_name;
 use crate::i18n::{t, t_with};
 use crate::platform;
-use crate::settings::{Backend, ReleaseChannel};
+use crate::settings::{Backend, ReleaseChannel, Settings};
 
 /// PyPI package info response (used for stable channel)
 #[derive(Debug, Deserialize)]
@@ -285,18 +285,19 @@ impl UpdateChecker {
         if channel == ReleaseChannel::Dev || version == "dev" {
             info!("Installing ESPHome from GitHub (dev channel)");
 
-            // Try a clean --force-reinstall first. If pip aborts because a
-            // dependency (e.g. zeroconf) has no RECORD file, retry skipping the
-            // uninstall step — same broken-RECORD recovery as #155, here on the
-            // dev/GitHub path (#183).
+            // A clean --force-reinstall. If pip aborts because a dependency
+            // (e.g. zeroconf) has no RECORD file, reset the packages and retry
+            // against a clean tree — same broken-RECORD recovery as #155, here
+            // on the dev/GitHub path (#183).
             let pp = python_path.clone();
-            install_with_record_retry(
-                move |ignore| {
+            install_with_record_recovery(
+                move || {
                     let pp = pp.clone();
-                    async move { run_dev_install(&pp, ignore).await }
+                    async move { run_dev_install(&pp).await }
                 },
+                || self.reset_python_packages(app_handle),
                 "ESPHome dev installed successfully from GitHub",
-                "ESPHome dev install hit missing RECORD file; retrying with --ignore-installed",
+                "ESPHome dev install hit missing RECORD file; resetting the Python packages",
                 "pip install from GitHub failed",
             )
             .await
@@ -312,14 +313,15 @@ impl UpdateChecker {
             // stable/beta was the one install path lacking that parity.
             let pp = python_path.clone();
             let version = version.to_string();
-            install_with_record_retry(
-                move |ignore| {
+            install_with_record_recovery(
+                move || {
                     let pp = pp.clone();
                     let version = version.clone();
-                    async move { run_esphome_install(&pp, &version, ignore).await }
+                    async move { run_esphome_install(&pp, &version).await }
                 },
+                || self.reset_python_packages(app_handle),
                 "ESPHome updated successfully",
-                "ESPHome update hit missing RECORD file; retrying with --ignore-installed",
+                "ESPHome update hit missing RECORD file; resetting the Python packages",
                 "pip install failed",
             )
             .await
@@ -361,33 +363,165 @@ impl UpdateChecker {
             None
         };
 
-        // Try a clean upgrade first (attempts a normal uninstall of the old
-        // copy). Only if pip aborts on a missing RECORD file (#155) do we retry
-        // with --ignore-installed, which skips the uninstall but orphans stale
-        // files — so we limit that trade-off to the broken-RECORD case.
+        // A clean upgrade, which uninstalls the old copy normally. Only if pip
+        // aborts on a missing RECORD file (#155) do we reset the packages and
+        // retry against a clean tree.
         let pp = python_path.clone();
-        let result = install_with_record_retry(
-            move |ignore| {
+        install_with_record_recovery(
+            move || {
                 let pp = pp.clone();
                 let version = version.clone();
-                async move {
-                    run_device_builder_install(&pp, backend, ignore, version.as_deref()).await
-                }
+                async move { run_device_builder_install(&pp, backend, version.as_deref()).await }
             },
+            || self.reset_python_packages(app_handle),
             "esphome-device-builder installed/upgraded successfully",
-            "esphome-device-builder upgrade hit missing RECORD file; retrying with --ignore-installed",
+            "esphome-device-builder upgrade hit missing RECORD file; resetting the Python packages",
             "pip install esphome-device-builder failed",
         )
-        .await;
+        .await
+    }
 
-        // On success, prune any `.dist-info` dirs the --ignore-installed retry
-        // may have orphaned, so the next version check resolves a single, real
-        // version instead of looping on "None" (#190). Best-effort.
-        if result.is_ok() {
-            let _ = dedupe_device_builder_dist_info(app_handle);
+    /// Repair a bundled Python tree that pip can no longer install into
+    /// cleanly: delete every package we installed and reinstall them (#330).
+    ///
+    /// The alternative was `--ignore-installed`, which installs over the top of
+    /// the broken copy and leaves the old version's files orphaned; see
+    /// [`install_with_record_recovery`] for why that had to go. Only packages
+    /// are removed, never the interpreter, so this works the same on every
+    /// platform and needs no pristine copy to restore from (Windows has none —
+    /// it runs the backend straight out of the install dir).
+    ///
+    /// Every version is resolved from PyPI *before* anything is deleted. That
+    /// ordering is deliberate and load-bearing: it means an unreachable PyPI
+    /// fails with the tree still intact, rather than wiping the user's only
+    /// working ESPHome and then discovering it cannot put one back.
+    ///
+    /// Requires the daemon to be stopped; the update flows go through
+    /// `stop_install_start`, and the startup probe runs before it exists.
+    pub async fn reset_python_packages(&self, app_handle: &AppHandle) -> Result<()> {
+        let settings = Settings::load(app_handle)?;
+        let python_path = platform::get_python_path(app_handle)?;
+
+        // Resolve first, delete second. See the note above.
+        let esphome_target = self.check(settings.release_channel).await?;
+        let device_builder_version = self.check_device_builder(settings.backend).await?;
+
+        let wipe_python = python_path.clone();
+        let removed =
+            tokio::task::spawn_blocking(move || platform::wipe_installed_packages(&wipe_python))
+                .await
+                .context("Package wipe task panicked or was cancelled")??;
+        info!("Removed {removed} installed package entrie(s); reinstalling");
+
+        // Reinstall in the same order build-scripts/prepare_bundle.sh uses to
+        // build the tree in the first place.
+        let esphome_output = match &esphome_target {
+            Some(version) => run_esphome_install(&python_path, version).await?,
+            // The dev channel has no PyPI version; it installs from the GitHub zip.
+            None => run_dev_install(&python_path).await?,
+        };
+        if !esphome_output.status.success() {
+            anyhow::bail!(
+                "Failed to reinstall ESPHome after reset: {}",
+                String::from_utf8_lossy(&esphome_output.stderr)
+            );
         }
 
-        result
+        let builder_output = run_device_builder_install(
+            &python_path,
+            settings.backend,
+            Some(&device_builder_version),
+        )
+        .await?;
+        if !builder_output.status.success() {
+            anyhow::bail!(
+                "Failed to reinstall esphome-device-builder after reset: {}",
+                String::from_utf8_lossy(&builder_output.stderr)
+            );
+        }
+
+        info!("Python package reset complete");
+        Ok(())
+    }
+
+    /// Check the bundled tree with a real ESPHome command at startup and repair
+    /// it if it is broken (#330).
+    ///
+    /// This exists because the damage outlives the bug that caused it. Removing
+    /// the `--ignore-installed` fallback stops us orphaning files from now on,
+    /// but every user it already hit still has the orphan on disk, and nothing
+    /// else would ever clear it: their next update can succeed and still leave
+    /// the stale directory sitting there breaking every compile. So look for the
+    /// damage directly rather than waiting for an install to fail.
+    ///
+    /// Best-effort by design — a probe that cannot run, an exhausted attempt
+    /// budget, or a failed repair all log and continue rather than block the
+    /// launch. Must run before the daemon starts: a running backend holds the
+    /// packages open, and it would be serving a broken tree anyway.
+    pub async fn repair_python_tree_if_broken(&self, app_handle: &AppHandle) {
+        let python_path = match platform::get_python_path(app_handle) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Skipping ESPHome health probe; no Python found: {e:#}");
+                return;
+            }
+        };
+
+        let probe_python = python_path.clone();
+        let probe =
+            tokio::task::spawn_blocking(move || platform::esphome_config_probe(&probe_python))
+                .await;
+
+        let detail = match probe {
+            // The probe could not be run at all. A package reset needs this same
+            // interpreter to drive pip, so it cannot help here.
+            Ok(Err(e)) => {
+                warn!("ESPHome health probe could not run: {e:#}");
+                return;
+            }
+            Err(e) => {
+                warn!("ESPHome health probe task panicked or was cancelled: {e:#}");
+                return;
+            }
+            Ok(Ok(None)) => {
+                debug!("ESPHome health probe passed");
+                platform::clear_package_reset_count(&python_path);
+                return;
+            }
+            Ok(Ok(Some(detail))) => detail,
+        };
+
+        if !platform::may_reset_packages(&python_path) {
+            warn!(
+                "ESPHome install looks broken but the package reset budget is spent, so it is \
+                 being left alone; reinstall the app if this persists. Probe said: {detail}"
+            );
+            return;
+        }
+
+        warn!("ESPHome install is broken; resetting the Python packages. Probe said: {detail}");
+        if let Err(e) = self.reset_python_packages(app_handle).await {
+            warn!("Python package reset failed: {e:#}");
+            return;
+        }
+
+        // Confirm the repair with the same probe that condemned the tree, so a
+        // reset that did not actually fix anything says so in the log instead of
+        // being reported as a success.
+        let verify_python = python_path.clone();
+        match tokio::task::spawn_blocking(move || platform::esphome_config_probe(&verify_python))
+            .await
+        {
+            Ok(Ok(None)) => {
+                info!("ESPHome install repaired");
+                platform::clear_package_reset_count(&python_path);
+            }
+            Ok(Ok(Some(detail))) => {
+                warn!("ESPHome install still broken after the package reset: {detail}")
+            }
+            Ok(Err(e)) => warn!("Could not re-check the ESPHome install after the reset: {e:#}"),
+            Err(e) => warn!("ESPHome health probe task panicked or was cancelled: {e:#}"),
+        }
     }
 
     /// Query PyPI for the latest available `esphome-device-builder` version.
@@ -849,12 +983,20 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// Remove orphaned duplicate `.dist-info` directories for the device-builder
 /// package and its frontend, keeping the highest version's metadata.
 ///
-/// The `--ignore-installed` install fallback (#155/#183) skips the uninstall and
-/// leaves the previous version's `.dist-info` behind; once several pile up,
+/// The `--ignore-installed` install fallback skipped the uninstall and left the
+/// previous version's `.dist-info` behind; once several pile up,
 /// `importlib.metadata` can no longer resolve a single version and the updater
 /// loops forever offering "version None" (#190). This heals that state. It is
 /// best-effort: a failure is logged and swallowed so it can never block an
 /// install or an update check.
+///
+/// Nothing produces this damage any more — the fallback that caused it is gone
+/// (see [`install_with_record_recovery`]) and a package reset leaves no orphans.
+/// It stays because trees damaged *before* that change still exist in the wild,
+/// and nothing else recovers them: duplicate metadata does not fail an install
+/// or the `esphome config` health probe, so neither repair path would ever fire.
+/// Delete it once the installed base has cycled past the releases that shipped
+/// the fallback.
 pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     let python_path = platform::get_python_path(app_handle)?;
 
@@ -927,23 +1069,9 @@ async fn detect_device_builder_version_with_heal_async(
 /// prefix supplied by [`crate::platform::pip_command`]) for installing/upgrading
 /// `esphome-device-builder`.
 ///
-/// When `ignore_installed` is false this is a plain `pip install --upgrade`,
-/// which attempts a clean uninstall of the existing copy first — the correct
-/// path for normal installs. Pass `true` only as a fallback for the
-/// missing-RECORD case (issue #155).
-///
-/// `--ignore-installed`: the device-builder package ships inside the bundled
-/// standalone Python tree, and on some installs its `dist-info/RECORD` is
-/// missing. A plain `pip install --upgrade` then tries to uninstall the
-/// existing copy first and aborts with `error: uninstall-no-record-file`
-/// ("no RECORD file was found"). Retrying with `--ignore-installed` skips the
-/// uninstall step and installs the new version over the top, which is pip's own
-/// documented recovery for this state.
-///
-/// Accepted side effect: skipping the uninstall leaves files present in the old
-/// version but removed/renamed in the new one orphaned in site-packages. That
-/// is why this is a fallback, not the default — it limits the orphaned-files
-/// trade-off to the genuinely-broken RECORD case instead of every upgrade.
+/// A plain `pip install --upgrade`, which uninstalls the existing copy cleanly
+/// first. There is deliberately no `--ignore-installed` variant: see
+/// [`install_with_record_recovery`].
 ///
 /// `version` pins the package to an exact release (`esphome-device-builder==X`).
 /// A plain `--upgrade` never *downgrades*, so switching the device builder from
@@ -951,15 +1079,8 @@ async fn detect_device_builder_version_with_heal_async(
 /// Passing the resolved stable version forces pip to install exactly that
 /// release, downgrading off the newer beta. Pass `None` to keep the package
 /// unpinned (the beta channel, which only ever moves forward).
-fn device_builder_install_args(
-    backend: Backend,
-    ignore_installed: bool,
-    version: Option<&str>,
-) -> Vec<String> {
+fn device_builder_install_args(backend: Backend, version: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec!["--upgrade".to_string()];
-    if ignore_installed {
-        args.push("--ignore-installed".to_string());
-    }
     if backend == Backend::BuilderBeta {
         args.push("--pre".to_string());
     }
@@ -970,14 +1091,13 @@ fn device_builder_install_args(
     args
 }
 
-/// Run `pip install` for `esphome-device-builder` with the given flags.
+/// Run `pip install` for `esphome-device-builder`.
 async fn run_device_builder_install(
     python_path: &std::path::Path,
     backend: Backend,
-    ignore_installed: bool,
     version: Option<&str>,
 ) -> Result<std::process::Output> {
-    let args = device_builder_install_args(backend, ignore_installed, version);
+    let args = device_builder_install_args(backend, version);
     let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
     cmd.output().await.context("Failed to run pip install")
@@ -990,29 +1110,16 @@ const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/de
 /// prefix supplied by [`crate::platform::pip_command`]) for installing ESPHome from
 /// the dev GitHub zip.
 ///
-/// When `ignore_installed` is false this is a plain `--force-reinstall`, which
-/// uninstalls the existing copy of each affected package first. Pass `true`
-/// only as a fallback for the missing-RECORD case: a bundled dependency such as
-/// `zeroconf` can ship without a `dist-info/RECORD` file, and `--force-reinstall`
-/// then aborts with `error: uninstall-no-record-file` ("no RECORD file was
-/// found", issue #183). `--ignore-installed` skips the uninstall and installs
-/// over the top — pip's own documented recovery — at the cost of leaving stale
-/// files orphaned, so it is limited to the genuinely-broken RECORD case.
-fn dev_install_args(ignore_installed: bool) -> Vec<&'static str> {
-    let mut args: Vec<&'static str> = vec!["--force-reinstall"];
-    if ignore_installed {
-        args.push("--ignore-installed");
-    }
-    args.push(ESPHOME_DEV_ZIP_URL);
-    args
+/// A plain `--force-reinstall`, which uninstalls the existing copy of each
+/// affected package first. There is deliberately no `--ignore-installed`
+/// variant: see [`install_with_record_recovery`].
+fn dev_install_args() -> Vec<&'static str> {
+    vec!["--force-reinstall", ESPHOME_DEV_ZIP_URL]
 }
 
-/// Run `pip install` for the ESPHome dev GitHub zip with the given flags.
-async fn run_dev_install(
-    python_path: &std::path::Path,
-    ignore_installed: bool,
-) -> Result<std::process::Output> {
-    let args = dev_install_args(ignore_installed);
+/// Run `pip install` for the ESPHome dev GitHub zip.
+async fn run_dev_install(python_path: &std::path::Path) -> Result<std::process::Output> {
+    let args = dev_install_args();
     let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
     cmd.output().await.context("Failed to run pip install")
@@ -1021,59 +1128,68 @@ async fn run_dev_install(
 /// Build the `pip install` argument list for a pinned stable/beta ESPHome
 /// release (`esphome==X`).
 ///
-/// When `ignore_installed` is false this is a plain pinned install, which
-/// uninstalls the differing installed copy first. Pass `true` only as the
-/// missing-RECORD fallback: if the bundled tree is missing its
-/// `dist-info/RECORD` file, that uninstall aborts with `error: uninstall-no-record-file`
-/// (#155/#183). `--ignore-installed` skips the uninstall and installs over the
-/// top — pip's documented recovery — at the cost of orphaning stale files, so
-/// it is limited to the genuinely-broken RECORD case.
-fn esphome_install_args(version: &str, ignore_installed: bool) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
-    if ignore_installed {
-        args.push("--ignore-installed".to_string());
-    }
-    args.push(format!("esphome=={version}"));
-    args
+/// A plain pinned install, which uninstalls the differing installed copy first.
+/// There is deliberately no `--ignore-installed` variant: see
+/// [`install_with_record_recovery`].
+fn esphome_install_args(version: &str) -> Vec<String> {
+    vec![format!("esphome=={version}")]
 }
 
-/// Run `pip install` for a pinned stable/beta ESPHome release with the given flags.
+/// Run `pip install` for a pinned stable/beta ESPHome release.
 async fn run_esphome_install(
     python_path: &std::path::Path,
     version: &str,
-    ignore_installed: bool,
 ) -> Result<std::process::Output> {
-    let args = esphome_install_args(version, ignore_installed);
+    let args = esphome_install_args(version);
     let mut cmd = platform::pip_command(python_path);
     cmd.args(&args);
     cmd.output().await.context("Failed to run pip install")
 }
 
-/// Detect pip's missing-RECORD abort, which is the failure that warrants the
-/// `--ignore-installed` retry (issue #155).
+/// Detect pip's missing-RECORD abort: the uninstall step cannot run because a
+/// package has no `dist-info/RECORD` listing its files (#155/#183).
+///
+/// This is the signal that the tree is corrupt rather than the install being
+/// wrong, so it is what selects the repair path in
+/// [`install_with_record_recovery`].
 fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
-/// Run a pip install with the shared broken-RECORD recovery policy (#155/#183).
+/// Run a pip install, repairing the tree if pip cannot uninstall the old copy
+/// (#155/#183/#330).
 ///
-/// `run(false)` performs the normal install (a clean uninstall of the old
-/// copy). If that aborts because a package has no `dist-info/RECORD` file
-/// (`is_missing_record_error`), `run(true)` retries with `--ignore-installed`,
-/// which skips the uninstall and installs over the top. Any other failure
-/// bails immediately, surfacing the original stderr. Both install paths share
-/// this orchestration so the recovery policy lives in one place.
-async fn install_with_record_retry<F, Fut>(
+/// `run` performs a normal install. If it aborts because a package has no
+/// `dist-info/RECORD` (`is_missing_record_error`), the tree is corrupt rather
+/// than the install being wrong, so `repair` resets the packages and `run` is
+/// tried once more against the clean tree. Any other failure bails immediately,
+/// surfacing the original stderr.
+///
+/// The previous recovery here retried with `--ignore-installed`, which is pip's
+/// documented way past a missing RECORD but skips the uninstall entirely. That
+/// silently orphans every file the old version had and the new one does not: a
+/// stale `esphome/components/rp2040/` broke every compile on 2026.7 (#330), and
+/// stale `.dist-info` dirs broke version detection (#190) — a bug we then
+/// shipped a maintenance script to clean up after. Repairing the tree properly
+/// removes the whole class rather than treating each symptom, and costs a
+/// reinstall on a path that only runs when the tree is already broken.
+///
+/// `repair` is injected rather than called directly so the policy stays
+/// testable without a live interpreter or PyPI.
+async fn install_with_record_recovery<F, Fut, R, RFut>(
     run: F,
+    repair: R,
     success_msg: &str,
-    retry_log: &str,
+    repair_log: &str,
     fail_prefix: &str,
 ) -> Result<()>
 where
-    F: Fn(bool) -> Fut,
+    F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<std::process::Output>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = Result<()>>,
 {
-    let output = run(false).await?;
+    let output = run().await?;
     if output.status.success() {
         info!("{success_msg}");
         return Ok(());
@@ -1084,10 +1200,12 @@ where
         anyhow::bail!("{fail_prefix}: {stderr}");
     }
 
-    info!("{retry_log}");
-    let retry = run(true).await?;
+    info!("{repair_log}");
+    repair().await.context("Python package reset failed")?;
+
+    let retry = run().await?;
     if retry.status.success() {
-        info!("{success_msg} (--ignore-installed fallback)");
+        info!("{success_msg} (after package reset)");
         Ok(())
     } else {
         anyhow::bail!("{fail_prefix}: {}", String::from_utf8_lossy(&retry.stderr));
@@ -1443,27 +1561,27 @@ mod tests {
     }
 
     #[test]
-    fn test_device_builder_install_args_default_no_ignore_installed() {
-        // The default (first-attempt) upgrade must NOT pass --ignore-installed,
-        // so normal installs still get a clean uninstall of the old copy.
+    fn test_device_builder_install_args_never_ignore_installed() {
+        // --ignore-installed skipped pip's uninstall and orphaned the old
+        // version's files, which is what broke every compile in #330. No input
+        // may reintroduce it; a broken tree is repaired by resetting the
+        // packages instead.
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
-            let args = device_builder_install_args(backend, false, None);
-            assert!(!has(&args, "--ignore-installed"), "backend {backend:?}");
-            assert!(has(&args, "--upgrade"), "backend {backend:?}");
-            assert_eq!(
-                args.last().map(String::as_str),
-                Some("esphome-device-builder")
-            );
+            for version in [None, Some("1.2.3")] {
+                let args = device_builder_install_args(backend, version);
+                assert!(
+                    !has(&args, "--ignore-installed"),
+                    "backend {backend:?} version {version:?}"
+                );
+                assert!(has(&args, "--upgrade"), "backend {backend:?}");
+            }
         }
     }
 
     #[test]
-    fn test_device_builder_install_args_ignore_installed_fallback() {
-        // The fallback path adds --ignore-installed so a missing RECORD file in
-        // the bundled install can't abort the retry (issue #155).
+    fn test_device_builder_install_args_default_unpinned() {
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
-            let args = device_builder_install_args(backend, true, None);
-            assert!(has(&args, "--ignore-installed"), "backend {backend:?}");
+            let args = device_builder_install_args(backend, None);
             assert!(has(&args, "--upgrade"), "backend {backend:?}");
             assert_eq!(
                 args.last().map(String::as_str),
@@ -1474,16 +1592,14 @@ mod tests {
 
     #[test]
     fn test_device_builder_install_args_pre_only_for_beta() {
-        for ignore_installed in [false, true] {
-            assert!(has(
-                &device_builder_install_args(Backend::BuilderBeta, ignore_installed, None),
-                "--pre"
-            ));
-            assert!(!has(
-                &device_builder_install_args(Backend::BuilderStable, ignore_installed, None),
-                "--pre"
-            ));
-        }
+        assert!(has(
+            &device_builder_install_args(Backend::BuilderBeta, None),
+            "--pre"
+        ));
+        assert!(!has(
+            &device_builder_install_args(Backend::BuilderStable, None),
+            "--pre"
+        ));
     }
 
     #[test]
@@ -1492,19 +1608,13 @@ mod tests {
         // exact release (`==X`). A plain `--upgrade` never downgrades, so the
         // pin is what forces pip off a newer installed beta onto the older
         // stable when switching channels.
-        for ignore_installed in [false, true] {
-            let args = device_builder_install_args(
-                Backend::BuilderStable,
-                ignore_installed,
-                Some("1.2.3"),
-            );
-            assert!(has(&args, "--upgrade"));
-            assert!(!has(&args, "--pre"));
-            assert_eq!(
-                args.last().map(String::as_str),
-                Some("esphome-device-builder==1.2.3")
-            );
-        }
+        let args = device_builder_install_args(Backend::BuilderStable, Some("1.2.3"));
+        assert!(has(&args, "--upgrade"));
+        assert!(!has(&args, "--pre"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("esphome-device-builder==1.2.3")
+        );
     }
 
     #[test]
@@ -1519,53 +1629,33 @@ mod tests {
     #[test]
     fn test_is_missing_record_error_dev_zeroconf() {
         // The #183 dev-channel failure: a dependency (zeroconf) lacks a RECORD
-        // file, which must also trigger the --ignore-installed retry.
+        // file, which must also select the repair path.
         assert!(is_missing_record_error(
             "error: uninstall-no-record-file\n\n× Cannot uninstall zeroconf None\n╰─> The package's contents are unknown: no RECORD file was found for zeroconf."
         ));
     }
 
     #[test]
-    fn test_dev_install_args_default_no_ignore_installed() {
-        // The default (first-attempt) dev install must NOT pass
-        // --ignore-installed, so a normal install still reinstalls cleanly.
-        let args = dev_install_args(false);
+    fn test_dev_install_args_never_ignore_installed() {
+        // See test_device_builder_install_args_never_ignore_installed (#330).
+        let args = dev_install_args();
         assert!(!args.contains(&"--ignore-installed"));
         assert!(args.contains(&"--force-reinstall"));
         assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
     }
 
     #[test]
-    fn test_dev_install_args_ignore_installed_fallback() {
-        // The fallback adds --ignore-installed so a missing RECORD file in a
-        // bundled dependency can't abort the retry (issue #183).
-        let args = dev_install_args(true);
-        assert!(args.contains(&"--ignore-installed"));
-        assert!(args.contains(&"--force-reinstall"));
-        assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
-    }
-
-    #[test]
-    fn test_esphome_install_args_default_no_ignore_installed() {
-        // The default (first-attempt) stable/beta install must NOT pass
-        // --ignore-installed, so a normal update still uninstalls cleanly.
-        let args = esphome_install_args("2025.7.0", false);
+    fn test_esphome_install_args_never_ignore_installed() {
+        // See test_device_builder_install_args_never_ignore_installed (#330).
+        // The version stays pinned so the install can still downgrade off a
+        // newer installed copy.
+        let args = esphome_install_args("2025.7.0");
         assert!(!args.iter().any(|a| a == "--ignore-installed"));
         assert_eq!(args.last(), Some(&"esphome==2025.7.0".to_string()));
     }
 
-    #[test]
-    fn test_esphome_install_args_ignore_installed_fallback() {
-        // The fallback adds --ignore-installed so a missing RECORD file in the
-        // bundled tree can't abort the retry (#155/#183), while still pinning
-        // the exact version so it can downgrade off a newer installed copy.
-        let args = esphome_install_args("2025.7.0", true);
-        assert!(args.iter().any(|a| a == "--ignore-installed"));
-        assert_eq!(args.last(), Some(&"esphome==2025.7.0".to_string()));
-    }
-
     /// Build a canned `Output` with the given success flag and stderr, so the
-    /// retry orchestration can be unit-tested without spawning pip.
+    /// recovery orchestration can be unit-tested without spawning pip.
     fn fake_output(success: bool, stderr: &str) -> std::process::Output {
         #[cfg(unix)]
         let status = {
@@ -1585,78 +1675,147 @@ mod tests {
         }
     }
 
+    /// Count install attempts and repairs for the orchestration tests.
+    #[derive(Default)]
+    struct RecoverySpy {
+        installs: std::sync::atomic::AtomicUsize,
+        repairs: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RecoverySpy {
+        fn note_install(&self) -> usize {
+            self.installs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+        fn note_repair(&self) {
+            self.repairs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn counts(&self) -> (usize, usize) {
+            (
+                self.installs.load(std::sync::atomic::Ordering::SeqCst),
+                self.repairs.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+    }
+
     #[tokio::test]
-    async fn test_install_with_record_retry_success_first_try() {
-        // A clean install never triggers the --ignore-installed retry.
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-        let seen = calls.clone();
-        let result = install_with_record_retry(
-            move |ignore| {
-                let seen = seen.clone();
+    async fn test_install_with_record_recovery_success_first_try() {
+        // A clean install never resets the packages.
+        let spy = std::sync::Arc::new(RecoverySpy::default());
+        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
+        let result = install_with_record_recovery(
+            move || {
+                let spy = run_spy.clone();
                 async move {
-                    seen.lock().unwrap().push(ignore);
+                    spy.note_install();
                     Ok(fake_output(true, ""))
                 }
             },
+            || async move {
+                repair_spy.note_repair();
+                Ok(())
+            },
             "ok",
-            "retrying",
+            "repairing",
             "failed",
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(*calls.lock().unwrap(), vec![false]);
+        assert_eq!(spy.counts(), (1, 0));
     }
 
     #[tokio::test]
-    async fn test_install_with_record_retry_recovers_on_missing_record() {
-        // First attempt aborts on a missing RECORD file; the helper retries
-        // with ignore_installed=true and succeeds (issues #155/#183).
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-        let seen = calls.clone();
-        let result = install_with_record_retry(
-            move |ignore| {
-                let seen = seen.clone();
+    async fn test_install_with_record_recovery_resets_on_missing_record() {
+        // The install aborts on a missing RECORD file, so the tree is reset and
+        // the install retried against it (#155/#183/#330). The retry must NOT be
+        // a different install: --ignore-installed is gone, so the only thing
+        // that changes between the two attempts is the state of the tree.
+        let spy = std::sync::Arc::new(RecoverySpy::default());
+        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
+        let result = install_with_record_recovery(
+            move || {
+                let spy = run_spy.clone();
                 async move {
-                    seen.lock().unwrap().push(ignore);
-                    if ignore {
-                        Ok(fake_output(true, ""))
-                    } else {
+                    // Fail only the first attempt; the reset "fixes" the tree.
+                    if spy.note_install() == 0 {
                         Ok(fake_output(false, "error: uninstall-no-record-file"))
+                    } else {
+                        Ok(fake_output(true, ""))
                     }
                 }
             },
+            || async move {
+                repair_spy.note_repair();
+                Ok(())
+            },
             "ok",
-            "retrying",
+            "repairing",
             "failed",
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+        assert_eq!(spy.counts(), (2, 1));
     }
 
     #[tokio::test]
-    async fn test_install_with_record_retry_bails_on_other_failure() {
+    async fn test_install_with_record_recovery_bails_on_other_failure() {
         // A failure that is NOT a missing-RECORD abort bails immediately,
-        // surfacing the original stderr without retrying.
-        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-        let seen = calls.clone();
-        let result = install_with_record_retry(
-            move |ignore| {
-                let seen = seen.clone();
+        // surfacing the original stderr. Nothing is deleted: the tree is not
+        // implicated, so wiping it would destroy a working install over an
+        // unrelated failure (a bad version pin, a network blip).
+        let spy = std::sync::Arc::new(RecoverySpy::default());
+        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
+        let result = install_with_record_recovery(
+            move || {
+                let spy = run_spy.clone();
                 async move {
-                    seen.lock().unwrap().push(ignore);
+                    spy.note_install();
                     Ok(fake_output(false, "some other pip failure"))
                 }
             },
+            || async move {
+                repair_spy.note_repair();
+                Ok(())
+            },
             "ok",
-            "retrying",
+            "repairing",
             "pip blew up",
         )
         .await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("pip blew up"));
         assert!(err.contains("some other pip failure"));
-        assert_eq!(*calls.lock().unwrap(), vec![false]);
+        assert_eq!(spy.counts(), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn test_install_with_record_recovery_surfaces_repair_failure() {
+        // A reset that cannot run (PyPI unreachable, no manifest) must fail the
+        // install with that reason rather than retrying into the same abort.
+        let spy = std::sync::Arc::new(RecoverySpy::default());
+        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
+        let result = install_with_record_recovery(
+            move || {
+                let spy = run_spy.clone();
+                async move {
+                    spy.note_install();
+                    Ok(fake_output(false, "error: uninstall-no-record-file"))
+                }
+            },
+            || async move {
+                repair_spy.note_repair();
+                anyhow::bail!("pypi unreachable")
+            },
+            "ok",
+            "repairing",
+            "failed",
+        )
+        .await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("pypi unreachable"), "{err}");
+        // The install is not retried after a failed repair.
+        assert_eq!(spy.counts(), (1, 1));
     }
 
     #[test]
