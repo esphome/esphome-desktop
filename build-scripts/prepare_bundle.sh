@@ -10,6 +10,9 @@
 # Note: No venv is used to avoid absolute path issues in bundled executables
 #
 # Usage: ./prepare_bundle.sh [platform]
+#
+# PREPARE_PYTHON_ONLY=1 stops after step 2, leaving the tree in
+# build/python-<platform> and src-tauri/ untouched; see the check below.
 
 set -e
 
@@ -548,9 +551,24 @@ fi
 
 echo "=== Preparing ESPHome bundle for ${PLATFORM} ==="
 
+mkdir -p "$BUILD_DIR"
+
+# PREPARE_PYTHON_ONLY=1 stops once build/python-<platform> is ready: the same
+# tree, from the same code path, but without the release-only tail (the copy
+# into src-tauri/python; MinGit, patch.exe and ccache on Windows). Used by
+# python-tree-repair.yml, whose e2e reads only the build/ tree and which stubs
+# the src-tauri resource dirs itself; this path must not touch src-tauri/ at
+# all, or it would delete those stubs out from under the crate build (#336).
+if [[ "${PREPARE_PYTHON_ONLY:-0}" == "1" ]]; then
+    prepare_python_for_platform "$PLATFORM"
+    echo ""
+    echo "=== Python tree ready (PREPARE_PYTHON_ONLY) ==="
+    echo "Location: $BUILD_DIR/python-${PLATFORM}"
+    exit 0
+fi
+
 # Clean up previous builds
 rm -rf "$BUNDLE_DIR"
-mkdir -p "$BUILD_DIR"
 
 prepare_python_for_platform "$PLATFORM"
 prepare_git_for_platform "$PLATFORM"
