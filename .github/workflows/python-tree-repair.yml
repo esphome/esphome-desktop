@@ -115,3 +115,9 @@ jobs:
             echo "::error::e2e_repair_cycle did not run; this job proved nothing"
             exit 1
           }
+          # The prefix also matches the "... ignored" listing a run without
+          # `--ignored` would print, so reject that verdict explicitly.
+          if grep -qF 'test platform::tests::e2e_repair_cycle ... ignored' result.log; then
+            echo "::error::e2e_repair_cycle was listed as ignored, not run"
+            exit 1
+          fi

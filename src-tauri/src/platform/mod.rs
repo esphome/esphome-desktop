@@ -963,6 +963,25 @@ mod tests {
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
         let output = run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        e2e_verdict(output)
+    }
+
+    /// [`e2e_run`] with the pip env isolation production pip calls layer on
+    /// top ([`process::isolate_pip_command`]). The interpreter isolation alone
+    /// is not enough for a pip invocation: an ambient `PIP_REQUIRE_VIRTUALENV`
+    /// would fail the install, and a `PIP_TARGET`/`PIP_PREFIX` would aim it
+    /// outside the tree under test.
+    fn e2e_pip(python: &Path, args: &[&str]) -> (bool, String) {
+        let mut cmd = process::python_command(python, args);
+        process::isolate_pip_command(&mut cmd);
+        let output = cmd
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        e2e_verdict(output)
+    }
+
+    /// Collapse a finished child to (success, stdout+stderr).
+    fn e2e_verdict(output: std::process::Output) -> (bool, String) {
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         (output.status.success(), combined)
@@ -1119,7 +1138,7 @@ mod tests {
             .expect("could not copy the bundle to a second source");
         let old_python = interpreter_in_tree(&old_bundle);
         let downgrade_spec = format!("esphome<{current}");
-        let (ok, out) = e2e_run(
+        let (ok, out) = e2e_pip(
             &old_python,
             &["-m", "pip", "install", "--no-deps", downgrade_spec.as_str()],
         );
