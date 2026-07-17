@@ -906,10 +906,11 @@ const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 enum BoundedRun {
     /// It exited on its own, within the deadline.
     Exited(std::process::Output),
-    /// It outlived the deadline and was killed. The pipes are still drained, so
-    /// whatever it printed before the kill survives — for a hung install that
-    /// partial output is the only diagnostic there is.
-    TimedOut { stdout: Vec<u8>, stderr: Vec<u8> },
+    /// It outlived the deadline and was killed. Its stderr survives the kill —
+    /// for a hung install that partial output is the only diagnostic there is.
+    /// stdout is drained too, since that is what keeps the child off a full pipe,
+    /// but not kept: no caller has wanted a killed child's stdout.
+    TimedOut { stderr: Vec<u8> },
 }
 
 /// Run an already-configured `cmd` to completion, killing it if it outlives
@@ -959,8 +960,10 @@ fn run_bounded(
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            // Join the stdout reader before returning so the thread cannot
+            // outlive the call, even though its bytes go nowhere.
+            let _ = collect(stdout_reader);
             return Ok(BoundedRun::TimedOut {
-                stdout: collect(stdout_reader),
                 stderr: collect(stderr_reader),
             });
         }
@@ -976,12 +979,13 @@ fn run_bounded(
 #[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
     let spec = format!("{}=={}", package, version);
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-m", "pip", "install", &spec]);
-    // stderr only: pip's diagnostics go there, and nothing reads its stdout.
-    cmd.stderr(std::process::Stdio::piped());
+    let mut cmd = python_command(python_bin, ["-m", "pip", "install", &spec]);
+    // The builder isolates the interpreter; pip needs its own env off too, and
+    // every edit is an idempotent `env`/`env_remove`, so layering is a no-op.
     isolate_pip_command(&mut cmd);
-    configure_no_window_command(&mut cmd);
+    // stderr only: pip's diagnostics go there, and nothing reads its stdout —
+    // which also keeps its resolver output out of the capture buffer entirely.
+    cmd.stderr(std::process::Stdio::piped());
 
     let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
     match run_bounded(cmd, PIP_INSTALL_TIMEOUT).context("Failed to run pip install")? {
@@ -993,7 +997,7 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
                 stderr_tail(&output.stderr)
             )
         }
-        BoundedRun::TimedOut { stderr, .. } => anyhow::bail!(
+        BoundedRun::TimedOut { stderr } => anyhow::bail!(
             "pip install {} timed out after {:?}; partial stderr: {}",
             spec,
             PIP_INSTALL_TIMEOUT,
@@ -1352,14 +1356,14 @@ fn make_probe_dir() -> Result<PathBuf> {
 }
 
 /// Filename of the counter bounding how many times the health probe may trigger
-/// a repair. Lives at `<data_dir>/.package-reset-count`.
+/// a repair. Lives at `<data_dir>/.repair-count`.
 ///
 /// Beside the Python tree, never inside it. On macOS and Linux the repair *is*
 /// `remove_dir_all` of the whole tree, so a counter kept within it would be
 /// destroyed by the very repair it exists to bound: every launch would read
 /// zero, wipe, re-copy, and do it again forever — exactly the loop
-/// [`MAX_PACKAGE_RESETS`] is here to stop.
-const PACKAGE_RESET_MARKER: &str = ".package-reset-count";
+/// [`MAX_REPAIRS`] is here to stop.
+const REPAIR_COUNT_MARKER: &str = ".repair-count";
 
 /// Maximum repairs triggered by a failing health probe before giving up.
 ///
@@ -1369,19 +1373,19 @@ const PACKAGE_RESET_MARKER: &str = ".package-reset-count";
 /// Unbounded, that would wipe and rebuild the tree on every single launch. Two
 /// covers the real case (one repair fixes it, the next launch probes clean)
 /// while turning an unfixable failure into a bounded cost and a loud log.
-const MAX_PACKAGE_RESETS: u32 = 2;
+const MAX_REPAIRS: u32 = 2;
 
 /// Whether a failing health probe is allowed to trigger another repair,
 /// recording the attempt if so.
 ///
 /// Takes the data dir rather than the tree so the count survives a repair that
-/// replaces the tree wholesale; see [`PACKAGE_RESET_MARKER`]. Nothing resets the
-/// budget implicitly — [`clear_package_reset_count`] does it, once a probe
+/// replaces the tree wholesale; see [`REPAIR_COUNT_MARKER`]. Nothing resets the
+/// budget implicitly — [`clear_repair_count`] does it, once a probe
 /// actually passes.
-pub fn may_reset_packages(data_dir: &Path) -> bool {
-    let marker = data_dir.join(PACKAGE_RESET_MARKER);
+pub fn may_repair_tree(data_dir: &Path) -> bool {
+    let marker = data_dir.join(REPAIR_COUNT_MARKER);
     let attempts = read_counter(&marker);
-    if attempts >= MAX_PACKAGE_RESETS {
+    if attempts >= MAX_REPAIRS {
         return false;
     }
     // Record before acting, not after: a repair that dies partway through must
@@ -1390,15 +1394,25 @@ pub fn may_reset_packages(data_dir: &Path) -> bool {
     bump_counter(&marker, attempts + 1)
 }
 
+/// Whether a *future* launch would still be allowed a repair, without spending
+/// anything. [`may_repair_tree`] answers the same question by consuming an
+/// attempt, which is the wrong tool for deciding what to tell the user.
+///
+/// This is what makes "reopening will try again" a claim we can check rather
+/// than assume: once the budget is spent, nothing retries until a probe passes.
+pub fn repair_budget_left(data_dir: &Path) -> bool {
+    read_counter(&data_dir.join(REPAIR_COUNT_MARKER)) < MAX_REPAIRS
+}
+
 /// Forget any recorded repair attempts, once the tree is proven healthy.
 ///
 /// A missing marker is the normal case and says nothing. Any other failure does:
-/// it pins the counter at [`MAX_PACKAGE_RESETS`] forever, so a later and
+/// it pins the counter at [`MAX_REPAIRS`] forever, so a later and
 /// perfectly fixable breakage is never repaired and the log only ever claims the
 /// budget is spent. That is worth a line, for the same reason [`bump_counter`]
 /// reports its own write failures rather than swallowing them.
-pub fn clear_package_reset_count(data_dir: &Path) {
-    let marker = data_dir.join(PACKAGE_RESET_MARKER);
+pub fn clear_repair_count(data_dir: &Path) {
+    let marker = data_dir.join(REPAIR_COUNT_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -4228,21 +4242,21 @@ mod tests {
         // rebuild the tree on every single launch, forever.
         let data_dir = unique_temp_dir("reset-bound");
 
-        for attempt in 1..=MAX_PACKAGE_RESETS {
+        for attempt in 1..=MAX_REPAIRS {
             assert!(
-                may_reset_packages(&data_dir),
+                may_repair_tree(&data_dir),
                 "repair {attempt} should be allowed"
             );
         }
         assert!(
-            !may_reset_packages(&data_dir),
+            !may_repair_tree(&data_dir),
             "the budget must run out rather than rebuild forever"
         );
 
         // A tree that proves healthy starts over, so an unrelated future
         // breakage still gets its full budget.
-        clear_package_reset_count(&data_dir);
-        assert!(may_reset_packages(&data_dir));
+        clear_repair_count(&data_dir);
+        assert!(may_repair_tree(&data_dir));
 
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -4252,20 +4266,20 @@ mod tests {
         // On macOS/Linux the repair is `remove_dir_all` of the whole Python
         // tree. A counter kept inside that tree would be destroyed by the very
         // repair it bounds, so every launch would read zero and rebuild again:
-        // the unbounded loop MAX_PACKAGE_RESETS exists to prevent.
+        // the unbounded loop MAX_REPAIRS exists to prevent.
         let data_dir = unique_temp_dir("reset-budget-survives");
         let python_tree = data_dir.join("python");
         std::fs::create_dir_all(python_tree.join("bin")).unwrap();
 
-        assert!(may_reset_packages(&data_dir), "first repair allowed");
+        assert!(may_repair_tree(&data_dir), "first repair allowed");
 
         // The repair replaces the tree.
         std::fs::remove_dir_all(&python_tree).unwrap();
         std::fs::create_dir_all(python_tree.join("bin")).unwrap();
 
-        assert!(may_reset_packages(&data_dir), "second repair allowed");
+        assert!(may_repair_tree(&data_dir), "second repair allowed");
         assert!(
-            !may_reset_packages(&data_dir),
+            !may_repair_tree(&data_dir),
             "the budget must not be reset by the repair that spends it"
         );
 

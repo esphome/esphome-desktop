@@ -63,7 +63,8 @@
     "repair_failed": "Your ESPHome install is damaged and could not be repaired automatically.\n\n{error}\n\nBuilds will fail until this is fixed. {hint}",
     "repair_incomplete": "Your ESPHome install is damaged and could not be repaired automatically.\n\nBuilds will fail until this is fixed. {hint}",
     "repair_hint_reinstall": "Uninstalling and reinstalling ESPHome Device Builder will recover it.",
-    "repair_hint_retry": "Reopening the app will try the repair again."
+    "repair_hint_retry": "Reopening the app will try the repair again.",
+    "repair_hint_delete_tree": "Deleting this folder and reopening the app will restore it:\n{path}"
   },
   "app_update": {
     "available_title": "Desktop Update Available",

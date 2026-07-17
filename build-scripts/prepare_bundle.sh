@@ -508,26 +508,22 @@ write_base_manifest() {
     # script gains later. `if !` also disables `set -e` for this one command,
     # which is exactly what lets us clean up before exiting on the path this
     # cleanup exists for — the generator's own asserts aborting mid-write.
+    #
+    # `download_verified` above does use a trap, and is fine doing so today only
+    # because it can assume the script sets no others; that assumption is what
+    # this avoids rather than adds a second copy of.
     if ! "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" > "$partial"; then
         rm -f "$partial"
         echo "ERROR: could not record the base packages" >&2
         exit 1
     fi
 
-    # The generator already asserts its output names pip and sweeps nothing empty,
-    # and the check above acts on that. This re-checks the file as *written*,
-    # which is the artifact that actually ships: it is the count we print anyway,
-    # and `grep -c` exits 1 on zero matches, which a substitution inside `echo`
-    # would throw away — a keep-less manifest would then print "Recorded 0 base
-    # entries" and ship, and surface as a refused repair on a user's machine
-    # months later.
+    # The count we print. `grep -c` exits 1 on zero matches and `set -e` acts on a
+    # bare assignment, so absorb it — but do not gate on it: the generator refuses
+    # to emit a keep-less manifest, and `parse_base_manifest` refuses to read one,
+    # so a third assertion here could only ever be unreachable.
     local keeps
     keeps=$(grep -c '^keep ' "$partial") || keeps=0
-    if [[ "$keeps" -eq 0 ]]; then
-        rm -f "$partial"
-        echo "ERROR: base manifest names nothing to keep" >&2
-        exit 1
-    fi
 
     mv -f "$partial" "$manifest"
     echo "Recorded ${keeps} base entries"

@@ -522,18 +522,26 @@ impl UpdateChecker {
             }
             Ok(None) => {
                 debug!("ESPHome health probe passed");
-                platform::clear_package_reset_count(&data_dir);
+                platform::clear_repair_count(&data_dir);
                 return;
             }
             Ok(Some(detail)) => detail,
         };
 
-        if !platform::may_reset_packages(&data_dir) {
+        if !platform::may_repair_tree(&data_dir) {
             warn!(
-                "ESPHome install looks broken but the package reset budget is spent, so it is \
-                 being left alone. Probe said: {detail}"
+                "ESPHome install looks broken but the repair budget is spent, so it is being \
+                 left alone. Probe said: {detail}"
             );
-            notify_repair_incomplete(app_handle);
+            // Not `repair_budget_left`: we were just refused, and an
+            // unwritable counter refuses while still reading under the bound.
+            notify_repair_needed(
+                app_handle,
+                t_with(
+                    "update.repair_incomplete",
+                    &[("hint", &repair_hint(&data_dir, false))],
+                ),
+            );
             return;
         }
 
@@ -544,7 +552,13 @@ impl UpdateChecker {
                 app_handle,
                 t_with(
                     "update.repair_failed",
-                    &[("error", &e.to_string()), ("hint", &repair_hint())],
+                    &[
+                        ("error", &e.to_string()),
+                        (
+                            "hint",
+                            &repair_hint(&data_dir, platform::repair_budget_left(&data_dir)),
+                        ),
+                    ],
                 ),
             );
             return;
@@ -556,11 +570,11 @@ impl UpdateChecker {
         match probe_esphome(&python_path).await {
             Ok(None) => {
                 info!("ESPHome install repaired");
-                platform::clear_package_reset_count(&data_dir);
+                platform::clear_repair_count(&data_dir);
             }
             Ok(Some(detail)) => {
                 warn!("ESPHome install still broken after the repair: {detail}");
-                notify_repair_incomplete(app_handle);
+                notify_repair_incomplete(app_handle, &data_dir);
             }
             // The repair ran but we could not confirm it. Treat that as
             // unrepaired rather than as success: the probe already proved the
@@ -571,7 +585,7 @@ impl UpdateChecker {
             // unconfirmed repair has not earned back its budget.
             Err(e) => {
                 warn!("Could not re-check the ESPHome install after the repair: {e:#}");
-                notify_repair_incomplete(app_handle);
+                notify_repair_incomplete(app_handle, &data_dir);
             }
         }
     }
@@ -1158,61 +1172,61 @@ async fn run_device_builder_install(
 /// URL of the ESPHome dev-branch source archive installed on the Dev channel.
 const ESPHOME_DEV_ZIP_URL: &str = "https://github.com/esphome/esphome/archive/dev.zip";
 
-/// Build the `pip install` argument list (appended after the `-m pip install`
-/// prefix supplied by [`crate::platform::pip_command`]) for installing ESPHome from
-/// the dev GitHub zip.
+/// Run `pip install` for the ESPHome dev GitHub zip.
 ///
 /// A plain `--force-reinstall`, which uninstalls the existing copy of each
 /// affected package first. There is deliberately no `--ignore-installed`
 /// variant: see [`install_with_record_recovery`].
-fn dev_install_args() -> Vec<&'static str> {
-    vec!["--force-reinstall", ESPHOME_DEV_ZIP_URL]
-}
-
-/// Run `pip install` for the ESPHome dev GitHub zip.
 async fn run_dev_install(python_path: &std::path::Path) -> Result<std::process::Output> {
-    let args = dev_install_args();
     let mut cmd = platform::pip_command(python_path);
-    cmd.args(&args);
+    cmd.args(["--force-reinstall", ESPHOME_DEV_ZIP_URL]);
     cmd.output().await.context("Failed to run pip install")
 }
 
-/// Build the `pip install` argument list for a pinned stable/beta ESPHome
-/// release (`esphome==X`).
+/// Run `pip install` for a pinned stable/beta ESPHome release (`esphome==X`).
 ///
 /// A plain pinned install, which uninstalls the differing installed copy first.
-/// There is deliberately no `--ignore-installed` variant: see
+/// The pin is what lets it downgrade off a newer installed copy. There is
+/// deliberately no `--ignore-installed` variant: see
 /// [`install_with_record_recovery`].
-fn esphome_install_args(version: &str) -> Vec<String> {
-    vec![format!("esphome=={version}")]
-}
-
-/// Run `pip install` for a pinned stable/beta ESPHome release.
 async fn run_esphome_install(
     python_path: &std::path::Path,
     version: &str,
 ) -> Result<std::process::Output> {
-    let args = esphome_install_args(version);
     let mut cmd = platform::pip_command(python_path);
-    cmd.args(&args);
+    cmd.arg(format!("esphome=={version}"));
     cmd.output().await.context("Failed to run pip install")
 }
 
 /// What the user can actually do about a tree we could not repair.
 ///
-/// Windows is the only platform with no bundled copy to restore from, and its
-/// uninstaller removes the whole install dir, broken tree included — which is
+/// Keyed on whether another attempt is genuinely coming, not just on the
+/// platform. Once the budget is spent nothing retries until a probe passes, so
+/// promising a retry there would be a fresh falsehood in place of the one this
+/// message already dropped — and it would repeat on every launch, forever.
+///
+/// With attempts left, "reopen and we will try again" is true everywhere.
+///
+/// With none left, the honest answer differs by platform, because the broken
+/// tree is in a different place. Windows has no bundled copy to restore from and
+/// its uninstaller removes the whole install dir, broken tree included — which is
 /// why reinstalling is the recovery there, and is what worked for the #330
 /// reporters. Telling a macOS or Linux user to reinstall would be worse than
-/// saying nothing: their broken tree lives in the app data dir, and
-/// `ensure_user_python` only re-copies when the version marker changes, so
-/// reinstalling the same version leaves it untouched and nothing appears to
-/// happen. There the repair is a local copy that will simply be retried.
-fn repair_hint() -> String {
+/// saying nothing: their tree is in the app data dir and an app reinstall never
+/// touches it, since `ensure_user_python` only re-copies when the version marker
+/// changes. What does work there is removing the tree — the next launch finds no
+/// interpreter and re-copies the bundle — so name that, and name the path.
+fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
+    if retryable {
+        return t("update.repair_hint_retry");
+    }
     if cfg!(target_os = "windows") {
         t("update.repair_hint_reinstall")
     } else {
-        t("update.repair_hint_retry")
+        t_with(
+            "update.repair_hint_delete_tree",
+            &[("path", &data_dir.join("python").display().to_string())],
+        )
     }
 }
 
@@ -1232,10 +1246,14 @@ async fn probe_esphome(python_path: &std::path::Path) -> Result<Option<String>> 
 
 /// Tell the user the tree is still broken after a repair, or that we could
 /// not confirm it is not.
-fn notify_repair_incomplete(app_handle: &AppHandle) {
+fn notify_repair_incomplete(app_handle: &AppHandle, data_dir: &std::path::Path) {
+    let retryable = platform::repair_budget_left(data_dir);
     notify_repair_needed(
         app_handle,
-        t_with("update.repair_incomplete", &[("hint", &repair_hint())]),
+        t_with(
+            "update.repair_incomplete",
+            &[("hint", &repair_hint(data_dir, retryable))],
+        ),
     );
 }
 
@@ -1276,9 +1294,18 @@ fn is_missing_record_error(stderr: &str) -> bool {
 ///
 /// `run` performs a normal install. If it aborts because a package has no
 /// `dist-info/RECORD` (`is_missing_record_error`), the tree is corrupt rather
-/// than the install being wrong, so `repair` resets the packages and `run` is
-/// tried once more against the clean tree. Any other failure bails immediately,
-/// surfacing the original stderr.
+/// than the install being wrong, so `repair` restores it and `run` is tried once
+/// more against the clean tree. Any other failure bails immediately, surfacing
+/// the original stderr.
+///
+/// The repair puts back the version the user had and `run` then installs the
+/// target over it, so this path can pip-install twice. That is deliberate, not
+/// an oversight: the repair cannot know which package its caller is about to
+/// install, and one that skipped the restore would silently downgrade whatever
+/// the caller was *not* installing — `install_device_builder` would leave esphome
+/// on the bundled version. Teaching the repair about the caller's target would
+/// couple the tree refresh to the update flow to save one install on a path that
+/// only runs when the tree is already corrupt.
 ///
 /// The previous recovery here retried with `--ignore-installed`, which is pip's
 /// documented way past a missing RECORD but skips the uninstall entirely. That
@@ -1483,6 +1510,7 @@ pub(crate) fn is_newer_version(latest: &str, installed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// True if the owned-`String` arg list contains the given flag.
     fn has(args: &[String], flag: &str) -> bool {
@@ -1746,24 +1774,33 @@ mod tests {
         // A missing key only warns and renders as the key itself, so an
         // unresolved one would ship `update.repair_failed` to the user as the
         // body of the notification telling them their install is broken.
-        for (body, key) in [
-            (
-                t_with(
+        let data_dir = Path::new("/data/io.esphome.builder");
+        for retryable in [true, false] {
+            for (body, key) in [
+                (
+                    t_with(
+                        "update.repair_failed",
+                        &[
+                            ("error", "boom"),
+                            ("hint", &repair_hint(data_dir, retryable)),
+                        ],
+                    ),
                     "update.repair_failed",
-                    &[("error", "boom"), ("hint", &repair_hint())],
                 ),
-                "update.repair_failed",
-            ),
-            (
-                t_with("update.repair_incomplete", &[("hint", &repair_hint())]),
-                "update.repair_incomplete",
-            ),
-        ] {
-            assert_ne!(body, key, "{key} is missing from the translations");
-            assert!(
-                !body.contains('{'),
-                "{key} has an unfilled placeholder: {body}"
-            );
+                (
+                    t_with(
+                        "update.repair_incomplete",
+                        &[("hint", &repair_hint(data_dir, retryable))],
+                    ),
+                    "update.repair_incomplete",
+                ),
+            ] {
+                assert_ne!(body, key, "{key} is missing from the translations");
+                assert!(
+                    !body.contains('{'),
+                    "{key} has an unfilled placeholder: {body}"
+                );
+            }
         }
         assert_ne!(
             t("update.repair_failed_title"),
@@ -1772,19 +1809,44 @@ mod tests {
         assert!(
             t_with("update.repair_failed", &[("error", "boom"), ("hint", "")]).contains("boom")
         );
+    }
 
-        // The recovery differs by platform and getting it wrong sends the user
-        // on a fix that does nothing: reinstalling replaces the tree on Windows,
-        // but on macOS/Linux the broken tree is in app data and an app reinstall
-        // never touches it.
-        let hint = repair_hint();
-        assert_ne!(hint, "update.repair_hint_reinstall");
-        assert_ne!(hint, "update.repair_hint_retry");
-        assert_eq!(
-            hint.contains("reinstall"),
-            cfg!(target_os = "windows"),
-            "only Windows should be told to reinstall: {hint}"
+    #[test]
+    fn the_repair_hint_only_promises_a_retry_that_can_happen() {
+        // The notice fires again on every launch while the tree stays broken, so
+        // a hint that promises a retry after the budget is spent is a falsehood
+        // repeated forever — which is what the message said before, on the very
+        // platform where it was least true.
+        let data_dir = Path::new("/data/io.esphome.builder");
+
+        let retryable = repair_hint(data_dir, true);
+        assert!(
+            retryable.contains("Reopening"),
+            "with attempts left, reopening really does retry: {retryable}"
         );
+
+        let exhausted = repair_hint(data_dir, false);
+        assert!(
+            !exhausted.contains("Reopening"),
+            "with no attempts left nothing retries; promising one is a lie: {exhausted}"
+        );
+
+        // With no retry coming, the advice has to be something that works, and
+        // that differs by where the broken tree lives. Reinstalling replaces it
+        // on Windows; on macOS/Linux it sits in app data, untouched by an app
+        // reinstall, so name the tree instead.
+        if cfg!(target_os = "windows") {
+            assert!(exhausted.contains("reinstall"), "{exhausted}");
+        } else {
+            assert!(
+                !exhausted.contains("reinstall"),
+                "reinstalling does not touch the app-data tree: {exhausted}"
+            );
+            assert!(
+                exhausted.contains(&data_dir.join("python").display().to_string()),
+                "name the folder the user has to remove: {exhausted}"
+            );
+        }
     }
 
     #[test]
@@ -1794,25 +1856,6 @@ mod tests {
         assert!(is_missing_record_error(
             "error: uninstall-no-record-file\n\n× Cannot uninstall zeroconf None\n╰─> The package's contents are unknown: no RECORD file was found for zeroconf."
         ));
-    }
-
-    #[test]
-    fn test_dev_install_args_never_ignore_installed() {
-        // See test_device_builder_install_args_never_ignore_installed (#330).
-        let args = dev_install_args();
-        assert!(!args.contains(&"--ignore-installed"));
-        assert!(args.contains(&"--force-reinstall"));
-        assert_eq!(args.last(), Some(&ESPHOME_DEV_ZIP_URL));
-    }
-
-    #[test]
-    fn test_esphome_install_args_never_ignore_installed() {
-        // See test_device_builder_install_args_never_ignore_installed (#330).
-        // The version stays pinned so the install can still downgrade off a
-        // newer installed copy.
-        let args = esphome_install_args("2025.7.0");
-        assert!(!args.iter().any(|a| a == "--ignore-installed"));
-        assert_eq!(args.last(), Some(&"esphome==2025.7.0".to_string()));
     }
 
     /// Build a canned `Output` with the given success flag and stderr, so the

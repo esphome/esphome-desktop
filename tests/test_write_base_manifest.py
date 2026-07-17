@@ -159,12 +159,13 @@ def running_tree_root() -> Path:
     `build_manifest` reads the *running* interpreter's sysconfig, so it can only
     be called in-process against that interpreter's own tree — handing it the
     venv's root trips the "outside the Python tree" guard instead of whatever the
-    test meant to exercise. Derived as the common ancestor of the two paths it
-    records, rather than `sys.prefix`, which symlinks can put somewhere else.
+    test meant to exercise. Derived as the common ancestor of the paths it
+    records, rather than `sys.prefix`, which symlinks can put somewhere else, and
+    read from the generator's own `SWEPT_PATHS` so adding a swept dir cannot
+    leave this answering for the wrong subset of the tree.
     """
-    purelib = Path(sysconfig.get_path("purelib")).resolve()
-    scripts = Path(sysconfig.get_path("scripts")).resolve()
-    return Path(os.path.commonpath([purelib, scripts]))
+    swept = [Path(sysconfig.get_path(key)).resolve() for key in maint.SWEPT_PATHS]
+    return Path(os.path.commonpath(swept))
 
 
 def test_rejects_a_swept_path_that_is_not_a_directory(
