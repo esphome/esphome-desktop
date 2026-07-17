@@ -522,58 +522,64 @@ impl UpdateChecker {
             // The probe could not run at all. That does NOT mean the interpreter
             // is broken: the probe also needs a writable temp dir and somewhere
             // to put a config, so a full disk fails it just as well. Ask the
-            // interpreter directly rather than inferring it — repairing on a
-            // full disk would delete a working tree and then fail to re-copy it,
-            // turning "builds are failing" into "there is no Python", which is
-            // worse than doing nothing.
+            // interpreter directly rather than inferring, on every platform —
+            // acting on the inference would either delete a working tree we
+            // cannot re-copy onto a full disk, or tell a user their install is
+            // damaged when it is their disk. Both are worse than doing nothing.
             //
-            // A wedged interpreter *is* worth repairing where a bundle re-copy
-            // can: that replaces the interpreter and needs nothing from the
-            // broken one. Windows has no bundle to copy and its reset drives pip
-            // with this same interpreter, so there is nothing to try.
+            // `interpreter_is_usable` is the right question to ask because it
+            // spawns nothing but the interpreter, so none of those environment
+            // failures can reach it.
             //
             // Deliberately not left to `ensure_user_python`'s own
             // `interpreter_is_usable` wipe: that only runs when `needs_copy` is
             // true, so a tree that broke without an app update keeps a matching
             // marker and is never reached.
-            Err(e) if platform::can_refresh_from_bundle(app_handle) => {
-                let unusable = {
-                    let probe_python = python_path.clone();
-                    tokio::task::spawn_blocking(move || {
-                        platform::interpreter_is_usable(&probe_python)
-                    })
-                    .await
-                    .map(|usable| !usable)
-                    .unwrap_or(false)
-                };
-                if !unusable {
+            Err(e) => {
+                match interpreter_usable(&python_path).await {
+                    Ok(true) => {
+                        warn!(
+                            "ESPHome health probe could not run, but the interpreter itself is \
+                             fine, so this is the environment rather than a tree we can repair: \
+                             {e:#}"
+                        );
+                        return;
+                    }
+                    // Nothing established that the interpreter is fine, so do not
+                    // act as though it had — in either direction.
+                    Err(join) => {
+                        warn!(
+                            "Could not check whether the interpreter is usable ({join}), so the \
+                             tree is being left alone. The probe said: {e:#}"
+                        );
+                        return;
+                    }
+                    Ok(false) => {}
+                }
+
+                // The interpreter really is wedged. A bundle re-copy fixes that
+                // and needs nothing from the broken one; Windows has no bundle,
+                // and its reset would drive pip with this very interpreter.
+                if !platform::can_refresh_from_bundle(app_handle) {
                     warn!(
-                        "ESPHome health probe could not run, but the interpreter itself is fine, \
-                         so this is not a tree we can repair: {e:#}"
+                        "The ESPHome interpreter cannot run and this platform has no bundle to \
+                         restore from, so no repair of ours applies: {e:#}"
+                    );
+                    // Nothing we can do is not nothing to say. Every build fails,
+                    // and reinstalling — which the hint gives, since nothing will
+                    // retry — is the only thing that fixes it. Staying quiet here
+                    // would leave the one case where the user is the only possible
+                    // actor as the one case we never tell them about.
+                    notify_repair_needed(
+                        app_handle,
+                        t_with(
+                            "update.repair_incomplete",
+                            &[("hint", &repair_hint(&data_dir, false))],
+                        ),
                     );
                     return;
                 }
                 format!("the interpreter could not run the health probe: {e:#}")
-            }
-            Err(e) => {
-                warn!(
-                    "ESPHome health probe could not run and this platform has no bundle to \
-                     restore from, so the repair would need the same broken interpreter: {e:#}"
-                );
-                // Nothing we can do is not nothing to say. This is Windows with
-                // an interpreter we cannot run: every build fails, no repair of
-                // ours applies, and reinstalling — which the hint gives, since
-                // nothing will retry — is the only thing that fixes it. Staying
-                // quiet here would leave the one case where the user is the only
-                // possible actor as the one case we never tell them about.
-                notify_repair_needed(
-                    app_handle,
-                    t_with(
-                        "update.repair_incomplete",
-                        &[("hint", &repair_hint(&data_dir, false))],
-                    ),
-                );
-                return;
             }
         };
 
@@ -1286,6 +1292,18 @@ fn repair_hint(data_dir: &std::path::Path, retryable: bool) -> String {
 /// callers get one three-armed answer — healthy, broken, or unknown — instead of
 /// each re-deciding what a panicked task means. The distinction survives in the
 /// error chain, which is where it belongs: nothing acts on it differently.
+/// Ask whether the interpreter itself runs, off the async executor.
+///
+/// `Err` is a failed check, not a failed interpreter — the caller must not
+/// collapse the two, or a panicking check would read as an affirmative "the
+/// interpreter is fine" that nothing established.
+async fn interpreter_usable(
+    python_path: &std::path::Path,
+) -> std::result::Result<bool, tokio::task::JoinError> {
+    let python = python_path.to_path_buf();
+    tokio::task::spawn_blocking(move || platform::interpreter_is_usable(&python)).await
+}
+
 async fn probe_esphome(python_path: &std::path::Path) -> Result<Option<String>> {
     let python = python_path.to_path_buf();
     tokio::task::spawn_blocking(move || platform::esphome_config_probe(&python))
