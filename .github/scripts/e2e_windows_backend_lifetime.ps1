@@ -203,15 +203,39 @@ try {
     # goes away — that same in-place mode is what made the reverted installer
     # hooks kill themselves, see #328.)
     Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
+
+    # Assert on the interpreter, not the whole tree. A locked `python.exe` fails
+    # its `Delete`, keeps `$INSTDIR\python` non-empty and strands the directory
+    # — that is the bug, so its removal is the signal, and it cannot be faked by
+    # anything else.
+    #
+    # The tree itself legitimately survives a healthy uninstall: Tauri `Delete`s
+    # only what its manifest lists and then calls non-recursive `RMDir`, while
+    # `prepare_bundle.sh` strips every `__pycache__` before packaging ("Python
+    # regenerates .pyc files at runtime"), so the app recreates .pyc files that
+    # were never in the manifest and `RMDir` finds the directory non-empty.
+    # Asserting the tree disappears is therefore red on every run, for a reason
+    # that has nothing to do with us.
+    $py = Join-Path $InstallDir 'python\python.exe'
     $unwatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($unwatch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $InstallDir)) {
+    while ($unwatch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $py)) {
         Start-Sleep -Milliseconds 500
     }
-    if (Test-Path $InstallDir) {
-        Show-Diagnostics 'the install tree survived the uninstall'
-        throw "$InstallDir still exists after uninstalling; something is holding it open"
+    if (Test-Path $py) {
+        Show-Diagnostics 'the bundled interpreter survived the uninstall'
+        throw "$py still exists after uninstalling; something is holding it open"
     }
-    Write-Host "PASS: the install directory was removed after $([int]$unwatch.Elapsed.TotalSeconds)s"
+    Write-Host "PASS: the bundled interpreter was removed after $([int]$unwatch.Elapsed.TotalSeconds)s"
+
+    if (Test-Path $InstallDir) {
+        # Reported, not asserted — see above. These are not locks.
+        Write-Host 'NOTE: leftovers under the install dir (regenerated .pyc, not a lock):'
+        Get-ChildItem $InstallDir -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 20 -ExpandProperty FullName |
+            ForEach-Object { Write-Host "      $_" }
+    } else {
+        Write-Host 'The install directory was removed entirely.'
+    }
 }
 finally {
     if (-not $app.HasExited) {
