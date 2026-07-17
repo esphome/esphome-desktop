@@ -469,6 +469,24 @@ const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 /// many defers we stop deferring and wipe to re-copy a clean bundle.
 const MAX_REFRESH_DEFERS: u32 = 3;
 
+/// Why [`ensure_user_python`] was called. The caller always knows; passing it in
+/// keeps one function the single place that decides whether to refresh the tree,
+/// and lets that decision differ by intent instead of guessing from the marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshReason {
+    /// A normal launch. Copy on first run or when the app version changed, and
+    /// defer if the package versions cannot be read (see [`MAX_REFRESH_DEFERS`]).
+    Startup,
+    /// A user migrating off the removed classic dashboard backend. Never defers:
+    /// the daemon now always launches `esphome_device_builder`, and an old
+    /// classic tree may not have it.
+    ClassicMigration,
+    /// The tree is known broken (#330). Refresh unconditionally: the marker is
+    /// beside the point, and deferring would leave a tree we have already proven
+    /// cannot build.
+    Repair,
+}
+
 /// Ensure the user Python exists by copying from bundled Python if needed.
 ///
 /// A version marker file is written into the user Python directory after the
@@ -476,10 +494,22 @@ const MAX_REFRESH_DEFERS: u32 = 3;
 /// current desktop-app version, the directory is wiped and re-copied so that
 /// updated app releases ship a fresh Python tree (e.g. new ESPHome version,
 /// changed dependencies). Without this, the first-run copy persisted forever.
-pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) -> Result<()> {
+///
+/// [`RefreshReason::Repair`] additionally forces the copy, which is how a broken
+/// tree is fixed on the platforms that keep a pristine bundle.
+pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        let _ = force_device_builder;
+        // Windows keeps no copy: the backend runs straight out of the install
+        // dir. Returning Ok to a caller asking for a repair would report a fix
+        // that never happened, so say so instead. `can_refresh_from_bundle`
+        // steers callers away from here, and this makes the silent no-op
+        // impossible rather than merely unlikely.
+        if reason == RefreshReason::Repair {
+            anyhow::bail!(
+                "Windows has no bundled copy to refresh from; the backend runs out of the install dir"
+            );
+        }
         let resource_dir = get_bundled_resource_dir(app_handle)?;
         let bundled_python = resource_dir.join("python").join("python.exe");
 
@@ -504,7 +534,12 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             .map(|s| s.trim() == current_version)
             .unwrap_or(false);
 
-        let needs_copy = !python_check.exists() || !marker_matches;
+        // A repair refreshes whatever the marker says: it is called because the
+        // tree has already been proven broken, and its marker will match
+        // whenever the breakage arrived without an app update — which is exactly
+        // the #330 case.
+        let needs_copy =
+            reason == RefreshReason::Repair || !python_check.exists() || !marker_matches;
 
         if needs_copy {
             let resource_dir = get_bundled_resource_dir(app_handle)?;
@@ -519,10 +554,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             // Without this, a user who pip-bumped ESPHome past the bundled
             // version would silently get downgraded by every app self-update.
             //
-            // When `force_device_builder` is set (a user migrating off the
-            // removed classic dashboard), `esphome-device-builder` is left out
-            // of the snapshot so the freshly bundled copy always wins and the
-            // user lands on the current device builder.
+            // For `ClassicMigration` (a user migrating off the removed classic
+            // dashboard), `esphome-device-builder` is left out of the snapshot
+            // so the freshly bundled copy always wins and the user lands on the
+            // current device builder.
             //
             // If the probe FAILS (as opposed to the package being absent), we
             // cannot tell whether the user pinned a newer version, so wiping
@@ -530,7 +565,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             // this snapshot exists to prevent. In that case defer the refresh:
             // keep the working tree, log a warning, and retry next launch.
             let preserved = if python_check.exists() {
-                match snapshot_preserved_versions(&python_check, force_device_builder) {
+                match snapshot_preserved_versions(
+                    &python_check,
+                    reason == RefreshReason::ClassicMigration,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
                         // A probe error means we can't trust a snapshot — but
@@ -550,12 +588,17 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                         // the wipe to re-copy a clean bundle. The counter lives
                         // inside the tree, so it resets the moment we wipe.
                         //
-                        // Never defer while forcing the device builder (classic
-                        // migration): the daemon now always launches
-                        // `esphome_device_builder`, and an old classic tree may
-                        // not have it, so we must refresh to the bundle that
-                        // does rather than keep the old tree another launch.
-                        if !force_device_builder && interpreter_is_usable(&python_check) {
+                        // Only a routine `Startup` may defer, because deferring
+                        // answers a question only `Startup` is asking: "is this
+                        // refresh worth the risk of discarding a pinned
+                        // version?" A `ClassicMigration` must land on the
+                        // bundled device builder, and a `Repair` was called
+                        // because the tree is already proven broken — keeping it
+                        // another launch is the wrong answer to both, and the
+                        // caller has no way to tell that its request was
+                        // silently dropped.
+                        if reason == RefreshReason::Startup && interpreter_is_usable(&python_check)
+                        {
                             let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
                             let defers = read_counter(&defer_marker);
                             if defers < MAX_REFRESH_DEFERS
@@ -581,10 +624,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                                  to recover."
                             );
                             PreservedVersions::default()
-                        } else if force_device_builder {
+                        } else if reason != RefreshReason::Startup {
                             warn!(
-                                "Could not read existing Python package versions ({e:#}) while \
-                                 migrating off the classic backend; refreshing to the bundled tree."
+                                "Could not read existing Python package versions ({e:#}) during a \
+                                 {reason:?}; refreshing to the bundled tree anyway."
                             );
                             PreservedVersions::default()
                         } else {
@@ -691,7 +734,7 @@ fn interpreter_is_usable(python_bin: &Path) -> bool {
 /// Read a persisted attempt counter, returning 0 when the marker is missing or
 /// unparseable (treat a damaged counter as a fresh start rather than blocking
 /// the self-heal it bounds).
-pub(crate) fn read_counter(marker_path: &Path) -> u32 {
+fn read_counter(marker_path: &Path) -> u32 {
     std::fs::read_to_string(marker_path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -703,7 +746,7 @@ pub(crate) fn read_counter(marker_path: &Path) -> u32 {
 /// caller must NOT take the bounded action again — otherwise a persistently
 /// unwritable marker would re-introduce the very unbounded loop the counter
 /// exists to stop, just triggered by a failed write instead of a failed read.
-pub(crate) fn bump_counter(marker_path: &Path, count: u32) -> bool {
+fn bump_counter(marker_path: &Path, count: u32) -> bool {
     match crate::util::atomic_write(marker_path, count.to_string()) {
         Ok(()) => true,
         Err(e) => {
@@ -823,9 +866,10 @@ fn parse_probe_output(
 }
 
 /// Hard upper bound on a single `pip install` invocation during the
-/// version-restore and package-reset paths. Five minutes is well over the time
-/// needed to upgrade `esphome` on a working connection; bounding it prevents a
-/// stalled network from hanging app startup indefinitely.
+/// version-restore path. Five minutes is well over the time needed to upgrade
+/// `esphome` on a working connection; bounding it prevents a stalled network
+/// from hanging app startup indefinitely.
+#[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Maximum length of pip stderr included in a failure error message. pip's
@@ -858,6 +902,7 @@ fn tail_for_log(s: &str) -> String {
 /// needing `--pre`. On timeout the child is killed and an error is returned;
 /// the caller logs a warning and falls back to the bundled version, so a
 /// stalled pip can't block app launch.
+#[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
     use std::io::Read;
     use std::time::{Duration, Instant};
@@ -1060,6 +1105,11 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
 /// False on Windows, which has no second copy — the backend runs straight out of
 /// the install dir and `ensure_user_python` returns early — so there is nothing
 /// to re-copy from and the repair has to come from PyPI.
+///
+/// That Windows gap is the only reason the manifest and [`wipe_installed_packages`]
+/// exist. Close it (#335 — give Windows the app-data copy) and this function,
+/// the whole manifest subsystem, and the PyPI reset all go, leaving
+/// `ensure_user_python(.., RefreshReason::Repair)` as the one repair everywhere.
 pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
     if cfg!(target_os = "windows") {
         return false;
@@ -1067,50 +1117,6 @@ pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
     get_bundled_resource_dir(app_handle)
         .map(|dir| dir.join("python").is_dir())
         .unwrap_or(false)
-}
-
-/// Repair the managed tree by re-copying the pristine bundle over it, now.
-///
-/// [`ensure_user_python`] already does exactly this whenever the version marker
-/// does not match the running app — it is how macOS and Linux quietly heal
-/// themselves at every release, and why #330 was only ever reported on Windows.
-/// A tree broken *between* releases keeps a matching marker, so it is skipped;
-/// dropping the marker is how we say "re-copy now" without teaching that
-/// function a second reason to run.
-///
-/// Deliberately not "invalidate the marker and let the next launch handle it":
-/// we know what to do and nothing is stopping us doing it. The caller runs
-/// before the daemon starts, so nothing holds the tree open, and the user gets a
-/// working install this launch rather than being asked to restart.
-///
-/// The copy also restores any version the user pinned above the bundle's, via
-/// `ensure_user_python`'s existing snapshot/restore. That reinstall is
-/// best-effort, so an offline user lands on the bundled version rather than
-/// nothing — the whole point of preferring this to a PyPI reset.
-#[cfg_attr(target_os = "windows", allow(unused_variables))]
-pub fn refresh_user_python_from_bundle(app_handle: &AppHandle) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    anyhow::bail!(
-        "Windows has no bundled copy to refresh from; the backend runs out of the install dir"
-    );
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let marker = get_data_dir(app_handle)?
-            .join("python")
-            .join(PYTHON_VERSION_MARKER);
-        match std::fs::remove_file(&marker) {
-            Ok(()) => {}
-            // Already absent: `ensure_user_python` will re-copy regardless.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to clear {marker:?}"));
-            }
-        }
-        // `false`: this is a repair, not a migration off the classic backend, so
-        // the user's device-builder version is preserved as usual.
-        ensure_user_python(app_handle, false)
-    }
 }
 
 /// Resolve the interpreter the package reset is allowed to delete from,
@@ -3439,7 +3445,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_passes_short_input_through_trimmed() {
         assert_eq!(tail_for_log("  hello  "), "hello");
@@ -3453,7 +3458,6 @@ mod tests {
         assert_eq!(v, Some("2026.5.0".to_string()));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
         let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
@@ -3469,7 +3473,6 @@ mod tests {
         assert_eq!(v, None, "clean exit with no output means not installed");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_truncates_to_the_tail_with_marker() {
         let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
@@ -3484,7 +3487,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_does_not_split_a_multibyte_char() {
         // 1366 * 3 bytes = 4098 > 4096; the naive cut at len-4096 lands at
@@ -3592,9 +3594,10 @@ mod tests {
     /// in the reset infers this layout.
     const TEST_PURELIB: &str = "lib/python3.13/site-packages";
 
-    /// Interpreter path for a fake tree, laid out the way the real bundle is on
-    /// this platform so [`python_tree_root`] resolves back to `root`.
-    fn fake_python_bin(root: &Path) -> PathBuf {
+    /// The interpreter path for a Python tree laid out the way the real bundle
+    /// is on this platform, so [`python_tree_root`] resolves back to `root`.
+    /// Used by both the fabricated trees below and the real-bundle e2e.
+    fn interpreter_in_tree(root: &Path) -> PathBuf {
         if cfg!(target_os = "windows") {
             root.join("python.exe")
         } else {
@@ -3644,7 +3647,7 @@ mod tests {
         let root = fake_tree("wipe-keeps-base", &fake_manifest());
         let purelib = root.join(TEST_PURELIB);
 
-        let removed = wipe_installed_packages(&fake_python_bin(&root)).unwrap();
+        let removed = wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
 
         // esphome + its dist-info, and the esphome/esptool scripts.
         assert_eq!(removed, 4, "removed the wrong number of entries");
@@ -3682,7 +3685,7 @@ mod tests {
         std::fs::create_dir_all(purelib.join("pip-27.0.dist-info")).unwrap();
         std::fs::write(purelib.join("pip-27.0.dist-info").join("RECORD"), "").unwrap();
 
-        wipe_installed_packages(&fake_python_bin(&root)).unwrap();
+        wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
 
         assert!(
             purelib.join("pip-27.0.dist-info").join("RECORD").exists(),
@@ -3723,7 +3726,7 @@ mod tests {
         let root = fake_tree("wipe-no-manifest", &fake_manifest());
         std::fs::remove_file(root.join(BASE_MANIFEST)).unwrap();
 
-        assert!(wipe_installed_packages(&fake_python_bin(&root)).is_err());
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
         assert!(root.join(TEST_PURELIB).join("esphome").exists());
         assert!(root.join(TEST_PURELIB).join("pip").exists());
 
@@ -3736,7 +3739,7 @@ mod tests {
         // tree must fail rather than resolve to somewhere real.
         let root = fake_tree("wipe-escape", "sweep ../../..\nkeep bin/python3\n");
 
-        assert!(wipe_installed_packages(&fake_python_bin(&root)).is_err());
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
         assert!(root.join(TEST_PURELIB).join("esphome").exists());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3748,7 +3751,7 @@ mod tests {
         // taking pip with it.
         let root = fake_tree("wipe-empty-keep", &format!("sweep {TEST_PURELIB}\n"));
 
-        assert!(wipe_installed_packages(&fake_python_bin(&root)).is_err());
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
         assert!(root.join(TEST_PURELIB).join("pip").exists());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3761,7 +3764,7 @@ mod tests {
         let root = fake_tree("wipe-missing-sweep", &fake_manifest());
         std::fs::remove_dir_all(root.join("bin")).unwrap();
 
-        let removed = wipe_installed_packages(&fake_python_bin(&root)).unwrap();
+        let removed = wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
         assert_eq!(removed, 2, "only the site-packages entries remained to go");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3831,10 +3834,14 @@ mod tests {
     const E2E_TREE_ENV: &str = "ESPHOME_E2E_PYTHON_TREE";
 
     /// Run the tree's interpreter and return (success, stdout+stderr).
+    ///
+    /// Goes through [`run_python_capture`] so the harness is isolated exactly as
+    /// the code under test is. Spawning the interpreter directly would let the
+    /// runner's user site-packages or an ambient `PYTHONPATH` satisfy an import
+    /// (#318) — and this test asserts on *absence* ("esphome survived the
+    /// wipe"), which is precisely what a stray import would invert.
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
-        let output = std::process::Command::new(python)
-            .args(args)
-            .output()
+        let output = run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
         let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -3876,11 +3883,10 @@ mod tests {
         let root = PathBuf::from(std::env::var(E2E_TREE_ENV).unwrap_or_else(|_| {
             panic!("{E2E_TREE_ENV} must point at a tree built by prepare_bundle.sh")
         }));
-        let python = if cfg!(target_os = "windows") {
-            root.join("python.exe")
-        } else {
-            root.join("bin").join("python3")
-        };
+        // One spelling of the shipped layout, shared with the unit tests: a
+        // second copy here could drift from it, and this is the test that would
+        // have to catch that drift.
+        let python = interpreter_in_tree(&root);
         assert!(python.is_file(), "no interpreter at {python:?}");
 
         // The tree the build produces must resolve back to itself, or the reset
@@ -4016,7 +4022,7 @@ mod tests {
         // A real tree still resolves.
         let root = unique_temp_dir("tree-root");
         assert_eq!(
-            python_tree_root(&fake_python_bin(&root)),
+            python_tree_root(&interpreter_in_tree(&root)),
             Some(root.as_path())
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -4028,7 +4034,7 @@ mod tests {
         // reset fixes it". Without a bound, a failure a reset can't fix would
         // wipe and reinstall on every single launch, forever.
         let root = unique_temp_dir("reset-bound");
-        let python_bin = fake_python_bin(&root);
+        let python_bin = interpreter_in_tree(&root);
         std::fs::create_dir_all(python_bin.parent().unwrap()).unwrap();
 
         for attempt in 1..=MAX_PACKAGE_RESETS {

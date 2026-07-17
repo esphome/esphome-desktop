@@ -297,7 +297,6 @@ impl UpdateChecker {
                 },
                 || self.repair_python_tree(app_handle),
                 "ESPHome dev installed successfully from GitHub",
-                "ESPHome dev install hit missing RECORD file; resetting the Python packages",
                 "pip install from GitHub failed",
             )
             .await
@@ -321,7 +320,6 @@ impl UpdateChecker {
                 },
                 || self.repair_python_tree(app_handle),
                 "ESPHome updated successfully",
-                "ESPHome update hit missing RECORD file; resetting the Python packages",
                 "pip install failed",
             )
             .await
@@ -375,7 +373,6 @@ impl UpdateChecker {
             },
             || self.repair_python_tree(app_handle),
             "esphome-device-builder installed/upgraded successfully",
-            "esphome-device-builder upgrade hit missing RECORD file; resetting the Python packages",
             "pip install esphome-device-builder failed",
         )
         .await
@@ -398,7 +395,7 @@ impl UpdateChecker {
     ///
     /// Requires the daemon to be stopped; the update flows go through
     /// `stop_install_start`, and the startup probe runs before it exists.
-    pub async fn reset_python_packages(&self, app_handle: &AppHandle) -> Result<()> {
+    async fn reset_python_packages(&self, app_handle: &AppHandle) -> Result<()> {
         let settings = Settings::load(app_handle)?;
         // Not `get_python_path`: this deletes, and that resolves to trees we
         // must not delete from. See `python_path_for_reset`.
@@ -463,7 +460,7 @@ impl UpdateChecker {
             info!("Repairing the ESPHome install by re-copying the bundled Python tree");
             let app = app_handle.clone();
             return tokio::task::spawn_blocking(move || {
-                platform::refresh_user_python_from_bundle(&app)
+                platform::ensure_user_python(&app, platform::RefreshReason::Repair)
             })
             .await
             .context("Bundled-Python refresh task panicked or was cancelled")?;
@@ -1262,12 +1259,12 @@ fn is_missing_record_error(stderr: &str) -> bool {
 /// reinstall on a path that only runs when the tree is already broken.
 ///
 /// `repair` is injected rather than called directly so the policy stays
-/// testable without a live interpreter or PyPI.
+/// testable without a live interpreter or PyPI. It logs what it actually did,
+/// so this does not second-guess which repair ran.
 async fn install_with_record_recovery<F, Fut, R, RFut>(
     run: F,
     repair: R,
     success_msg: &str,
-    repair_log: &str,
     fail_prefix: &str,
 ) -> Result<()>
 where
@@ -1287,7 +1284,7 @@ where
         anyhow::bail!("{fail_prefix}: {stderr}");
     }
 
-    info!("{repair_log}");
+    info!("{fail_prefix}: missing RECORD file; repairing the Python tree");
     repair().await.context("ESPHome repair failed")?;
 
     let retry = run().await?;
@@ -1808,147 +1805,115 @@ mod tests {
         }
     }
 
-    /// Count install attempts and repairs for the orchestration tests.
-    #[derive(Default)]
-    struct RecoverySpy {
-        installs: std::sync::atomic::AtomicUsize,
-        repairs: std::sync::atomic::AtomicUsize,
-    }
+    /// Drive `install_with_record_recovery` against canned pip outcomes.
+    ///
+    /// `attempts` is what each successive install returns; `repair` is what the
+    /// repair returns if one is triggered. Returns the overall result plus
+    /// (installs attempted, repairs attempted), which is the whole contract:
+    /// how many times pip ran, and whether the tree was repaired between.
+    async fn drive_recovery(
+        attempts: Vec<std::process::Output>,
+        repair: Result<()>,
+    ) -> (Result<()>, (usize, usize)) {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        };
 
-    impl RecoverySpy {
-        fn note_install(&self) -> usize {
-            self.installs
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        }
-        fn note_repair(&self) {
-            self.repairs
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        fn counts(&self) -> (usize, usize) {
+        let queue = Arc::new(Mutex::new(attempts.into_iter()));
+        let installs = Arc::new(AtomicUsize::new(0));
+        let repairs = Arc::new(AtomicUsize::new(0));
+        let repair = Arc::new(Mutex::new(Some(repair)));
+
+        let (run_installs, run_queue) = (installs.clone(), queue.clone());
+        let (repair_count, repair_slot) = (repairs.clone(), repair.clone());
+
+        let result = install_with_record_recovery(
+            move || {
+                let (installs, queue) = (run_installs.clone(), run_queue.clone());
+                async move {
+                    installs.fetch_add(1, Ordering::SeqCst);
+                    Ok(queue
+                        .lock()
+                        .unwrap()
+                        .next()
+                        .expect("install ran more times than the test planned for"))
+                }
+            },
+            move || async move {
+                repair_count.fetch_add(1, Ordering::SeqCst);
+                repair_slot.lock().unwrap().take().expect("repaired twice")
+            },
+            "ok",
+            "failed",
+        )
+        .await;
+
+        (
+            result,
             (
-                self.installs.load(std::sync::atomic::Ordering::SeqCst),
-                self.repairs.load(std::sync::atomic::Ordering::SeqCst),
-            )
-        }
+                installs.load(Ordering::SeqCst),
+                repairs.load(Ordering::SeqCst),
+            ),
+        )
     }
 
     #[tokio::test]
     async fn test_install_with_record_recovery_success_first_try() {
-        // A clean install never resets the packages.
-        let spy = std::sync::Arc::new(RecoverySpy::default());
-        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
-        let result = install_with_record_recovery(
-            move || {
-                let spy = run_spy.clone();
-                async move {
-                    spy.note_install();
-                    Ok(fake_output(true, ""))
-                }
-            },
-            || async move {
-                repair_spy.note_repair();
-                Ok(())
-            },
-            "ok",
-            "repairing",
-            "failed",
-        )
-        .await;
+        // A clean install never touches the tree.
+        let (result, counts) = drive_recovery(vec![fake_output(true, "")], Ok(())).await;
         assert!(result.is_ok());
-        assert_eq!(spy.counts(), (1, 0));
+        assert_eq!(counts, (1, 0));
     }
 
     #[tokio::test]
-    async fn test_install_with_record_recovery_resets_on_missing_record() {
-        // The install aborts on a missing RECORD file, so the tree is reset and
-        // the install retried against it (#155/#183/#330). The retry must NOT be
-        // a different install: --ignore-installed is gone, so the only thing
-        // that changes between the two attempts is the state of the tree.
-        let spy = std::sync::Arc::new(RecoverySpy::default());
-        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
-        let result = install_with_record_recovery(
-            move || {
-                let spy = run_spy.clone();
-                async move {
-                    // Fail only the first attempt; the reset "fixes" the tree.
-                    if spy.note_install() == 0 {
-                        Ok(fake_output(false, "error: uninstall-no-record-file"))
-                    } else {
-                        Ok(fake_output(true, ""))
-                    }
-                }
-            },
-            || async move {
-                repair_spy.note_repair();
-                Ok(())
-            },
-            "ok",
-            "repairing",
-            "failed",
+    async fn test_install_with_record_recovery_repairs_on_missing_record() {
+        // The install aborts on a missing RECORD file, so the tree is repaired
+        // and the install retried against it (#155/#183/#330). The retry must
+        // NOT be a different install: --ignore-installed is gone, so the only
+        // thing that changes between the two attempts is the state of the tree.
+        let (result, counts) = drive_recovery(
+            vec![
+                fake_output(false, "error: uninstall-no-record-file"),
+                fake_output(true, ""),
+            ],
+            Ok(()),
         )
         .await;
         assert!(result.is_ok());
-        assert_eq!(spy.counts(), (2, 1));
+        assert_eq!(counts, (2, 1));
     }
 
     #[tokio::test]
     async fn test_install_with_record_recovery_bails_on_other_failure() {
         // A failure that is NOT a missing-RECORD abort bails immediately,
-        // surfacing the original stderr. Nothing is deleted: the tree is not
-        // implicated, so wiping it would destroy a working install over an
+        // surfacing the original stderr. Nothing is repaired: the tree is not
+        // implicated, so replacing it would destroy a working install over an
         // unrelated failure (a bad version pin, a network blip).
-        let spy = std::sync::Arc::new(RecoverySpy::default());
-        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
-        let result = install_with_record_recovery(
-            move || {
-                let spy = run_spy.clone();
-                async move {
-                    spy.note_install();
-                    Ok(fake_output(false, "some other pip failure"))
-                }
-            },
-            || async move {
-                repair_spy.note_repair();
-                Ok(())
-            },
-            "ok",
-            "repairing",
-            "pip blew up",
-        )
-        .await;
+        let (result, counts) =
+            drive_recovery(vec![fake_output(false, "some other pip failure")], Ok(())).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("pip blew up"));
-        assert!(err.contains("some other pip failure"));
-        assert_eq!(spy.counts(), (1, 0));
+        assert!(err.contains("failed"), "lost the caller's prefix: {err}");
+        assert!(
+            err.contains("some other pip failure"),
+            "lost pip's own reason: {err}"
+        );
+        assert_eq!(counts, (1, 0));
     }
 
     #[tokio::test]
     async fn test_install_with_record_recovery_surfaces_repair_failure() {
-        // A reset that cannot run (PyPI unreachable, no manifest) must fail the
+        // A repair that cannot run (PyPI unreachable, no bundle) must fail the
         // install with that reason rather than retrying into the same abort.
-        let spy = std::sync::Arc::new(RecoverySpy::default());
-        let (run_spy, repair_spy) = (spy.clone(), spy.clone());
-        let result = install_with_record_recovery(
-            move || {
-                let spy = run_spy.clone();
-                async move {
-                    spy.note_install();
-                    Ok(fake_output(false, "error: uninstall-no-record-file"))
-                }
-            },
-            || async move {
-                repair_spy.note_repair();
-                anyhow::bail!("pypi unreachable")
-            },
-            "ok",
-            "repairing",
-            "failed",
+        let (result, counts) = drive_recovery(
+            vec![fake_output(false, "error: uninstall-no-record-file")],
+            Err(anyhow::anyhow!("pypi unreachable")),
         )
         .await;
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("pypi unreachable"), "{err}");
         // The install is not retried after a failed repair.
-        assert_eq!(spy.counts(), (1, 1));
+        assert_eq!(counts, (1, 1));
     }
 
     #[test]

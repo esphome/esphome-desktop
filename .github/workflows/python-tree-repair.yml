@@ -61,16 +61,10 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Tauri links against webkit/appindicator on Linux, so even a plain
-      # `cargo test` needs these to compile. Same set as the Lint & Test job.
+      # `cargo test` needs these to compile. The action self-gates on Linux, so
+      # it is a no-op on the macOS and Windows legs.
       - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf
+        uses: ./.github/actions/linux-tauri-deps
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust

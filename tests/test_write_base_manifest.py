@@ -61,6 +61,16 @@ def generate(tree: tuple[Path, Path]) -> str:
     return result.stdout
 
 
+@pytest.fixture(scope="module")
+def manifest(real_tree: tuple[Path, Path]) -> tuple[list[str], list[str]]:
+    """The generated manifest, parsed into (sweep, keep).
+
+    Module-scoped alongside `real_tree`: the tree never changes, so the
+    generator would otherwise be re-run per test to produce identical bytes.
+    """
+    return parse(generate(real_tree))
+
+
 def parse(manifest: str) -> tuple[list[str], list[str]]:
     """Split a manifest into its sweep and keep paths, ignoring comments."""
     sweep, keep = [], []
@@ -73,29 +83,33 @@ def parse(manifest: str) -> tuple[list[str], list[str]]:
     return sweep, keep
 
 
-def test_records_pip_and_the_interpreter(real_tree: tuple[Path, Path]) -> None:
+def test_records_pip_and_the_interpreter(manifest: tuple[list[str], list[str]]) -> None:
     # pip is the one thing that must never be deleted: the reset reinstalls with
     # it, so losing it makes the tree unrepairable.
-    _, keep = parse(generate(real_tree))
+    _, keep = manifest
     names = {path.rsplit("/", 1)[-1] for path in keep}
     assert "pip" in names
     assert any(n.startswith("pip-") and n.endswith(".dist-info") for n in names)
 
 
-def test_sweeps_site_packages_and_the_scripts_dir(real_tree: tuple[Path, Path]) -> None:
+def test_sweeps_site_packages_and_the_scripts_dir(
+    manifest: tuple[list[str], list[str]],
+) -> None:
     # Both must be swept, or pip-installed entry points (`esphome`, `esptool`)
     # survive a reset as orphans.
-    sweep, _ = parse(generate(real_tree))
+    sweep, _ = manifest
     assert len(sweep) == 2, sweep
     assert any(s.endswith("site-packages") for s in sweep), sweep
     assert any(s.rsplit("/", 1)[-1] in {"bin", "Scripts"} for s in sweep), sweep
 
 
-def test_every_path_is_relative_and_posix(real_tree: tuple[Path, Path]) -> None:
+def test_every_path_is_relative_and_posix(
+    manifest: tuple[list[str], list[str]],
+) -> None:
     # The Rust side rejects absolute paths and `..` outright, and resolves these
     # against the tree root at runtime, which is a different directory to the one
     # they were generated in.
-    sweep, keep = parse(generate(real_tree))
+    sweep, keep = manifest
     for path in sweep + keep:
         assert not path.startswith("/"), path
         assert ".." not in path.split("/"), path
@@ -103,10 +117,12 @@ def test_every_path_is_relative_and_posix(real_tree: tuple[Path, Path]) -> None:
         assert ":" not in path, path
 
 
-def test_keep_entries_live_under_a_swept_dir(real_tree: tuple[Path, Path]) -> None:
+def test_keep_entries_live_under_a_swept_dir(
+    manifest: tuple[list[str], list[str]],
+) -> None:
     # A keep that is not inside a swept dir can never match anything, so it would
     # silently protect nothing.
-    sweep, keep = parse(generate(real_tree))
+    sweep, keep = manifest
     for path in keep:
         assert any(path.startswith(f"{s}/") for s in sweep), path
 
