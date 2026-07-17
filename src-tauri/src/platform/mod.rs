@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 use tracing::debug;
 
-mod base_manifest;
 mod health;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -17,7 +16,6 @@ mod macos;
 mod process;
 mod python_env;
 
-pub use base_manifest::{can_refresh_from_bundle, python_path_for_reset, wipe_installed_packages};
 pub use health::{
     clear_repair_count, esphome_config_probe, is_managed_python_tree, may_repair_tree,
     repair_budget_left,
@@ -62,6 +60,66 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// directory.
 pub fn data_dir_no_handle() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(BUNDLE_IDENTIFIER))
+}
+
+/// Parent directory of the managed Python tree (`<dir>/python`) and its repair
+/// counter.
+///
+/// Tauri's `app_local_data_dir()`: the same directory as [`get_data_dir`] on
+/// macOS and Linux, but `%LOCALAPPDATA%\io.esphome.builder\` on Windows. The
+/// tree is hundreds of MB of interpreter and packages, all reproducible from
+/// the bundle, so it belongs in machine-local data where a roaming profile
+/// never syncs it. Settings and logs stay under [`get_data_dir`].
+pub fn get_python_parent_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+    let path = app_handle
+        .path()
+        .app_local_data_dir()
+        .context("Failed to get app local data directory")?;
+
+    // Ensure directory exists
+    std::fs::create_dir_all(&path).context("Failed to create local data directory")?;
+
+    debug!("Python parent directory: {:?}", path);
+    Ok(path)
+}
+
+/// Name of the managed Python tree's directory under
+/// [`get_python_parent_dir`]. One spelling, because it also appears in the
+/// user-facing "delete this folder" repair hint (`update::repair_hint`), where
+/// a drift would print an instruction pointing at nothing.
+pub const PYTHON_TREE_DIRNAME: &str = "python";
+
+/// Resolve the root of a managed Python tree from its interpreter path.
+///
+/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
+/// root from the interpreter rather than rebuilding it from the data dir keeps
+/// this correct for whichever tree [`get_python_path`] actually selected.
+fn python_tree_root(python_bin: &Path) -> Option<&Path> {
+    let bin_dir = python_bin.parent()?;
+    let root = if cfg!(target_os = "windows") {
+        bin_dir
+    } else {
+        bin_dir.parent()?
+    };
+    // `get_python_path` falls back to a bare `python3`/`python` for development
+    // builds with no bundle. That resolves to an empty root, i.e. the current
+    // directory, which is not a managed tree and must not be wiped or marked.
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(root)
+}
+
+/// The interpreter path inside a Python tree laid out the way the real bundle
+/// is on this platform: [`python_tree_root`]'s inverse. One spelling of the
+/// shipped layout, shared between the path resolvers and the tests so a second
+/// copy cannot drift from it.
+fn interpreter_in_tree(root: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        root.join("python.exe")
+    } else {
+        root.join("bin").join("python3")
+    }
 }
 
 /// Get the bundled resource directory.
@@ -124,18 +182,23 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 }
 
-/// Get the path to the user Python executable
-/// On non-Windows platforms, the bundled Python is copied to user data for updates
+/// Root of the pristine Python tree inside the bundled resources.
+///
+/// The `"python"` here is the resource name listed in `tauri.conf.json`'s
+/// `bundle.resources`, deliberately NOT [`PYTHON_TREE_DIRNAME`]: renaming the
+/// managed tree in app data must not change where the shipped bundle is
+/// looked up, and vice versa.
+fn get_bundled_python_root(app_handle: &AppHandle) -> Result<PathBuf> {
+    Ok(get_bundled_resource_dir(app_handle)?.join("python"))
+}
+
+/// Get the path to the user Python executable: the copy `ensure_user_python`
+/// keeps under [`get_python_parent_dir`], falling back to the bundled tree
+/// before the first-run copy exists and to a bare system Python in development
+/// builds with no bundle.
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
-    let data_dir = get_data_dir(app_handle)?;
-    let user_python = data_dir.join("python");
-
-    // Platform-specific Python path
-    #[cfg(target_os = "windows")]
-    let python_path = user_python.join("python.exe");
-
-    #[cfg(not(target_os = "windows"))]
-    let python_path = user_python.join("bin").join("python3");
+    let parent_dir = get_python_parent_dir(app_handle)?;
+    let python_path = interpreter_in_tree(&parent_dir.join(PYTHON_TREE_DIRNAME));
 
     if python_path.exists() {
         debug!("Using user Python: {:?}", python_path);
@@ -143,13 +206,7 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python (will be copied on first run)
-    let resource_dir = get_bundled_resource_dir(app_handle)?;
-
-    #[cfg(target_os = "windows")]
-    let bundled_python = resource_dir.join("python").join("python.exe");
-
-    #[cfg(not(target_os = "windows"))]
-    let bundled_python = resource_dir.join("python").join("bin").join("python3");
+    let bundled_python = interpreter_in_tree(&get_bundled_python_root(app_handle)?);
 
     if bundled_python.exists() {
         debug!("Using bundled Python: {:?}", bundled_python);
@@ -165,16 +222,19 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }))
 }
 
+/// Directory holding the interpreter inside a managed tree. Derived from
+/// [`interpreter_in_tree`] so the layout stays spelled once.
+fn bin_dir_in_tree(root: &Path) -> PathBuf {
+    interpreter_in_tree(root)
+        .parent()
+        .expect("interpreter_in_tree always returns a path with a parent")
+        .to_path_buf()
+}
+
 /// Get the Python bin directory (for PATH)
 pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
-    let data_dir = get_data_dir(app_handle)?;
-    let user_python = data_dir.join("python");
-
-    #[cfg(target_os = "windows")]
-    let bin_dir = user_python.clone(); // On Windows, python.exe is in the root
-
-    #[cfg(not(target_os = "windows"))]
-    let bin_dir = user_python.join("bin");
+    let parent_dir = get_python_parent_dir(app_handle)?;
+    let bin_dir = bin_dir_in_tree(&parent_dir.join(PYTHON_TREE_DIRNAME));
 
     // If user Python exists, use it
     if bin_dir.exists() {
@@ -182,15 +242,7 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 
     // Fall back to bundled Python
-    let resource_dir = get_bundled_resource_dir(app_handle)?;
-
-    #[cfg(target_os = "windows")]
-    let bundled_bin = resource_dir.join("python"); // On Windows, python.exe is in the root
-
-    #[cfg(not(target_os = "windows"))]
-    let bundled_bin = resource_dir.join("python").join("bin");
-
-    Ok(bundled_bin)
+    Ok(bin_dir_in_tree(&get_bundled_python_root(app_handle)?))
 }
 
 /// Directory inside the bundled `git` resource that holds `git.exe`.
@@ -712,7 +764,6 @@ pub fn is_tray_supported() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::base_manifest::{python_tree_root, BASE_MANIFEST};
     use super::*;
     use crate::util::unique_temp_dir;
 
@@ -899,18 +950,6 @@ mod tests {
         assert_eq!(entries[1], PathBuf::from("/opt/homebrew/bin"));
     }
 
-    /// The interpreter path for a Python tree laid out the way the real bundle
-    /// is on this platform, so [`python_tree_root`] resolves back to `root`.
-    /// Used by the real-bundle e2e here and by the fabricated trees in
-    /// `base_manifest`'s tests.
-    pub(super) fn interpreter_in_tree(root: &Path) -> PathBuf {
-        if cfg!(target_os = "windows") {
-            root.join("python.exe")
-        } else {
-            root.join("bin").join("python3")
-        }
-    }
-
     /// Env var naming the real bundled Python tree the e2e test runs against.
     const E2E_TREE_ENV: &str = "ESPHOME_E2E_PYTHON_TREE";
 
@@ -919,8 +958,8 @@ mod tests {
     /// Goes through [`run_python_capture`] so the harness is isolated exactly as
     /// the code under test is. Spawning the interpreter directly would let the
     /// runner's user site-packages or an ambient `PYTHONPATH` satisfy an import
-    /// (#318) — and this test asserts on *absence* ("esphome survived the
-    /// wipe"), which is precisely what a stray import would invert.
+    /// (#318), and every assertion in the e2e must report on the tree under
+    /// test alone.
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
         let output = run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
@@ -942,71 +981,99 @@ mod tests {
         PathBuf::from(out.trim())
     }
 
-    /// The whole #330 lifecycle against a real bundled Python tree: detect the
-    /// orphan, wipe, prove pip survived, reinstall, prove it is fixed.
+    /// The whole repair lifecycle against a real bundled Python tree: the
+    /// first-run copy, detect the orphan, wipe and re-copy from the pristine
+    /// bundle, prove it is fixed.
     ///
     /// Ignored by default because it needs the genuine article — the
     /// python-build-standalone tree with esphome in it that
-    /// `build-scripts/prepare_bundle.sh` produces — plus network to reinstall.
-    /// The `Python tree repair (e2e)` workflow builds that tree on every OS we
-    /// ship and runs this with `--ignored`.
+    /// `build-scripts/prepare_bundle.sh` produces. The `Python tree repair
+    /// (e2e)` workflow builds that tree on every OS we ship and runs this with
+    /// `--ignored`.
     ///
     /// A venv would not do: on Windows a venv puts `python.exe` in `Scripts/`,
-    /// while the real bundle has it at the tree root, so `python_tree_root`'s
-    /// platform assumption would go untested against the layout we actually
-    /// ship. This uses the shipped layout.
+    /// while the real bundle has it at the tree root, so the platform layout in
+    /// [`interpreter_in_tree`]/[`python_tree_root`] would go untested against
+    /// what we actually ship. This uses the shipped layout.
+    ///
+    /// No leg forces the pinned-version restore through pip: that would need a
+    /// PyPI release newer than the tree the workflow just built, which
+    /// generally does not exist. The snapshot and the compare-and-skip half of
+    /// the restore still run for real in the repair leg below.
     ///
     /// One test rather than several because each step depends on the last
     /// leaving the tree in a particular state, and Rust does not order tests.
     #[test]
     #[ignore = "needs a real bundled Python tree; run by the python-tree-repair CI job"]
     fn e2e_repair_cycle() {
-        let root = PathBuf::from(std::env::var(E2E_TREE_ENV).unwrap_or_else(|_| {
+        let bundle = PathBuf::from(std::env::var(E2E_TREE_ENV).unwrap_or_else(|_| {
             panic!("{E2E_TREE_ENV} must point at a tree built by prepare_bundle.sh")
         }));
-        // One spelling of the shipped layout, shared with the unit tests: a
-        // second copy here could drift from it, and this is the test that would
-        // have to catch that drift.
-        let python = interpreter_in_tree(&root);
-        assert!(python.is_file(), "no interpreter at {python:?}");
-
-        // The tree the build produces must resolve back to itself, or the reset
-        // would aim at the wrong directory on this platform.
+        // One spelling of the shipped layout, shared with the production path:
+        // a second copy here could drift from it, and this is the test that
+        // would have to catch that drift.
+        let bundled_python = interpreter_in_tree(&bundle);
+        assert!(
+            bundled_python.is_file(),
+            "no interpreter at {bundled_python:?}"
+        );
         assert_eq!(
-            python_tree_root(&python),
-            Some(root.as_path()),
+            python_tree_root(&bundled_python),
+            Some(bundle.as_path()),
             "python_tree_root disagrees with the shipped layout"
         );
+
+        // 1. The first-run copy, through the real code path. From here on the
+        //    bundle is only ever read: it is the pristine source the repair
+        //    depends on, exactly as the shipped resource dir is.
+        let base = unique_temp_dir("e2e-user-tree");
+        let user_tree = base.join("python");
+        python_env::refresh_python_tree(&user_tree, || Ok(bundle.clone()), RefreshReason::Startup)
+            .expect("first-run copy failed");
+        let python = interpreter_in_tree(&user_tree);
         assert!(
-            root.join(BASE_MANIFEST).is_file(),
-            "prepare_bundle.sh must ship {BASE_MANIFEST}"
+            python.is_file(),
+            "the copy left no interpreter at {python:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(user_tree.join(python_env::PYTHON_VERSION_MARKER))
+                .expect("the copy wrote no version marker")
+                .trim(),
+            env!("CARGO_PKG_VERSION"),
+            "the marker must record the version that made the copy"
         );
 
+        // 2. The copy must answer for itself. Its own sysconfig resolving into
+        //    the source tree would mean every assertion below green-lights the
+        //    bundle instead of the copy under test. Canonicalized on both
+        //    sides: macOS reports the tree through /private/var while the temp
+        //    path is spelled /var, and that symlink spread must not read as
+        //    "outside the tree".
         let purelib = e2e_purelib(&python);
+        let canonical_tree = user_tree.canonicalize().unwrap();
+        assert!(
+            purelib.canonicalize().unwrap().starts_with(&canonical_tree),
+            "the copy's purelib {purelib:?} is outside {user_tree:?}, so the copy \
+             is not self-contained"
+        );
+        let (ok, out) = e2e_run(&python, &["-m", "pip", "--version"]);
+        assert!(ok, "pip does not run from the copy: {out}");
 
-        // 1. A freshly built tree is healthy.
+        // 3. A fresh copy is healthy.
         assert_eq!(
             esphome_config_probe(&python).expect("probe could not run"),
             None,
-            "a freshly built bundle must pass the health probe"
+            "a fresh copy of the bundle must pass the health probe"
         );
-        let (ok, version) = e2e_run(&python, &["-m", "esphome", "version"]);
-        assert!(ok, "esphome version failed: {version}");
-        let version = version
-            .trim()
-            .rsplit(' ')
-            .next()
-            .expect("esphome version printed nothing")
-            .to_string();
 
-        // 2. Orphan a component directory exactly the way --ignore-installed
+        // 4. Orphan a component directory exactly the way --ignore-installed
         //    did: `rp2` declares `rp2040` as a legacy alias, so a leftover
         //    `rp2040` package from the previous version collides with it.
         let orphan = purelib.join("esphome").join("components").join("rp2040");
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("__init__.py"), "").unwrap();
 
-        // 3. The probe must catch it. This is the assertion the whole change
+        // 5. The probe must catch it. This is the assertion the whole design
         //    rests on: no metadata check sees this, because the orphan has no
         //    RECORD and no dist-info, and importlib still reports a healthy
         //    esphome. Only running a real command finds it.
@@ -1018,46 +1085,30 @@ mod tests {
             "probe failed for some other reason: {detail}"
         );
 
-        // 4. Reset the packages.
-        let removed = wipe_installed_packages(&python).expect("wipe failed");
-        assert!(removed > 0, "the wipe removed nothing");
+        // 6. The repair: wipe the damaged copy and re-copy the pristine
+        //    bundle, through the same code path the app uses. No network
+        //    involved; the snapshot reads the damaged tree's versions and
+        //    the restore compares them against the freshly copied ones.
+        python_env::refresh_python_tree(&user_tree, || Ok(bundle.clone()), RefreshReason::Repair)
+            .expect("repair failed");
 
-        // 5. pip must still work. If the wipe takes pip with it the tree is
-        //    unrepairable, which is the one truly unrecoverable outcome here.
-        let (ok, out) = e2e_run(&python, &["-m", "pip", "--version"]);
-        assert!(
-            ok,
-            "the wipe broke pip, so nothing can be reinstalled: {out}"
-        );
-
-        // 6. Everything of ours is gone, orphan included.
-        assert!(!orphan.exists(), "the orphan survived the wipe");
-        assert!(!purelib.join("esphome").exists());
-        let (esphome_gone, _) = e2e_run(&python, &["-m", "esphome", "version"]);
-        assert!(!esphome_gone, "esphome survived the wipe");
-        let (builder_gone, _) = e2e_run(&python, &["-c", "import esphome_device_builder"]);
-        assert!(!builder_gone, "esphome-device-builder survived the wipe");
-
-        // 7. Reinstall, as `reset_python_packages` does after the wipe.
-        let (ok, out) = e2e_run(
-            &python,
-            &["-m", "pip", "install", &format!("esphome=={version}")],
-        );
-        assert!(ok, "reinstalling esphome=={version} failed: {out}");
-
-        // 8. The tree is healthy again, and the orphan did not come back.
+        // 7. Healthy again, orphan gone, and still answering from the copy.
+        assert!(!orphan.exists(), "the orphan survived the repair");
         assert_eq!(
             esphome_config_probe(&python).expect("probe could not run"),
             None,
-            "the tree is still broken after the reset"
+            "the tree is still broken after the repair"
         );
-        assert!(!orphan.exists(), "the orphan came back");
+        let (ok, out) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(ok, "esphome does not run after the repair: {out}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn the_system_python_fallback_is_not_a_managed_tree() {
         // `get_python_path` returns a bare command name in dev builds with no
-        // bundle. There is no managed tree behind it, so nothing may be swept,
+        // bundle. There is no managed tree behind it, so nothing may be wiped,
         // and probing it would tell a developer their install is broken when
         // all that is true is that ESPHome is not in their system Python.
         for fallback in ["python3", "python"] {

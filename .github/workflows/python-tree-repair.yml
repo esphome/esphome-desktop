@@ -1,22 +1,23 @@
 name: Python Tree Repair
 
-# End-to-end test for the bundled-Python package reset (#330).
+# End-to-end test for the bundled-Python copy repair (#330, #335).
 #
-# The reset deletes files out of a real Python tree and reinstalls them, so the
-# cost of getting it wrong is a user left with no working ESPHome, or with a pip
-# that can no longer install anything. The unit tests cover the logic against
-# fabricated trees; this job runs it against the genuine article — the tree
-# `prepare_bundle.sh` produces and we actually ship — on every OS we ship it on.
+# The repair wipes the app-data Python tree and re-copies the pristine bundle,
+# so the cost of getting it wrong is a user left with no working ESPHome. The
+# unit tests cover the logic against fabricated trees; this job runs it against
+# the genuine article — the tree `prepare_bundle.sh` produces and we actually
+# ship — on every OS we ship it on.
 #
-# What it proves, in one pass: a freshly built bundle is healthy; an orphaned
-# component directory (exactly what the removed `--ignore-installed` fallback
-# left behind, and what broke every compile on 2026.7) fails the health probe;
-# the reset removes it; pip survives; and a reinstall brings the tree back.
+# What it proves, in one pass: the first-run copy of a freshly built bundle is
+# self-contained and healthy; an orphaned component directory (exactly what the
+# removed `--ignore-installed` fallback left behind, and what broke every
+# compile on 2026.7) fails the health probe; and the repair re-copy removes it
+# with no network.
 #
 # A venv would be cheaper but would not do: on Windows a venv puts python.exe in
-# Scripts\ while the real bundle has it at the tree root, so the layout the reset
-# resolves paths against would go untested on the platform the bug was reported
-# on.
+# Scripts\ while the real bundle has it at the tree root, so the layout the copy
+# resolves paths against would go untested on the platform that only just gained
+# the copy.
 #
 # Not folded into Lint & Test because it downloads a python-build-standalone
 # tarball and pip-installs esphome on three runners, which is minutes rather than
@@ -77,24 +78,12 @@ jobs:
       - name: Stub bundle resource dirs
         uses: ./.github/actions/stub-bundle-dirs
 
-      # The real thing: downloads python-build-standalone, installs esphome and
-      # esphome-device-builder into it, and writes the base manifest at the seam
-      # between pip and our first install. This is the release path, not a
+      # The real thing: downloads python-build-standalone and installs esphome
+      # and esphome-device-builder into it. This is the release path, not a
       # stand-in for it.
       - name: Build a real bundled Python tree
         shell: bash
         run: ./build-scripts/prepare_bundle.sh ${{ matrix.target }}
-
-      # Only that the file landed where the *Rust* side goes looking, which is a
-      # different claim from "the generator produced good text" and the one thing
-      # prepare_bundle.sh cannot make. It already asserts the contents and exits
-      # non-zero on a bad manifest, so re-checking those here would be an
-      # assertion that can never fire — which reads as coverage and is not.
-      - name: Check the manifest reached the tree
-        shell: bash
-        run: |
-          manifest="build/python-${{ matrix.target }}/.base-packages"
-          test -f "$manifest" || { echo "::error::no manifest at $manifest"; exit 1; }
 
       - name: Run the repair cycle
         shell: bash
@@ -103,14 +92,13 @@ jobs:
           # Absolute: the test runs from src-tauri/, the tree is at the repo root.
           ESPHOME_E2E_PYTHON_TREE: ${{ github.workspace }}/build/python-${{ matrix.target }}
         # --ignored runs exactly the tests that need this tree. Single-threaded
-        # because the cycle mutates one shared tree in sequence.
+        # because the cycle steps through one copied tree in sequence.
         #
         # Then check the test actually ran. `cargo test` exits 0 when its filter
         # matches nothing, so a rename, a stray `#[cfg]`, or a dropped `#[ignore]`
         # would turn this job green while proving nothing — the whole point of it
-        # being here. That is the same "an assertion that can never fire reads as
-        # coverage" trap this workflow avoids for the manifest check above, and
-        # this job is the only evidence that a real command sees the orphan.
+        # being here; this job is the only evidence that a real command sees the
+        # orphan.
         run: |
           set -o pipefail
           cargo test --all-features -- --ignored --test-threads=1 --nocapture 2>&1 | tee result.log

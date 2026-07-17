@@ -2,7 +2,6 @@
 //! execution with capture, pip/python environment isolation, window
 //! suppression, and the Windows job-object and console-signal plumbing.
 
-#[cfg(not(target_os = "windows"))]
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -17,7 +16,6 @@ use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WI
 /// version-restore path. Five minutes is well over the time needed to upgrade
 /// `esphome` on a working connection; bounding it prevents a stalled network
 /// from hanging app startup indefinitely.
-#[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Maximum length of pip stderr included in a failure error message. pip's
@@ -205,7 +203,6 @@ fn run_bounded(
 /// needing `--pre`. On timeout the child is killed and an error is returned;
 /// the caller logs a warning and falls back to the bundled version, so a
 /// stalled pip can't block app launch.
-#[cfg(not(target_os = "windows"))]
 pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
     let spec = format!("{}=={}", package, version);
     let mut cmd = python_command(python_bin, ["-m", "pip", "install", &spec]);
@@ -482,12 +479,12 @@ pub fn configure_daemon_tokio_command(cmd: &mut tokio::process::Command) {
 /// code. None of it runs when the NSIS uninstaller force-kills us, when we
 /// crash, or when the user ends the task from Task Manager. `kill_on_drop` is
 /// no help either: the normal quit path calls `std::process::exit()`, which
-/// skips `Drop`. The backend is then orphaned, and because Windows runs the
-/// interpreter straight out of the install directory (`ensure_user_python`
-/// returns early rather than copying it to app data), that orphan keeps
-/// `python.exe` — and every file its compile subtree touches, `git.exe`
-/// included — open. A later uninstall or in-place upgrade cannot replace or
-/// remove them, which strands the install tree and breaks the next launch.
+/// skips `Drop`. The backend is then orphaned, keeping `python.exe` in the
+/// app-data tree — and every file its compile subtree touches, the install
+/// dir's `git.exe` included — open. `ensure_user_python`'s next refresh or
+/// repair cannot `remove_dir_all` a tree with open files, and the uninstaller
+/// cannot remove a held `git.exe`, so the orphan strands both trees and breaks
+/// the next launch.
 ///
 /// A job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` closes that gap
 /// without needing any cooperation from the dying process: when the last
@@ -1184,7 +1181,7 @@ mod tests {
         assert_eq!(
             waited, WAIT_OBJECT_0,
             "the job did not kill its member when the owning process was force-killed; \
-             the backend would survive the desktop and keep holding the install dir open"
+             the backend would survive the desktop and keep holding its trees open"
         );
     }
 

@@ -3,11 +3,10 @@ name: Scripts Test
 # Lint and unit tests for the repo's first-party Python: the release tooling
 # under .github/scripts/, the runtime helpers under src-tauri/scripts/ that the
 # Rust binary embeds via include_str!, and the build-time generators under
-# build-scripts/. The release manifest generator drives in-app self-updates,
-# device_builder_maintenance.py heals the bundled install (#190), and
-# write_base_manifest.py decides what the package reset may delete (#330); a bug
-# in any of them ships to every user, and the main Build workflow only *runs*
-# them during a release, so this job gates the logic on every relevant PR.
+# build-scripts/. The release manifest generator drives in-app self-updates and
+# device_builder_maintenance.py heals the bundled install (#190); a bug in
+# either ships to every user, and the main Build workflow only *runs* them
+# during a release, so this job gates the logic on every relevant PR.
 
 on:
   pull_request:

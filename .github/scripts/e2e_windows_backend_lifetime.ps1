@@ -30,8 +30,19 @@ $ErrorActionPreference = 'Stop'
 $conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
 $InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
 $AppDataDir = Join-Path $env:APPDATA $conf.identifier
+# The managed Python tree: on first launch the app copies the bundled tree
+# here and the backend runs from the copy, not the install dir (#335).
+$LocalDataDir = Join-Path $env:LOCALAPPDATA $conf.identifier
+# Mirrors PYTHON_TREE_DIRNAME in src-tauri/src/platform/mod.rs (and the
+# 'python' resource name in tauri.conf.json for the install-dir side).
+$PythonDirName = 'python'
 # Trailing separator so `C:\foo` cannot prefix-match `C:\foobar`.
 $Prefix = $InstallDir + '\'
+$TreePrefix = (Join-Path $LocalDataDir $PythonDirName) + '\'
+# The backend imports ESPHome cold on a CI runner, and since #335 the first
+# launch also copies the whole bundled tree to app data — tens of thousands
+# of small files, each scanned by Defender — before the backend can spawn.
+$BackendStartTimeoutSec = 300
 
 # Callers must wrap this in `@(...)`. The `@()` below does not survive the
 # return: PowerShell unwraps a returned array, so no matches comes back as
@@ -42,22 +53,30 @@ function Get-BackendProcesses {
     # Three filters, each load-bearing:
     #
     #   Name     — cheap, pushed into WQL so we don't marshal every process.
-    #   Path     — the runner has its own Pythons; only the bundled one counts.
+    #   Path     — the runner has its own Pythons; only the managed tree's
+    #              copy counts (see $TreePrefix above).
     #   argv     — and only the *backend*. `Settings::load` runs the same
-    #              install-dir interpreter as `-m esphome version` synchronously
-    #              in `setup()`, before the daemon spawns and for several seconds
-    #              on a cold runner. Matching any install-dir python.exe grabs
-    #              that detector instead: the script would report "backend up",
-    #              kill the desktop before the backend existed, watch the
-    #              detector exit on its own, and print PASS — with or without the
-    #              job object. The backend is `-m esphome_device_builder ...`
-    #              (daemon::start_inner); the detector is `-m esphome version`.
+    #              managed-tree interpreter as `-m esphome version`
+    #              synchronously in `setup()`, before the daemon spawns and
+    #              for several seconds on a cold runner. Matching any managed
+    #              python.exe grabs that detector instead: the script would
+    #              report "backend up", kill the desktop before the backend
+    #              existed, watch the detector exit on its own, and print PASS
+    #              — with or without the job object. The backend is
+    #              `-m esphome_device_builder ...` (daemon::start_inner); the
+    #              detector is `-m esphome version`.
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
         $_.ExecutablePath -and
-        $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $_.ExecutablePath.StartsWith($TreePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
         $_.CommandLine -and
         $_.CommandLine -match 'esphome_device_builder'
     })
+}
+
+function Show-DirTop {
+    param([string]$Dir)
+    Get-ChildItem $Dir | Select-Object Mode, Length, Name |
+        Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 }
 
 function Show-Diagnostics {
@@ -72,20 +91,32 @@ function Show-Diagnostics {
         Write-Host "--- no dashboard.log at $log ---"
     }
 
-    Write-Host "--- processes under the install dir (CommandLine included: the"
-    Write-Host "    backend is -m esphome_device_builder, the version probe is"
-    Write-Host "    -m esphome version) ---"
-    # Unfiltered on purpose: on failure we want everything still holding the
-    # directory open, not just Python.
+    Write-Host "--- processes under the install dir or the managed tree"
+    Write-Host "    (CommandLine included: the backend is -m esphome_device_builder,"
+    Write-Host "    the version probe is -m esphome version) ---"
+    # Unfiltered on purpose: on failure we want everything still holding
+    # either directory open, not just Python. Both prefixes matter — the
+    # backend runs from the managed tree, the bundled git.exe from the
+    # install dir.
     Get-CimInstance Win32_Process |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
+        Where-Object {
+            $_.ExecutablePath -and (
+                $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $_.ExecutablePath.StartsWith($TreePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+            )
+        } |
         Select-Object ProcessId, ParentProcessId, Name, CommandLine |
         Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 
     Write-Host "--- install dir top level ---"
     if (Test-Path $InstallDir) {
-        Get-ChildItem $InstallDir | Select-Object Mode, Length, Name |
-            Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
+        Show-DirTop $InstallDir
+    }
+    Write-Host "--- managed tree top level ($LocalDataDir) ---"
+    if (Test-Path $LocalDataDir) {
+        Show-DirTop $LocalDataDir
+    } else {
+        Write-Host "--- no managed tree at $LocalDataDir (first-run copy never happened?) ---"
     }
     Write-Host "::endgroup::"
 }
@@ -122,11 +153,11 @@ Write-Host "Launching $($exe.Name)"
 # flag falls through to a normal launch, which is what a double-click gets.
 $app = Start-Process -FilePath $exe.FullName -ArgumentList '--no-open-dashboard' -PassThru
 try {
-    # The backend is Python importing ESPHome, which is not fast, and this is a
-    # cold first run on a CI runner. Fail with diagnostics rather than hang.
+    # Fail with diagnostics rather than hang; see $BackendStartTimeoutSec for
+    # why the ceiling is what it is.
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     $backend = @()
-    while ($deadline.Elapsed.TotalSeconds -lt 180) {
+    while ($deadline.Elapsed.TotalSeconds -lt $BackendStartTimeoutSec) {
         $backend = @(Get-BackendProcesses)
         if ($backend.Count -gt 0) { break }
         if ($app.HasExited) {
@@ -137,7 +168,7 @@ try {
     }
     if ($backend.Count -eq 0) {
         Show-Diagnostics 'the backend never started'
-        throw "no bundled python.exe under $InstallDir after 180s"
+        throw "no managed python.exe under $TreePrefix after ${BackendStartTimeoutSec}s"
     }
 
     Write-Host "Backend up after $([int]$deadline.Elapsed.TotalSeconds)s: PID(s) $(@($backend.ProcessId) -join ', ')"
@@ -188,12 +219,34 @@ try {
 
     # --- and the symptom, not just the mechanism --------------------------
     # Nobody reported "a process lingers". They reported an install directory
-    # that could not be removed, because the orphan held `python.exe` and
-    # `git.exe` open. That is the assertion that matches the bug report, and it
-    # is only meaningful sitting on top of the one above.
+    # that could not be removed, because an orphan held files in it open.
+    # Since #335 the backend runs from the managed tree, so an orphan pins
+    # *that* tree (covered by the job-object assertion above); what this
+    # checks is the install-dir side — the bundled payload, plus anything a
+    # backend child like `git.exe` still holds there — being cleanly
+    # removable. It is only meaningful sitting on top of the one above.
     $uninstaller = Join-Path $InstallDir 'uninstall.exe'
     if (-not (Test-Path $uninstaller)) { throw "no uninstaller at $uninstaller" }
-    Write-Host 'Uninstalling to confirm nothing is left holding the tree open'
+    Write-Host 'Uninstalling to confirm nothing is left holding the install dir open'
+
+    # Assert on the interpreter, not the whole tree: a locked `python.exe`
+    # fails its `Delete`, keeps `$INSTDIR\python` non-empty and strands the
+    # directory, so its removal is the signal. Assert it exists *before* the
+    # uninstall runs — if the bundle layout ever drifts away from this path,
+    # this check must fail loudly rather than pass on a file that was never
+    # there.
+    #
+    # The tree itself legitimately survives a healthy uninstall: Tauri `Delete`s
+    # only what its manifest lists and then calls non-recursive `RMDir`, while
+    # `prepare_bundle.sh` strips every `__pycache__` before packaging ("Python
+    # regenerates .pyc files at runtime"), so the app recreates .pyc files that
+    # were never in the manifest and `RMDir` finds the directory non-empty.
+    # Asserting the tree disappears is therefore red on every run, for a reason
+    # that has nothing to do with us.
+    $py = Join-Path $InstallDir (Join-Path $PythonDirName 'python.exe')
+    if (-not (Test-Path $py)) {
+        throw "no bundled interpreter at $py; did the bundle layout change?"
+    }
 
     # `-Wait` is not enough on its own and the reason matters: a bare `/S`
     # uninstall copies itself to $TEMP and re-execs, so the process started here
@@ -204,19 +257,6 @@ try {
     # hooks kill themselves, see #328.)
     Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
 
-    # Assert on the interpreter, not the whole tree. A locked `python.exe` fails
-    # its `Delete`, keeps `$INSTDIR\python` non-empty and strands the directory
-    # — that is the bug, so its removal is the signal, and it cannot be faked by
-    # anything else.
-    #
-    # The tree itself legitimately survives a healthy uninstall: Tauri `Delete`s
-    # only what its manifest lists and then calls non-recursive `RMDir`, while
-    # `prepare_bundle.sh` strips every `__pycache__` before packaging ("Python
-    # regenerates .pyc files at runtime"), so the app recreates .pyc files that
-    # were never in the manifest and `RMDir` finds the directory non-empty.
-    # Asserting the tree disappears is therefore red on every run, for a reason
-    # that has nothing to do with us.
-    $py = Join-Path $InstallDir 'python\python.exe'
     $unwatch = [Diagnostics.Stopwatch]::StartNew()
     while ($unwatch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $py)) {
         Start-Sleep -Milliseconds 500
