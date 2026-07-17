@@ -59,7 +59,11 @@ jobs:
     name: Rust lint & test
     needs: determine-jobs
     # Run on a manual dispatch regardless; on a PR, only when code changed.
-    if: github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true'
+    # always() is required: determine-jobs is PR-only, so on workflow_dispatch it
+    # is skipped, and without a status function the needs edge would skip this
+    # job too (GitHub skips a dependent when a needed job is skipped unless its
+    # if uses always()/!cancelled()).
+    if: always() && (github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true')
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -146,7 +150,9 @@ jobs:
     name: Rust lint & test (${{ matrix.os }})
     needs: determine-jobs
     # Run on a manual dispatch regardless; on a PR, only when code changed.
-    if: github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true'
+    # always() is required (see the note on the lint-test job above): without it,
+    # the skipped PR-only determine-jobs would skip this job on workflow_dispatch.
+    if: always() && (github.event_name != 'pull_request' || needs.determine-jobs.outputs.lint_test == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
