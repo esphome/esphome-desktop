@@ -824,6 +824,24 @@ fn parse_probe_output(
     Ok(if v.is_empty() { None } else { Some(v) })
 }
 
+/// Start of the block in which pip explains a resolution failure.
+const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
+
+/// The tail of pip's stdout from [`PIP_CONFLICT_MARKER`] onwards, or `None` if
+/// pip did not print one.
+///
+/// This block names *which* requirements conflict — and whether one has no
+/// distribution for this environment at all — and pip logs it at INFO, so it
+/// lands on stdout while the `ERROR: Cannot install ...` headline goes to
+/// stderr at CRITICAL. Every pip caller that reports a failure needs both
+/// halves (#327), so the extraction lives here beside [`pip_command`] rather
+/// than in one caller.
+pub(crate) fn pip_conflict_block(stdout: &str) -> Option<&str> {
+    stdout
+        .find(PIP_CONFLICT_MARKER)
+        .map(|start| stdout[start..].trim_end())
+}
+
 /// Hard upper bound on a single `pip install` invocation during the
 /// version-restore path. Five minutes is well over the time needed to
 /// upgrade `esphome` on a working connection; bounding it prevents a
@@ -831,31 +849,79 @@ fn parse_probe_output(
 #[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Maximum length of pip stderr included in a failure error message. pip's
-/// resolver and progress output can run to many kilobytes; the actionable
-/// failure reason is almost always at the tail, so we truncate to the last
-/// N bytes to keep log lines (and downstream UI surfaces) bounded.
+/// Maximum length of any one piece of pip output included in a failure error
+/// message. pip's resolver and progress output can run to many kilobytes; the
+/// actionable failure reason is almost always at the tail, so we truncate to
+/// the last N bytes to keep log lines (and downstream UI surfaces) bounded.
+/// Applied per stream — see [`pip_failure_detail`].
 #[cfg(not(target_os = "windows"))]
-const PIP_STDERR_TAIL_BYTES: usize = 4096;
+const PIP_LOG_TAIL_BYTES: usize = 4096;
 
-/// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
+/// Return `s` trimmed and truncated to the last [`PIP_LOG_TAIL_BYTES`]
 /// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
 /// char boundary so the result is always valid `str`.
 #[cfg(not(target_os = "windows"))]
 fn tail_for_log(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
+    if trimmed.len() <= PIP_LOG_TAIL_BYTES {
         return trimmed.to_string();
     }
-    let mut start = trimmed.len() - PIP_STDERR_TAIL_BYTES;
+    let mut start = trimmed.len() - PIP_LOG_TAIL_BYTES;
     while start < trimmed.len() && !trimmed.is_char_boundary(start) {
         start += 1;
     }
     format!(
-        "...(stderr truncated to last {} bytes)\n{}",
-        PIP_STDERR_TAIL_BYTES,
+        "...(output truncated to last {} bytes)\n{}",
+        PIP_LOG_TAIL_BYTES,
         &trimmed[start..]
     )
+}
+
+/// Bounded reported text for a failed `pip install` on the startup path.
+///
+/// Bounds each stream's contribution separately instead of tailing the joined
+/// text: the headline is the tail of stderr and the cause is the tail of
+/// stdout's block, so one tail over the two spliced together would keep the
+/// cause and cut the headline off the front.
+///
+/// The unbounded counterpart is `update::pip_failure_report` — that text goes
+/// to a dialog for a bug report, this one to a log line.
+#[cfg(not(target_os = "windows"))]
+fn pip_failure_detail(stdout: &str, stderr: &str) -> String {
+    let stderr = tail_for_log(stderr);
+    match pip_conflict_block(stdout) {
+        Some(block) => format!("{stderr}\n{}", tail_for_log(block)),
+        None => stderr,
+    }
+}
+
+/// Drain a child's pipe to a `String` on a background thread.
+///
+/// pip's progress bars and resolver diagnostics can easily exceed the OS pipe
+/// buffer (~64 KiB on Linux); if nothing reads the parent's end, pip blocks on
+/// `write()` mid-install, which would defeat the deadline and hang startup.
+/// This holds for whichever streams are piped, so both get a reader. Each
+/// exits naturally once the child closes its end (normal exit or kill).
+#[cfg(not(target_os = "windows"))]
+fn drain_to_string<R: std::io::Read + Send + 'static>(
+    mut handle: R,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = handle.read_to_string(&mut buf);
+        buf
+    })
+}
+
+/// Take and join a reader spawned by [`drain_to_string`], yielding what it read
+/// (or nothing, if the thread is already taken or panicked).
+#[cfg(not(target_os = "windows"))]
+fn joined(reader: &mut Option<std::thread::JoinHandle<String>>) -> String {
+    reader
+        .take()
+        .and_then(|t| t.join().ok())
+        .unwrap_or_default()
 }
 
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
@@ -863,14 +929,17 @@ fn tail_for_log(s: &str) -> String {
 /// needing `--pre`. On timeout the child is killed and an error is returned;
 /// the caller logs a warning and falls back to the bundled version, so a
 /// stalled pip can't block app launch.
+///
+/// Both streams are piped: the app is a GUI process, so an inherited stdout
+/// goes nowhere, and stdout is where pip explains a resolution failure (#339).
 #[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
-    use std::io::Read;
     use std::time::{Duration, Instant};
 
     let spec = format!("{}=={}", package, version);
     let mut cmd = std::process::Command::new(python_bin);
     cmd.args(["-m", "pip", "install", &spec]);
+    cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     isolate_pip_command(&mut cmd);
     configure_no_window_command(&mut cmd);
@@ -878,44 +947,33 @@ fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Resu
     let mut child = cmd.spawn().context("Failed to spawn pip install")?;
     let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
 
-    // Drain stderr in a background thread. pip's progress bars and resolver
-    // diagnostics can easily exceed the OS pipe buffer (~64 KiB on Linux);
-    // if nothing reads the parent's end, pip blocks on `write()` mid-install,
-    // which would defeat the deadline and hang startup. The reader exits
-    // naturally once the child closes its stderr fd (normal exit or kill).
-    let mut stderr_thread = child.stderr.take().map(|mut handle| {
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = handle.read_to_string(&mut buf);
-            buf
-        })
-    });
+    let mut stdout_reader = child.stdout.take().map(drain_to_string);
+    let mut stderr_reader = child.stderr.take().map(drain_to_string);
 
     loop {
         match child.try_wait().context("Failed to poll pip install")? {
             Some(status) => {
-                let stderr = stderr_thread
-                    .take()
-                    .and_then(|t| t.join().ok())
-                    .unwrap_or_default();
                 if status.success() {
                     return Ok(());
                 }
-                anyhow::bail!("pip install {} failed: {}", spec, tail_for_log(&stderr));
+                anyhow::bail!(
+                    "pip install {} failed: {}",
+                    spec,
+                    pip_failure_detail(&joined(&mut stdout_reader), &joined(&mut stderr_reader))
+                );
             }
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stderr = stderr_thread
-                        .take()
-                        .and_then(|t| t.join().ok())
-                        .unwrap_or_default();
                     anyhow::bail!(
-                        "pip install {} timed out after {:?}; partial stderr: {}",
+                        "pip install {} timed out after {:?}; partial output: {}",
                         spec,
                         PIP_INSTALL_TIMEOUT,
-                        tail_for_log(&stderr)
+                        pip_failure_detail(
+                            &joined(&mut stdout_reader),
+                            &joined(&mut stderr_reader)
+                        )
                     );
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -2477,6 +2535,67 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// pip's stdout for a resolution failure: progress chatter, then the block
+    /// naming the cause. The headline is on stderr, not here.
+    const CONFLICT_STDOUT: &str = "Collecting esphome==2026.7.0\n  Using cached esphome-2026.7.0-py3-none-any.whl\nINFO: pip is looking at multiple versions\nThe conflict is caused by:\n    esphome 2026.7.0 depends on some-dep>=2\n\nSome packages in these conflicts have no matching distributions available for your environment.\n";
+
+    /// pip's stderr for the same failure: the headline, and nothing else.
+    const CONFLICT_STDERR: &str = "ERROR: Cannot install esphome and esphome==2026.7.0 because these package versions have conflicting dependencies.\n";
+
+    #[test]
+    fn pip_conflict_block_starts_at_the_marker() {
+        let block = pip_conflict_block(CONFLICT_STDOUT).unwrap();
+        assert!(block.starts_with("The conflict is caused by:"));
+        assert!(block.contains("no matching distributions available for your environment"));
+        // The progress ahead of the marker would bury the cause.
+        assert!(!block.contains("Collecting esphome==2026.7.0"));
+    }
+
+    #[test]
+    fn pip_conflict_block_absent_when_pip_printed_none() {
+        assert_eq!(pip_conflict_block("Collecting esphome==2026.7.0\n"), None);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn pip_failure_detail_carries_both_the_headline_and_the_cause() {
+        // #339: stderr alone says two requirements conflict but never which.
+        let detail = pip_failure_detail(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(detail.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(detail.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(detail.contains("no matching distributions available for your environment"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn pip_failure_detail_bounds_each_stream_without_losing_the_other() {
+        // A single tail over the joined text would keep the cause (appended
+        // last) and cut the headline off the front. Bounding per stream keeps
+        // both, whichever one is oversized.
+        let noisy_stdout = format!("{}{}", "x".repeat(PIP_LOG_TAIL_BYTES * 2), CONFLICT_STDOUT);
+        let noisy_stderr = format!("{}{}", "y".repeat(PIP_LOG_TAIL_BYTES * 2), CONFLICT_STDERR);
+        let detail = pip_failure_detail(&noisy_stdout, &noisy_stderr);
+        assert!(detail.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(detail.contains("no matching distributions available for your environment"));
+        assert!(!detail.contains(&"x".repeat(PIP_LOG_TAIL_BYTES * 2)));
+        assert!(!detail.contains(&"y".repeat(PIP_LOG_TAIL_BYTES * 2)));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn pip_failure_detail_without_a_block_is_stderr_alone() {
+        // A failure pip words differently (a build error, no network) has no
+        // block, and must report exactly what it did before.
+        let detail = pip_failure_detail(
+            "Collecting esphome==2026.7.0\n",
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0\n",
+        );
+        assert_eq!(
+            detail,
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0"
+        );
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_passes_short_input_through_trimmed() {
@@ -2494,7 +2613,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
-        let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
+        let s = "a".repeat(PIP_LOG_TAIL_BYTES);
         let out = tail_for_log(&s);
         assert_eq!(out, s, "input exactly at the limit must pass through");
         assert!(!out.contains("truncated"), "no marker at the boundary");
@@ -2510,14 +2629,14 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_truncates_to_the_tail_with_marker() {
-        let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
+        let s = "x".repeat(PIP_LOG_TAIL_BYTES + 904);
         let out = tail_for_log(&s);
         assert!(
-            out.starts_with("...(stderr truncated"),
+            out.starts_with("...(output truncated"),
             "marker comes first"
         );
         assert!(
-            out.ends_with(&s[s.len() - PIP_STDERR_TAIL_BYTES..]),
+            out.ends_with(&s[s.len() - PIP_LOG_TAIL_BYTES..]),
             "keeps tail"
         );
     }
@@ -2533,10 +2652,7 @@ mod tests {
         let out = tail_for_log(&s);
         assert!(out.contains("truncated"), "long input must be marked");
         let tail = out.split_once('\n').unwrap().1;
-        assert!(
-            tail.len() <= PIP_STDERR_TAIL_BYTES,
-            "tail stays within bound"
-        );
+        assert!(tail.len() <= PIP_LOG_TAIL_BYTES, "tail stays within bound");
         assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
     }
 

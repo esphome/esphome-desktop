@@ -1055,9 +1055,6 @@ fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
-/// Start of the block in which pip explains a resolution failure.
-const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
-
 /// Build the reported text for a failed pip install from its two streams.
 ///
 /// pip splits a resolution failure across both. stderr carries the headline
@@ -1068,14 +1065,18 @@ const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 /// is logged at INFO and therefore goes to stdout. Reporting stderr alone left
 /// a bug report holding the symptom and none of the cause (#327).
 ///
-/// Everything from the marker onwards is that diagnostic, so append that tail
-/// and nothing else: earlier stdout is `Collecting`/`Downloading` progress that
-/// would bury it. A failure pip words differently (a build error, no network)
-/// has no marker and is reported exactly as before.
+/// Appends [`platform::pip_conflict_block`] and nothing else: the stdout ahead
+/// of it is `Collecting`/`Downloading` progress that would bury the cause. A
+/// failure pip words differently (a build error, no network) has no block and
+/// is reported exactly as before.
+///
+/// Unbounded, unlike the startup path's [`platform`] counterpart: this text
+/// reaches a dialog the user is expected to paste into a bug report, so the
+/// whole diagnostic goes through.
 fn pip_failure_report(stdout: &str, stderr: &str) -> String {
     let stderr = stderr.trim_end();
-    match stdout.find(PIP_CONFLICT_MARKER) {
-        Some(start) => format!("{stderr}\n{}", stdout[start..].trim_end()),
+    match platform::pip_conflict_block(stdout) {
+        Some(block) => format!("{stderr}\n{block}"),
         None => stderr.to_string(),
     }
 }
