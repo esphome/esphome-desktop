@@ -54,19 +54,35 @@ EXEMPT: frozenset[str] = frozenset(
 
 
 def _code_before_comment(line: str) -> str:
-    """`line` with any trailing comment and whitespace removed.
+    """`line` with its comments and trailing whitespace removed.
 
-    Only ever applied to the three line shapes this scanner matches on (the
-    attribute, a `mod` declaration, a closing brace), none of which carry a
-    string literal that could contain a `//`. `} // end tests` is valid Rust
-    that rustfmt preserves, so matching the bare shapes alone misses it.
+    `} // end tests` is valid Rust that rustfmt preserves, so matching the
+    bare shapes alone misses the terminator and swallows the rest of the file.
+
+    A `/* ... */` span is closed and removed rather than treated as running to
+    end of line, because it can be followed by real code: truncating at the
+    opener turns `mod tests { /* todo */ }` into `mod tests {`, throwing away
+    the brace that closes the body and losing the terminator the same way.
+    rustfmt happens to break that exact line in two, so this tree cannot hold
+    it while `cargo fmt --check` blocks, but the helper should not depend on
+    that to be right.
+
+    This is applied to every line, not only to the shapes matched on. That is
+    safe for the two callers comparing the result to a constant, and it is why
+    the third — the self-contained check, which reads the result as content —
+    needs the span closed rather than truncated. A `//` inside a string
+    literal would be mangled here; that costs nothing on the shapes actually
+    compared, and a raw string holding a column-0 `}` only ever ends a block
+    early, which counts more lines rather than fewer.
     """
-    cut = len(line)
-    for marker in ("//", "/*"):
-        found = line.find(marker)
-        if found != -1:
-            cut = min(cut, found)
-    return line[:cut].rstrip()
+    while (start := line.find("/*")) != -1:
+        end = line.find("*/", start + 2)
+        if end == -1:
+            line = line[:start]
+            break
+        line = f"{line[:start]} {line[end + 2 :]}"
+    cut = line.find("//")
+    return (line if cut == -1 else line[:cut]).rstrip()
 
 
 def code_line_count(source: str) -> int:
@@ -95,9 +111,10 @@ def code_line_count(source: str) -> int:
         emit (compare `control/server.rs`, which has `pub fn cleanup() {}` at
         column 0). Scanning below it for a `}` finds the *next* item's brace,
         or none, and swallows the file: it scores 0.
-      * A matched line can carry a trailing comment. `} // end tests` is valid
-        Rust and rustfmt keeps it, so an exact `}` match walks past the real
-        terminator to the next one and swallows everything between: another 0.
+      * A matched line can carry a comment. `} // end tests` is valid Rust and
+        rustfmt keeps it, so an exact `}` match walks past the real terminator
+        to the next one and swallows everything between: another 0. A closed
+        `/* ... */` span can likewise be followed by the brace that matters.
 
     Finding the end of a block by the next column-0 `}` leans on rustfmt
     putting the closing brace of a top-level item at column 0, which holds

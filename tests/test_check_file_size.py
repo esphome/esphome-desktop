@@ -204,6 +204,33 @@ def test_a_commented_closing_brace_cannot_hide_an_over_cap_file(
     assert len(check_file_size.check(tmp_path, ["a.rs"], set())) == 1
 
 
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "mod tests { /* todo */ }",  # truncating at `/*` loses the `}`
+        "mod tests { /* todo */\n}",  # what rustfmt rewrites the above into
+        "mod tests {} /* todo */",
+    ],
+)
+def test_a_block_comment_does_not_lose_the_closing_brace(declaration: str) -> None:
+    """`/* ... */` closes and can be followed by code; it is not to end of line.
+
+    Truncating at the opener leaves `mod tests {`, which fails the
+    self-contained check, so the scanner hunts below for a brace, finds the
+    next item's, and swallows everything between: a 9-line file scores 0.
+
+    rustfmt splits the first spelling across two lines, so this tree cannot
+    hold it, but the helper should not be right only by luck.
+    """
+    source = f"#[cfg(test)]\n{declaration}\n" + "fn a() {}\nfn b() {\n}\n"
+    assert check_file_size.code_line_count(source) == 3
+
+
+def test_an_unclosed_block_comment_truncates() -> None:
+    """No `*/` on the line means the comment really does run on."""
+    assert check_file_size._code_before_comment("} /* unfinished") == "}"
+
+
 def test_a_comment_on_the_declaration_still_reads_as_self_contained() -> None:
     """Only `fn a` and `fn b`; the attribute and declaration are both skipped."""
     source = "fn a() {}\n#[cfg(test)]\nmod tests {} // nothing yet\nfn b() {}\n"
