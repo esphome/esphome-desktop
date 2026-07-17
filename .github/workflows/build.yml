@@ -20,6 +20,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Belt-and-braces over GitHub's built-in `cancel-in-progress` (above), which
+  # under runner contention does not reliably cancel a Build for a superseded
+  # commit once that Build has already claimed runners: the stale run keeps its
+  # scarce macOS/Windows/ARM runners while this run queues behind it, and the
+  # required `CI Status` check stalls (observed 15+ minutes). Explicitly cancel
+  # any strictly-older still-active Build run for the same PR branch so its
+  # runners free up for this one. Best-effort and never fails the run; it is not
+  # a `CI Status` dependency, so a hiccup here cannot block a merge.
+  cancel-superseded:
+    name: Cancel superseded runs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel older in-progress Build runs for this PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.head_ref }}
+          THIS_NUM: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # Only strictly-older (lower run_number) still-active runs of THIS
+          # workflow for THIS PR's head branch — never this run or a newer one,
+          # so a rapid second push can't have the older run cancel the newer.
+          gh api "repos/$REPO/actions/workflows/build.yml/runs?event=pull_request&branch=$HEAD_REF&per_page=100" \
+            --jq '.workflow_runs[]
+                  | select(.status != "completed" and .run_number < (env.THIS_NUM | tonumber))
+                  | .id' \
+          | while read -r id; do
+              echo "Cancelling superseded Build run $id"
+              gh run cancel "$id" --repo "$REPO" || true
+            done
+
   # On pull requests, decide whether the build matrix needs to run at all. A PR
   # that only touches documentation or repo meta files skips it (the logic and
   # its fail-safe bias live in .github/scripts/determine_jobs.py). The CI Status
