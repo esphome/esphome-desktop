@@ -66,8 +66,9 @@ ruff format --check .
 python3 -m pytest tests/ -v
 ```
 
-On Windows, spell these `python` or `py -m` rather than `python3` — a python.org
-install puts `python.exe` and `py.exe` on PATH but no `python3.exe`.
+On Windows, use `py -m` rather than `python3`; a python.org install never ships a
+`python3.exe`, and the `py` launcher is the reliable spelling there (plain
+`python` works only if you added it to PATH during install).
 
 ---
 
