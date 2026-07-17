@@ -23,8 +23,13 @@ env:
 jobs:
   # On pull requests, skip the Rust lint/test jobs when the PR only touches
   # documentation or repo meta files (see .github/scripts/determine_jobs.py).
-  # These jobs are not required checks, so a skip simply reports nothing and
-  # never blocks a merge; non-PR events skip this job and run unconditionally.
+  #
+  # INVARIANT: these jobs must stay non-required checks. Unlike build.yml there
+  # is deliberately no CI Status aggregate here, so a docs-only PR (or a
+  # determine-jobs gate-job failure) just skips them with nothing reported. If
+  # any of these names is ever made a required check, that silent skip would
+  # hang the merge; add a CI Status style aggregate (as build.yml has) first.
+  # Non-PR events skip this gate and run the jobs unconditionally.
   determine-jobs:
     name: Determine jobs
     if: github.event_name == 'pull_request'
