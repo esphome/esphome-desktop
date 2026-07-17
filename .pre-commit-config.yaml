@@ -61,10 +61,18 @@ repos:
       # Editing the script or its list would not trigger it either. It is a
       # whole-tree check that reads no filenames, so there is nothing to gain
       # by scoping it.
+      #
+      # `language: python` rather than `system`, so pre-commit provisions the
+      # interpreter and `python` resolves inside its venv on every platform. A
+      # python.org install on Windows puts `python.exe` and `py.exe` on PATH
+      # but no `python3.exe`; only the Microsoft Store build ships that shim.
+      # Under `system` the entry comes straight off PATH, so `python3` would
+      # fail to launch there — and because this hook is always_run, it would
+      # fail every commit, not just the ones touching Rust.
       - id: check-file-size
         name: file size cap (src-tauri/src)
-        entry: python3 .github/scripts/check_file_size.py
-        language: system
+        entry: python .github/scripts/check_file_size.py
+        language: python
         always_run: true
         pass_filenames: false
 

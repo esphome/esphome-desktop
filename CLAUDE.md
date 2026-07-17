@@ -12,8 +12,10 @@ can be brought back into line.
 
 The high-leverage ones to keep in working memory while editing:
 
-- **File size cap: 800 lines**, counting code and not the trailing
-  `#[cfg(test)] mod` block. Split into submodules before crossing it. Do not
+- **File size cap: 800 lines**, counting code and not a top-level
+  `#[cfg(test)] mod` block, wherever in the file it sits. Code following a
+  test module counts, as does a test module nested inside another `mod`.
+  Split into submodules before crossing it. Do not
   add an entry to the `EXEMPT` list in `.github/scripts/check_file_size.py`;
   that list is the record of files that predate the cap and it is meant to
   shrink, not grow.

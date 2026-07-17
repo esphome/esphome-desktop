@@ -14,11 +14,11 @@ file, on any of:
     EXEMPT so it can never regress);
   * an EXEMPT entry naming a file that no longer exists.
 
-The cap counts *code* lines: the trailing `#[cfg(test)] mod` block does not
-count against it. Rust inlines its unit tests, so counting them would mean a
-700-line file with 200 lines of tests is "over" and the cheapest way back
-under is to delete tests. See CONTRIBUTING.md ("Code structure policies") for
-the rule as contributors read it.
+The cap counts *code* lines: a top-level `#[cfg(test)] mod` block does not
+count against it, wherever in the file it sits. Rust inlines its unit tests,
+so counting them would mean a 700-line file with 200 lines of tests is "over"
+and the cheapest way back under is to delete tests. See CONTRIBUTING.md
+("Code structure policies") for the rule as contributors read it.
 """
 
 from __future__ import annotations
