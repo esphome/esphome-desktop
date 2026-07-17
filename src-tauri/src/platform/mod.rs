@@ -854,10 +854,14 @@ mod tests {
 
         // 2. The copy must answer for itself. Its own sysconfig resolving into
         //    the source tree would mean every assertion below green-lights the
-        //    bundle instead of the copy under test.
+        //    bundle instead of the copy under test. Canonicalized on both
+        //    sides: macOS reports the tree through /private/var while the temp
+        //    path is spelled /var, and that symlink spread must not read as
+        //    "outside the tree".
         let purelib = e2e_purelib(&python);
+        let canonical_tree = user_tree.canonicalize().unwrap();
         assert!(
-            purelib.starts_with(&user_tree),
+            purelib.canonicalize().unwrap().starts_with(&canonical_tree),
             "the copy's purelib {purelib:?} is outside {user_tree:?}, so the copy \
              is not self-contained"
         );
