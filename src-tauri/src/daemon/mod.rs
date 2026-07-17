@@ -280,11 +280,9 @@ impl DaemonManager {
         // which a grandchild could escape the job. Closing it properly needs
         // CREATE_SUSPENDED plus a manual ResumeThread, which tokio doesn't
         // expose; Python has not spawned anything that early, so accept it.
-        // `raw_handle()` is None only if the child has already been reaped, in
-        // which case there is nothing to assign. Fold that in with assignment
-        // failure: both mean the same thing to a reader of the log, and the
-        // helper has already logged the underlying Win32 error, so this states
-        // the consequence once rather than repeating the cause.
+        // `raw_handle()` is None only if the child was already reaped, which
+        // needs no assignment either — hence `is_some_and`. The helper logs the
+        // Win32 cause; this logs the consequence.
         #[cfg(windows)]
         if !child
             .raw_handle()

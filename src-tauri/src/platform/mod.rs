@@ -1287,9 +1287,7 @@ unsafe impl Sync for JobHandle {}
 /// that fires on every exit path including the ones that never run our code.
 ///
 /// `None` if the job could not be set up; the caller then just loses the
-/// backstop and keeps the graceful path. The `JobHandle` newtype exists only to
-/// carry the handle across the `OnceLock`, which requires `Sync`; callers get
-/// the bare `HANDLE`, which is `Copy`.
+/// backstop and keeps the graceful path.
 #[cfg(target_os = "windows")]
 fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
     use ::windows::core::PCWSTR;
@@ -2717,8 +2715,7 @@ mod tests {
     fn job_kills_its_member_when_the_owner_is_force_killed() {
         use ::windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use ::windows::Win32::System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_SYNCHRONIZE,
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
         };
         use std::io::{BufRead, BufReader};
 
@@ -2745,14 +2742,8 @@ mod tests {
 
         // SAFETY: `member_pid` was just reported by a live child; the handle is
         // closed on every path below.
-        let member = unsafe {
-            OpenProcess(
-                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                false,
-                member_pid,
-            )
-        }
-        .expect("could not open the job member");
+        let member = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, member_pid) }
+            .expect("could not open the job member");
 
         // The point of the whole test: kill the owner outright.
         owner.kill().expect("failed to kill the owner");

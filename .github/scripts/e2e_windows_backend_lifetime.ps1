@@ -19,8 +19,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$InstallDir = Join-Path $env:LOCALAPPDATA 'ESPHome Device Builder'
-$AppDataDir = Join-Path $env:APPDATA 'io.esphome.builder'
+# Read the product name rather than duplicating it: the install directory is
+# derived from it, and this script already refuses to assume it for the binary
+# name a few lines down. Hardcoding it here and discovering it there would be
+# the same assumption wearing a disguise.
+$conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+$InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
+$AppDataDir = Join-Path $env:APPDATA $conf.identifier
+# Trailing separator so `C:\foo` cannot prefix-match `C:\foobar`.
+$Prefix = $InstallDir + '\'
 
 # Callers must wrap this in `@(...)`. The `@()` below does not survive the
 # return: PowerShell unwraps a returned array, so no matches comes back as
@@ -29,12 +36,11 @@ $AppDataDir = Join-Path $env:APPDATA 'io.esphome.builder'
 # broke the first two runs of this script, before it had checked anything.
 function Get-BackendProcesses {
     # Scope by executable path, not image name: the runner has its own Pythons
-    # and this must only ever see the bundled one.
-    $prefix = $InstallDir + '\'
-    @(Get-CimInstance Win32_Process | Where-Object {
+    # and this must only ever see the bundled one. The WQL filter keeps the
+    # marshalling down; the path test is what makes it correct.
+    @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
         $_.ExecutablePath -and
-        $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $_.Name -ieq 'python.exe'
+        $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)
     })
 }
 
@@ -51,9 +57,10 @@ function Show-Diagnostics {
     }
 
     Write-Host "--- processes under the install dir ---"
-    $prefix = $InstallDir + '\'
+    # Unfiltered on purpose: on failure we want everything still holding the
+    # directory open, not just Python.
     Get-CimInstance Win32_Process |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
         Select-Object ProcessId, ParentProcessId, Name, ExecutablePath |
         Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 
@@ -109,6 +116,18 @@ try {
 
     Write-Host "Backend up after $([int]$deadline.Elapsed.TotalSeconds)s: PID(s) $(@($backend.ProcessId) -join ', ')"
 
+    # Take handles *before* killing the desktop, for the same reason the Rust
+    # test does: a held handle pins the PID so it cannot be recycled under us,
+    # and it turns the check below into a wait on the process itself rather
+    # than a poll for its absence, which reports the real latency.
+    $watched = @(@($backend.ProcessId) | ForEach-Object {
+        Get-Process -Id $_ -ErrorAction SilentlyContinue
+    } | Where-Object { $_ })
+    if ($watched.Count -eq 0) {
+        Show-Diagnostics 'the backend vanished between being found and being watched'
+        throw 'could not open a handle to any backend process'
+    }
+
     # --- the actual test --------------------------------------------------
     # Force-kill the desktop with no chance to run any shutdown code. This is
     # the NSIS uninstaller, a crash, and End Task. Nothing but the job object
@@ -127,11 +146,10 @@ try {
     Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
     $app.WaitForExit(30000) | Out-Null
 
-    $gone = $false
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    while ($watch.Elapsed.TotalSeconds -lt 30) {
-        if (@(Get-BackendProcesses).Count -eq 0) { $gone = $true; break }
-        Start-Sleep -Milliseconds 250
+    $gone = $true
+    foreach ($b in $watched) {
+        if (-not $b.WaitForExit(30000)) { $gone = $false }
     }
 
     if (-not $gone) {
@@ -143,7 +161,7 @@ try {
     Write-Host 'PASS: the backend cannot outlive the desktop process'
 }
 finally {
-    if ($app -and -not $app.HasExited) {
+    if (-not $app.HasExited) {
         Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
     }
     # On the failing path the whole point is that these are still alive.
