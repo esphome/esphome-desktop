@@ -4,10 +4,11 @@
 //! the failure class that motivated it (#330, an orphaned component package)
 //! is invisible to every metadata check and only surfaces when ESPHome's
 //! loader actually walks the tree. The repair counter bounds how often a
-//! failed probe may trigger the reset, so a breakage the reset cannot fix
-//! never becomes a wipe-reinstall loop.
+//! failed probe may trigger a repair, so a breakage the repair cannot fix
+//! never becomes a wipe-recopy loop.
 
 use super::process::{run_python_capture_bounded, tail_for_log};
+use super::python_tree_root;
 use anyhow::{Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -76,11 +77,11 @@ fn make_probe_dir() -> Result<PathBuf> {
 /// a repair. Lives at `<python parent dir>/.repair-count`
 /// (see [`super::get_python_parent_dir`]).
 ///
-/// Beside the Python tree, never inside it. On macOS and Linux the repair *is*
-/// `remove_dir_all` of the whole tree, so a counter kept within it would be
-/// destroyed by the very repair it exists to bound: every launch would read
-/// zero, wipe, re-copy, and do it again forever — exactly the loop
-/// [`MAX_REPAIRS`] is here to stop.
+/// Beside the Python tree, never inside it. The repair *is* `remove_dir_all`
+/// of the whole tree, so a counter kept within it would be destroyed by the
+/// very repair it exists to bound: every launch would read zero, wipe,
+/// re-copy, and do it again forever — exactly the loop [`MAX_REPAIRS`] is
+/// here to stop.
 const REPAIR_COUNT_MARKER: &str = ".repair-count";
 
 /// Maximum repairs triggered by a failing health probe before giving up.
@@ -141,39 +142,6 @@ pub fn clear_repair_count(python_parent_dir: &Path) {
     }
 }
 
-/// Resolve the root of a managed Python tree from its interpreter path.
-///
-/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
-/// root from the interpreter rather than rebuilding it from the data dir keeps
-/// this correct for whichever tree [`super::get_python_path`] actually selected.
-pub(super) fn python_tree_root(python_bin: &Path) -> Option<&Path> {
-    let bin_dir = python_bin.parent()?;
-    let root = if cfg!(target_os = "windows") {
-        bin_dir
-    } else {
-        bin_dir.parent()?
-    };
-    // `get_python_path` falls back to a bare `python3`/`python` for development
-    // builds with no bundle. That resolves to an empty root, i.e. the current
-    // directory, which is not a managed tree and must not be swept or marked.
-    if root.as_os_str().is_empty() {
-        return None;
-    }
-    Some(root)
-}
-
-/// The interpreter path inside a Python tree laid out the way the real bundle
-/// is on this platform: [`python_tree_root`]'s inverse. One spelling of the
-/// shipped layout, shared between the path resolvers and the tests so a second
-/// copy cannot drift from it.
-pub(super) fn interpreter_in_tree(root: &Path) -> PathBuf {
-    if cfg!(target_os = "windows") {
-        root.join("python.exe")
-    } else {
-        root.join("bin").join("python3")
-    }
-}
-
 /// Whether `python_bin` is a Python tree this app manages, as opposed to the
 /// bare `python3`/`python` [`super::get_python_path`] falls back to in development
 /// builds with no bundle.
@@ -188,8 +156,10 @@ pub fn is_managed_python_tree(python_bin: &Path) -> bool {
 /// Check the ESPHome install by running a real `esphome config` validation.
 ///
 /// `Ok(None)` means healthy, `Ok(Some(output))` means broken in a way that
-/// breaks real use, `Err` means the probe could not be run at all (which a
-/// package reset cannot fix, since the reset needs this same interpreter).
+/// breaks real use, `Err` means the probe could not be run at all — which may
+/// be the environment (a full disk, an unwritable temp dir) rather than the
+/// tree, so the caller asks the interpreter itself before treating it as
+/// damage the re-copy repair should fix.
 ///
 /// Runs the actual CLI rather than inspecting package metadata, because the
 /// damage is invisible to metadata. The orphaned `components/rp2040/` directory

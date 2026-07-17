@@ -286,8 +286,8 @@ impl UpdateChecker {
             info!("Installing ESPHome from GitHub (dev channel)");
 
             // A clean --force-reinstall. If pip aborts because a dependency
-            // (e.g. zeroconf) has no RECORD file, reset the packages and retry
-            // against a clean tree — same broken-RECORD recovery as #155, here
+            // (e.g. zeroconf) has no RECORD file, repair the tree and retry
+            // against a clean copy — same broken-RECORD recovery as #155, here
             // on the dev/GitHub path (#183).
             let pp = python_path.clone();
             install_with_record_recovery(
@@ -362,8 +362,8 @@ impl UpdateChecker {
         };
 
         // A clean upgrade, which uninstalls the old copy normally. Only if pip
-        // aborts on a missing RECORD file (#155) do we reset the packages and
-        // retry against a clean tree.
+        // aborts on a missing RECORD file (#155) do we repair the tree and
+        // retry against a clean copy.
         let pp = python_path.clone();
         install_with_record_recovery(
             move || {
@@ -1021,7 +1021,8 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// install or an update check.
 ///
 /// Nothing produces this damage any more — the fallback that caused it is gone
-/// (see [`install_with_record_recovery`]) and a package reset leaves no orphans.
+/// (see [`install_with_record_recovery`]) and the repair re-copies a pristine
+/// tree, leaving no orphans.
 /// It stays because trees damaged *before* that change still exist in the wild,
 /// and nothing else recovers them: duplicate metadata does not fail an install
 /// or the `esphome config` health probe, so neither repair path would ever fire.
@@ -1185,7 +1186,10 @@ fn repair_hint(python_parent_dir: &std::path::Path, retryable: bool) -> String {
         "update.repair_hint_delete_tree",
         &[(
             "path",
-            &python_parent_dir.join("python").display().to_string(),
+            &python_parent_dir
+                .join(platform::PYTHON_TREE_DIRNAME)
+                .display()
+                .to_string(),
         )],
     )
 }
@@ -1688,8 +1692,8 @@ mod tests {
     fn test_device_builder_install_args_never_ignore_installed() {
         // --ignore-installed skipped pip's uninstall and orphaned the old
         // version's files, which is what broke every compile in #330. No input
-        // may reintroduce it; a broken tree is repaired by resetting the
-        // packages instead.
+        // may reintroduce it; a broken tree is repaired by re-copying the
+        // bundled tree instead.
         for backend in [Backend::BuilderStable, Backend::BuilderBeta] {
             for version in [None, Some("1.2.3")] {
                 let args = device_builder_install_args(backend, version);
@@ -1819,7 +1823,12 @@ mod tests {
             "reinstalling does not touch the app-data tree: {exhausted}"
         );
         assert!(
-            exhausted.contains(&python_parent_dir.join("python").display().to_string()),
+            exhausted.contains(
+                &python_parent_dir
+                    .join(platform::PYTHON_TREE_DIRNAME)
+                    .display()
+                    .to_string()
+            ),
             "name the folder the user has to remove: {exhausted}"
         );
     }

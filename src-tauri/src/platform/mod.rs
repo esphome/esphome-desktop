@@ -83,6 +83,45 @@ pub fn get_python_parent_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Name of the managed Python tree's directory under
+/// [`get_python_parent_dir`]. One spelling, because it also appears in the
+/// user-facing "delete this folder" repair hint (`update::repair_hint`), where
+/// a drift would print an instruction pointing at nothing.
+pub const PYTHON_TREE_DIRNAME: &str = "python";
+
+/// Resolve the root of a managed Python tree from its interpreter path.
+///
+/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
+/// root from the interpreter rather than rebuilding it from the data dir keeps
+/// this correct for whichever tree [`get_python_path`] actually selected.
+fn python_tree_root(python_bin: &Path) -> Option<&Path> {
+    let bin_dir = python_bin.parent()?;
+    let root = if cfg!(target_os = "windows") {
+        bin_dir
+    } else {
+        bin_dir.parent()?
+    };
+    // `get_python_path` falls back to a bare `python3`/`python` for development
+    // builds with no bundle. That resolves to an empty root, i.e. the current
+    // directory, which is not a managed tree and must not be wiped or marked.
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(root)
+}
+
+/// The interpreter path inside a Python tree laid out the way the real bundle
+/// is on this platform: [`python_tree_root`]'s inverse. One spelling of the
+/// shipped layout, shared between the path resolvers and the tests so a second
+/// copy cannot drift from it.
+fn interpreter_in_tree(root: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        root.join("python.exe")
+    } else {
+        root.join("bin").join("python3")
+    }
+}
+
 /// Get the bundled resource directory.
 ///
 /// On Linux we resolve this ourselves so the path is always
@@ -149,7 +188,7 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// builds with no bundle.
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     let parent_dir = get_python_parent_dir(app_handle)?;
-    let python_path = health::interpreter_in_tree(&parent_dir.join("python"));
+    let python_path = interpreter_in_tree(&parent_dir.join(PYTHON_TREE_DIRNAME));
 
     if python_path.exists() {
         debug!("Using user Python: {:?}", python_path);
@@ -158,7 +197,7 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
 
     // Fall back to bundled Python (will be copied on first run)
     let resource_dir = get_bundled_resource_dir(app_handle)?;
-    let bundled_python = health::interpreter_in_tree(&resource_dir.join("python"));
+    let bundled_python = interpreter_in_tree(&resource_dir.join("python"));
 
     if bundled_python.exists() {
         debug!("Using bundled Python: {:?}", bundled_python);
@@ -174,16 +213,20 @@ pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
     }))
 }
 
+/// Directory holding the interpreter inside a managed tree: the tree root on
+/// Windows, `<root>/bin` elsewhere. Derived from [`interpreter_in_tree`] so
+/// the layout stays spelled once.
+fn bin_dir_in_tree(root: &Path) -> PathBuf {
+    interpreter_in_tree(root)
+        .parent()
+        .expect("interpreter_in_tree always returns a path with a parent")
+        .to_path_buf()
+}
+
 /// Get the Python bin directory (for PATH)
 pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
     let parent_dir = get_python_parent_dir(app_handle)?;
-    let user_python = parent_dir.join("python");
-
-    #[cfg(target_os = "windows")]
-    let bin_dir = user_python.clone(); // On Windows, python.exe is in the root
-
-    #[cfg(not(target_os = "windows"))]
-    let bin_dir = user_python.join("bin");
+    let bin_dir = bin_dir_in_tree(&parent_dir.join(PYTHON_TREE_DIRNAME));
 
     // If user Python exists, use it
     if bin_dir.exists() {
@@ -192,14 +235,7 @@ pub fn get_python_bin(app_handle: &AppHandle) -> Result<PathBuf> {
 
     // Fall back to bundled Python
     let resource_dir = get_bundled_resource_dir(app_handle)?;
-
-    #[cfg(target_os = "windows")]
-    let bundled_bin = resource_dir.join("python"); // On Windows, python.exe is in the root
-
-    #[cfg(not(target_os = "windows"))]
-    let bundled_bin = resource_dir.join("python").join("bin");
-
-    Ok(bundled_bin)
+    Ok(bin_dir_in_tree(&resource_dir.join("python")))
 }
 
 /// Directory inside the bundled `git` resource that holds `git.exe`.
@@ -636,7 +672,6 @@ pub fn is_tray_supported() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::health::{interpreter_in_tree, python_tree_root};
     use super::*;
     use crate::util::unique_temp_dir;
 
@@ -767,8 +802,8 @@ mod tests {
     /// Goes through [`run_python_capture`] so the harness is isolated exactly as
     /// the code under test is. Spawning the interpreter directly would let the
     /// runner's user site-packages or an ambient `PYTHONPATH` satisfy an import
-    /// (#318) — and this test asserts on *absence* ("esphome survived the
-    /// wipe"), which is precisely what a stray import would invert.
+    /// (#318), and every assertion in the e2e must report on the tree under
+    /// test alone.
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
         let output = run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
@@ -917,7 +952,7 @@ mod tests {
     #[test]
     fn the_system_python_fallback_is_not_a_managed_tree() {
         // `get_python_path` returns a bare command name in dev builds with no
-        // bundle. There is no managed tree behind it, so nothing may be swept,
+        // bundle. There is no managed tree behind it, so nothing may be wiped,
         // and probing it would tell a developer their install is broken when
         // all that is true is that ESPHome is not in their system Python.
         for fallback in ["python3", "python"] {
