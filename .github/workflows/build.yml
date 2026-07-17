@@ -41,15 +41,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           THIS_NUM: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          # Only strictly-older (lower run_number) still-active runs of THIS
-          # workflow for THIS PR's head branch — never this run or a newer one,
-          # so a rapid second push can't have the older run cancel the newer.
-          gh api "repos/$REPO/actions/workflows/build.yml/runs?event=pull_request&branch=$HEAD_REF&per_page=100" \
+          # Older still-active Build runs for THIS PR. head_branch alone is not
+          # unique across forks (two forks can share a branch name), so match the
+          # head repository too, or we could cancel a different PR's run. The
+          # run_number bound keeps it to strictly-older runs, never this one or a
+          # newer one (so a rapid second push can't have the older cancel the
+          # newer). `gh -f` url-encodes the branch filter for exotic names.
+          gh api -X GET "repos/$REPO/actions/workflows/build.yml/runs" \
+            -f event=pull_request -f branch="$HEAD_REF" -f per_page=100 \
             --jq '.workflow_runs[]
-                  | select(.status != "completed" and .run_number < (env.THIS_NUM | tonumber))
+                  | select(.head_repository.full_name == env.HEAD_REPO
+                           and .head_branch == env.HEAD_REF
+                           and .status != "completed"
+                           and .run_number < (env.THIS_NUM | tonumber))
                   | .id' \
           | while read -r id; do
               echo "Cancelling superseded Build run $id"
