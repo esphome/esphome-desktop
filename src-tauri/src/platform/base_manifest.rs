@@ -172,7 +172,8 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
 /// it shipped with, rather than reinstalling from PyPI.
 ///
 /// True on macOS and Linux, where the resource tree is read-only by design (a
-/// signed `.app`, a squashfs AppImage mount) and so [`ensure_user_python`] keeps
+/// signed `.app`, a squashfs AppImage mount) and so [`super::ensure_user_python`]
+/// keeps
 /// a working copy in the app data dir. That copy is exactly what a repair wants:
 /// a known-good tree, already on disk, needing no network.
 ///

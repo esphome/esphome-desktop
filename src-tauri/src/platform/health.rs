@@ -142,7 +142,7 @@ pub fn clear_repair_count(data_dir: &Path) {
 }
 
 /// Whether `python_bin` is a Python tree this app manages, as opposed to the
-/// bare `python3`/`python` [`get_python_path`] falls back to in development
+/// bare `python3`/`python` [`super::get_python_path`] falls back to in development
 /// builds with no bundle.
 ///
 /// The health probe and its repair only make sense for a tree we put there: a

@@ -316,7 +316,8 @@ fn snapshot_preserved_versions(
 /// gutted stdlib still executes it cleanly while every import fails.
 ///
 /// This asks only about the interpreter, which is what makes it the right way to
-/// answer that question. [`esphome_config_probe`] asks a bigger one — "can this
+/// answer that question. [`super::esphome_config_probe`] asks a bigger one —
+/// "can this
 /// tree build?" — and fails for reasons that have nothing to do with the
 /// interpreter (an unwritable temp dir, a full disk). Inferring "the interpreter
 /// is broken" from *that* failing would condemn a healthy tree.
