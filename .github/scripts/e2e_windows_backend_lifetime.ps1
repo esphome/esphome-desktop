@@ -30,8 +30,12 @@ $ErrorActionPreference = 'Stop'
 $conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
 $InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
 $AppDataDir = Join-Path $env:APPDATA $conf.identifier
+# The managed Python tree: on first launch the app copies the bundled tree
+# here and the backend runs from the copy, not the install dir (#335).
+$LocalDataDir = Join-Path $env:LOCALAPPDATA $conf.identifier
 # Trailing separator so `C:\foo` cannot prefix-match `C:\foobar`.
 $Prefix = $InstallDir + '\'
+$TreePrefix = (Join-Path $LocalDataDir 'python') + '\'
 
 # Callers must wrap this in `@(...)`. The `@()` below does not survive the
 # return: PowerShell unwraps a returned array, so no matches comes back as
@@ -42,19 +46,22 @@ function Get-BackendProcesses {
     # Three filters, each load-bearing:
     #
     #   Name     — cheap, pushed into WQL so we don't marshal every process.
-    #   Path     — the runner has its own Pythons; only the bundled one counts.
+    #   Path     — the runner has its own Pythons; only the managed tree's
+    #              copy counts (the app-data tree the app copies the bundle
+    #              to on first launch, and the backend runs from).
     #   argv     — and only the *backend*. `Settings::load` runs the same
-    #              install-dir interpreter as `-m esphome version` synchronously
-    #              in `setup()`, before the daemon spawns and for several seconds
-    #              on a cold runner. Matching any install-dir python.exe grabs
-    #              that detector instead: the script would report "backend up",
-    #              kill the desktop before the backend existed, watch the
-    #              detector exit on its own, and print PASS — with or without the
-    #              job object. The backend is `-m esphome_device_builder ...`
-    #              (daemon::start_inner); the detector is `-m esphome version`.
+    #              managed-tree interpreter as `-m esphome version`
+    #              synchronously in `setup()`, before the daemon spawns and
+    #              for several seconds on a cold runner. Matching any managed
+    #              python.exe grabs that detector instead: the script would
+    #              report "backend up", kill the desktop before the backend
+    #              existed, watch the detector exit on its own, and print PASS
+    #              — with or without the job object. The backend is
+    #              `-m esphome_device_builder ...` (daemon::start_inner); the
+    #              detector is `-m esphome version`.
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
         $_.ExecutablePath -and
-        $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $_.ExecutablePath.StartsWith($TreePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
         $_.CommandLine -and
         $_.CommandLine -match 'esphome_device_builder'
     })
@@ -72,13 +79,20 @@ function Show-Diagnostics {
         Write-Host "--- no dashboard.log at $log ---"
     }
 
-    Write-Host "--- processes under the install dir (CommandLine included: the"
-    Write-Host "    backend is -m esphome_device_builder, the version probe is"
-    Write-Host "    -m esphome version) ---"
-    # Unfiltered on purpose: on failure we want everything still holding the
-    # directory open, not just Python.
+    Write-Host "--- processes under the install dir or the managed tree"
+    Write-Host "    (CommandLine included: the backend is -m esphome_device_builder,"
+    Write-Host "    the version probe is -m esphome version) ---"
+    # Unfiltered on purpose: on failure we want everything still holding
+    # either directory open, not just Python. Both prefixes matter — the
+    # backend runs from the managed tree, the bundled git.exe from the
+    # install dir.
     Get-CimInstance Win32_Process |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) } |
+        Where-Object {
+            $_.ExecutablePath -and (
+                $_.ExecutablePath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $_.ExecutablePath.StartsWith($TreePrefix, [System.StringComparison]::OrdinalIgnoreCase)
+            )
+        } |
         Select-Object ProcessId, ParentProcessId, Name, CommandLine |
         Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 
@@ -86,6 +100,13 @@ function Show-Diagnostics {
     if (Test-Path $InstallDir) {
         Get-ChildItem $InstallDir | Select-Object Mode, Length, Name |
             Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
+    }
+    Write-Host "--- managed tree top level ($LocalDataDir) ---"
+    if (Test-Path $LocalDataDir) {
+        Get-ChildItem $LocalDataDir | Select-Object Mode, Length, Name |
+            Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "--- no managed tree at $LocalDataDir (first-run copy never happened?) ---"
     }
     Write-Host "::endgroup::"
 }
@@ -123,10 +144,13 @@ Write-Host "Launching $($exe.Name)"
 $app = Start-Process -FilePath $exe.FullName -ArgumentList '--no-open-dashboard' -PassThru
 try {
     # The backend is Python importing ESPHome, which is not fast, and this is a
-    # cold first run on a CI runner. Fail with diagnostics rather than hang.
+    # cold first run on a CI runner — which since #335 also copies the whole
+    # bundled tree to app data, tens of thousands of small files each scanned
+    # by Defender, before the backend can spawn. Fail with diagnostics rather
+    # than hang.
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     $backend = @()
-    while ($deadline.Elapsed.TotalSeconds -lt 180) {
+    while ($deadline.Elapsed.TotalSeconds -lt 300) {
         $backend = @(Get-BackendProcesses)
         if ($backend.Count -gt 0) { break }
         if ($app.HasExited) {
@@ -137,7 +161,7 @@ try {
     }
     if ($backend.Count -eq 0) {
         Show-Diagnostics 'the backend never started'
-        throw "no bundled python.exe under $InstallDir after 180s"
+        throw "no managed python.exe under $TreePrefix after 300s"
     }
 
     Write-Host "Backend up after $([int]$deadline.Elapsed.TotalSeconds)s: PID(s) $(@($backend.ProcessId) -join ', ')"
