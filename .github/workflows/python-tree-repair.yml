@@ -11,8 +11,11 @@ name: Python Tree Repair
 # What it proves, in one pass: the first-run copy of a freshly built bundle is
 # self-contained and healthy; an orphaned component directory (exactly what the
 # removed `--ignore-installed` fallback left behind, and what broke every
-# compile on 2026.7) fails the health probe; and the repair re-copy removes it
-# with no network.
+# compile on 2026.7) fails the health probe; the repair re-copy removes it with
+# no network; and a refresh from an older bundle does not silently downgrade a
+# newer esphome the tree already had — the restore reinstalls it through a real
+# `pip install` (#353). That last leg is why the job needs PyPI; the repair
+# itself stays offline.
 #
 # A venv would be cheaper but would not do: on Windows a venv puts python.exe in
 # Scripts\ while the real bundle has it at the tree root, so the layout the copy
