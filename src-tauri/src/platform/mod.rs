@@ -24,7 +24,7 @@ pub use health::{
 pub use process::{assign_to_kill_on_close_job, send_ctrl_break};
 pub use process::{
     configure_daemon_tokio_command, isolate_python_tokio_command, pip_command, pip_output_report,
-    run_python_capture, run_python_capture_stdout,
+    run_pip, run_python_capture, run_python_capture_stdout,
 };
 pub use python_env::{ensure_user_python, interpreter_is_usable, RefreshReason};
 
