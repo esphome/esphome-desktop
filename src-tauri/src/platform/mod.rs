@@ -1040,7 +1040,7 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
     // or mis-generated file, never a real bundle.
     if manifest.sweep.is_empty() || manifest.keep.is_empty() {
         anyhow::bail!(
-            "{BASE_MANIFEST} names {} sweep dir(s) and {} keep entrie(s); refusing to use it",
+            "{BASE_MANIFEST} names {} sweep dirs and {} keep entries; refusing to use it",
             manifest.sweep.len(),
             manifest.keep.len()
         );
@@ -1049,8 +1049,132 @@ fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
     Ok(manifest)
 }
 
+/// Whether this platform can repair the managed tree by re-copying the bundle
+/// it shipped with, rather than reinstalling from PyPI.
+///
+/// True on macOS and Linux, where the resource tree is read-only by design (a
+/// signed `.app`, a squashfs AppImage mount) and so [`ensure_user_python`] keeps
+/// a working copy in the app data dir. That copy is exactly what a repair wants:
+/// a known-good tree, already on disk, needing no network.
+///
+/// False on Windows, which has no second copy — the backend runs straight out of
+/// the install dir and `ensure_user_python` returns early — so there is nothing
+/// to re-copy from and the repair has to come from PyPI.
+pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
+    if cfg!(target_os = "windows") {
+        return false;
+    }
+    get_bundled_resource_dir(app_handle)
+        .map(|dir| dir.join("python").is_dir())
+        .unwrap_or(false)
+}
+
+/// Repair the managed tree by re-copying the pristine bundle over it, now.
+///
+/// [`ensure_user_python`] already does exactly this whenever the version marker
+/// does not match the running app — it is how macOS and Linux quietly heal
+/// themselves at every release, and why #330 was only ever reported on Windows.
+/// A tree broken *between* releases keeps a matching marker, so it is skipped;
+/// dropping the marker is how we say "re-copy now" without teaching that
+/// function a second reason to run.
+///
+/// Deliberately not "invalidate the marker and let the next launch handle it":
+/// we know what to do and nothing is stopping us doing it. The caller runs
+/// before the daemon starts, so nothing holds the tree open, and the user gets a
+/// working install this launch rather than being asked to restart.
+///
+/// The copy also restores any version the user pinned above the bundle's, via
+/// `ensure_user_python`'s existing snapshot/restore. That reinstall is
+/// best-effort, so an offline user lands on the bundled version rather than
+/// nothing — the whole point of preferring this to a PyPI reset.
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
+pub fn refresh_user_python_from_bundle(app_handle: &AppHandle) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    anyhow::bail!(
+        "Windows has no bundled copy to refresh from; the backend runs out of the install dir"
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let marker = get_data_dir(app_handle)?
+            .join("python")
+            .join(PYTHON_VERSION_MARKER);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            // Already absent: `ensure_user_python` will re-copy regardless.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to clear {marker:?}"));
+            }
+        }
+        // `false`: this is a repair, not a migration off the classic backend, so
+        // the user's device-builder version is preserved as usual.
+        ensure_user_python(app_handle, false)
+    }
+}
+
+/// Resolve the interpreter the package reset is allowed to delete from,
+/// refusing any tree we do not own.
+///
+/// [`get_python_path`] answers "what should we run?", and its last two fallbacks
+/// are the shipped resource tree and a bare system `python3`. That is right for
+/// running, and wrong for deleting. `ensure_user_python` is log-and-continue at
+/// startup, so a copy that fails for any transient reason (a full disk) leaves
+/// `get_python_path` pointing inside `ESPHome Device Builder.app/Contents/
+/// Resources/python` on macOS. Wiping *that* succeeds on an admin account,
+/// breaks the bundle's code signature, and turns a transient failure into a
+/// mandatory reinstall of the app.
+///
+/// So the reset resolves its target through here instead: the tree must be one
+/// we own and put there ourselves. On macOS and Linux that is only ever the copy
+/// in the app data dir. On Windows there is no copy — the backend runs straight
+/// out of the install dir, which is an ordinary per-user writable directory we
+/// wrote — so the resource tree is a legitimate target there and only there.
+pub fn python_path_for_reset(app_handle: &AppHandle) -> Result<PathBuf> {
+    let python = get_python_path(app_handle)?;
+    let root = python_tree_root(&python)
+        .with_context(|| format!("Cannot resolve a Python tree root from {python:?}"))?;
+
+    // The tree we copy to and own, on every platform.
+    let user_root = get_data_dir(app_handle)?.join("python");
+    let resource_root = get_bundled_resource_dir(app_handle)?.join("python");
+
+    if is_resettable_tree(root, &user_root, &resource_root) {
+        return Ok(python);
+    }
+
+    anyhow::bail!(
+        "Refusing to reset packages in {root:?}: not a Python tree this app owns. \
+         The managed tree is missing, so the bundled copy is in use; repairing it \
+         would damage the installed app rather than fix anything."
+    )
+}
+
+/// Whether `root` is a Python tree the package reset may delete from.
+///
+/// Split out from [`python_path_for_reset`] so the rule itself is testable
+/// without a live app: it is the guard standing between a recursive delete and
+/// the inside of the installed `.app`.
+fn is_resettable_tree(root: &Path, user_root: &Path, resource_root: &Path) -> bool {
+    // The copy in the app data dir is ours everywhere.
+    if root == user_root {
+        return true;
+    }
+    // On Windows there is no copy: `ensure_user_python` returns early and the
+    // backend runs straight out of the install dir, an ordinary per-user
+    // writable directory the installer wrote. So the resource tree is the live
+    // tree there, and repairing it is the whole point. Everywhere else the
+    // resource tree is read-only-by-design — a signed `.app` bundle, or a
+    // squashfs AppImage mount — and writing to it is damage, not repair.
+    cfg!(target_os = "windows") && root == resource_root
+}
+
 /// Delete every package we installed, sparing everything that ships with the
 /// interpreter. Returns how many entries were removed.
+///
+/// Callers must resolve `python_bin` through [`python_path_for_reset`], never
+/// [`get_python_path`] directly: this deletes recursively, and the latter falls
+/// back to trees we must not touch.
 ///
 /// This is the "wipe" half of the recovery for issue #330. `--ignore-installed`
 /// used to be how a broken tree was worked around, but it skips pip's uninstall
@@ -1130,6 +1254,31 @@ pub fn wipe_installed_packages(python_bin: &Path) -> Result<usize> {
 /// only has to make ESPHome load its component tree.
 const PROBE_CONFIG: &str = "esphome:\n  name: healthprobe\nesp32:\n  board: esp32dev\n";
 
+/// Create a scratch directory for the health probe that we know we created.
+///
+/// `create_dir` fails rather than succeeding when the path already exists, so a
+/// name another user pre-created in the shared, world-writable temp dir — a
+/// directory, or a symlink pointing somewhere of theirs — is stepped over
+/// instead of adopted and written into. The alternative, removing whatever is
+/// already there and recreating it, is what the repo avoids for exactly this
+/// reason when caching downloads (`prepare_bundle.sh`). The pid keeps the names
+/// short for the common case; the counter is what makes it correct.
+fn make_probe_dir() -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    for attempt in 0..100u32 {
+        let dir = base.join(format!(
+            "esphome-desktop-probe-{}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("Failed to create probe dir {dir:?}")),
+        }
+    }
+    anyhow::bail!("Could not create a probe directory under {base:?}")
+}
+
 /// Filename of the counter bounding how many times the health probe may trigger
 /// a package reset. Lives at `<python_root>/.package-reset-count`.
 const PACKAGE_RESET_MARKER: &str = ".package-reset-count";
@@ -1200,9 +1349,7 @@ pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
 
     // `esphome config` writes alongside the config it is given, so hand it a
     // directory of its own rather than anything of the user's.
-    let dir = std::env::temp_dir().join(format!("esphome-desktop-probe-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).with_context(|| format!("Failed to create probe dir {dir:?}"))?;
+    let dir = make_probe_dir()?;
 
     let result = (|| {
         let config = dir.join("probe.yaml");
@@ -3621,6 +3768,38 @@ mod tests {
     }
 
     #[test]
+    fn only_trees_we_own_may_be_reset() {
+        let user_root = Path::new("/data/io.esphome.builder/python");
+        let resource_root = Path::new("/Applications/ESPHome.app/Contents/Resources/python");
+
+        // The copy in the app data dir is ours to repair, everywhere.
+        assert!(is_resettable_tree(user_root, user_root, resource_root));
+
+        // The shipped resource tree is a legitimate target only on Windows,
+        // where it IS the live tree. Everywhere else `get_python_path` only
+        // returns it because `ensure_user_python`'s copy failed (it is
+        // log-and-continue at startup), and deleting inside a signed `.app` or a
+        // read-only AppImage mount turns a transient failure into a reinstall.
+        assert_eq!(
+            is_resettable_tree(resource_root, user_root, resource_root),
+            cfg!(target_os = "windows"),
+            "the bundled resource tree is resettable on Windows and nowhere else"
+        );
+
+        // Anything else — a system Python, a user's own tree — is never ours.
+        assert!(!is_resettable_tree(
+            Path::new("/usr/local/lib/python3.13"),
+            user_root,
+            resource_root
+        ));
+        assert!(!is_resettable_tree(
+            Path::new("/data/io.esphome.builder"),
+            user_root,
+            resource_root
+        ));
+    }
+
+    #[test]
     fn parse_base_manifest_reads_the_generated_format() {
         // Pins the contract with write_base_manifest() in
         // build-scripts/prepare_bundle.sh, which is the only writer.
@@ -3799,6 +3978,29 @@ mod tests {
         assert!(!manifest_path_is_safe(Path::new("/etc")));
         #[cfg(windows)]
         assert!(!manifest_path_is_safe(Path::new(r"C:\Windows")));
+    }
+
+    #[test]
+    fn probe_dir_is_never_a_directory_we_did_not_create() {
+        // The temp dir is shared and world-writable, so a name another user
+        // pre-created (a directory of theirs, or a symlink into one) must be
+        // stepped over rather than adopted and written into.
+        let squatted =
+            std::env::temp_dir().join(format!("esphome-desktop-probe-{}-0", std::process::id()));
+        let _ = std::fs::remove_dir_all(&squatted);
+        std::fs::create_dir_all(&squatted).unwrap();
+        std::fs::write(squatted.join("theirs.txt"), "not ours").unwrap();
+
+        let dir = make_probe_dir().unwrap();
+        assert_ne!(dir, squatted, "must not adopt a pre-existing directory");
+        assert!(dir.is_dir());
+        assert!(
+            squatted.join("theirs.txt").exists(),
+            "must not delete another user's directory to take its name"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&squatted);
     }
 
     #[test]

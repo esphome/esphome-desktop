@@ -19,8 +19,8 @@ BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download
 
 # Manifest of everything that ships with the interpreter itself, written into
 # the tree by write_base_manifest(). The app's package reset deletes whatever it
-# does not name, so this file is the sole definition of "not ours to delete"
-# (see `reset_python_packages` in src-tauri/src/platform/mod.rs).
+# does not name, so this file is the sole definition of "not ours to delete";
+# it is read by `wipe_installed_packages` in src-tauri/src/platform/mod.rs.
 BASE_MANIFEST=".base-packages"
 
 # MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
