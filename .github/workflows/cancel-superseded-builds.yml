@@ -1,0 +1,68 @@
+name: Cancel Superseded Builds
+
+# Frees Build's concurrency group when GitHub's own `cancel-in-progress`
+# misses, which happens: a push while the previous head's Build is running has
+# twice left the new run "pending" at the gate with zero jobs started while
+# the stale run kept its runners, stalling the required `CI Status` check
+# until someone cancelled the old run by hand.
+#
+# This must be its own workflow. The first attempt (#360) was a job inside
+# build.yml, and a run waiting at a workflow-level concurrency gate starts no
+# jobs at all — so that canceller could only execute in the cases where the
+# gate had already cleared and there was nothing left to cancel. This
+# workflow declares NO concurrency group, so it always runs immediately on
+# push and can clear the gate from outside.
+#
+# Fork PRs get a read-only GITHUB_TOKEN, so the cancel calls fail there;
+# that is the pre-existing limitation of the in-run version too, and it is
+# why every step is best-effort. Not a `CI Status` dependency, so a hiccup
+# here can never block a merge.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  cancel:
+    name: Cancel superseded Build runs
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel Build runs for commits this PR has moved past
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          # Separate workflows do not share a run_number sequence, so the
+          # "strictly older" guard the in-run version used cannot work here.
+          # Anchor on content instead: re-read the PR's head at execution
+          # time and cancel active Build runs for any OTHER commit. This is
+          # also what makes a rapid double push safe — a stale instance of
+          # this job sees the newest head and can only cancel runs the newest
+          # push has itself superseded, never the newest run.
+          current=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq .head.sha)
+          export CURRENT="$current"
+          # head_branch alone is not unique across forks (two forks can share
+          # a branch name), so match the head repository too, or we could
+          # cancel a different PR's run. `gh -f` url-encodes the branch
+          # filter for exotic names.
+          gh api -X GET "repos/$REPO/actions/workflows/build.yml/runs" \
+            -f event=pull_request -f branch="$HEAD_REF" -f per_page=100 \
+            --jq '.workflow_runs[]
+                  | select(.head_repository.full_name == env.HEAD_REPO
+                           and .head_branch == env.HEAD_REF
+                           and .status != "completed"
+                           and .head_sha != env.CURRENT)
+                  | .id' \
+          | while read -r id; do
+              echo "Cancelling superseded Build run $id"
+              gh run cancel "$id" --repo "$REPO" || true
+            done
