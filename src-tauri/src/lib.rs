@@ -404,11 +404,15 @@ pub fn run(cli: Cli) {
             // copy. Detect the classic selection from the persisted settings
             // before the bundled-Python refresh so the refresh can skip
             // preserving an old `esphome-device-builder` version.
-            let force_device_builder = settings::persisted_backend_was_classic(app.handle());
+            let refresh_reason = if settings::persisted_backend_was_classic(app.handle()) {
+                platform::RefreshReason::ClassicMigration
+            } else {
+                platform::RefreshReason::Startup
+            };
 
             // Ensure user Python exists (copy from bundled on first run for non-Windows)
             // This must happen before AppState::new() so paths are correct
-            if let Err(e) = platform::ensure_user_python(app.handle(), force_device_builder) {
+            if let Err(e) = platform::ensure_user_python(app.handle(), refresh_reason) {
                 error!("Failed to set up user Python: {}", e);
                 // Continue anyway - might work with bundled Python
             }
@@ -460,7 +464,7 @@ pub fn run(cli: Cli) {
             // If we just migrated a classic-backend user, persist the migrated
             // settings (loaded as the default device builder) so the legacy
             // value is cleared from disk and a later app update won't re-force.
-            if force_device_builder {
+            if refresh_reason == platform::RefreshReason::ClassicMigration {
                 let settings = async_runtime::block_on(state.settings.read());
                 if let Err(e) = settings.save(app.handle()) {
                     warn!("Failed to persist backend migration: {}", e);
@@ -612,6 +616,17 @@ pub fn run(cli: Cli) {
                 let startup_guard =
                     control::ops::UpdateGuard::acquire_wait(daemon_state.update_in_flight.clone())
                         .await;
+
+                // Repair a Python tree that a previous `--ignore-installed`
+                // fallback left with orphaned files, which breaks every compile
+                // (#330). Runs here rather than in `setup()` so it can await the
+                // reinstall without blocking the launch, and inside the guard,
+                // before the daemon exists: nothing is holding the packages open
+                // yet, and a broken tree has nothing worth serving.
+                daemon_state
+                    .update_checker
+                    .repair_python_tree_if_broken(&daemon_app)
+                    .await;
 
                 // If a CLI override switched us into a builder backend, ensure
                 // the package is installed/upgraded before starting the daemon.

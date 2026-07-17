@@ -17,6 +17,12 @@ PYTHON_VERSION="3.13.14"
 PBS_VERSION="20260623"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
+# Manifest of everything that ships with the interpreter itself, written into
+# the tree by write_base_manifest(). The app's package reset deletes whatever it
+# does not name, so this file is the sole definition of "not ours to delete";
+# it is read by `wipe_installed_packages` in src-tauri/src/platform/mod.rs.
+BASE_MANIFEST=".base-packages"
+
 # MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
 # PlatformIO and esphome-device-builder shell out to `git` for external
 # components, github:// packages, voice models, ESP-IDF managed components and
@@ -472,6 +478,57 @@ strip_pycache() {
     echo "Removed $count __pycache__ directories"
 }
 
+# Record everything that ships with the interpreter, before we install anything
+# of our own on top. See build-scripts/write_base_manifest.py for why this
+# exists and why here (issue #330).
+#
+# Must run after the pip upgrade, so the manifest names the pip we actually
+# ship, and before the first esphome install.
+#
+# The generator is a separate file rather than inlined here so it can be tested:
+# it is run by the interpreter it describes, and the format it emits is a
+# contract with `parse_base_manifest` on the Rust side.
+write_base_manifest() {
+    local platform="$1"
+    local python_dir="$2"
+    local python_bin="$3"
+
+    echo ""
+    echo "=== Recording base packages (${platform}) ==="
+
+    local manifest="$python_dir/$BASE_MANIFEST"
+    local partial="${manifest}.partial"
+
+    # Generate to a temp path and promote only once it checks out, so a failed
+    # run cannot leave a half-written manifest in the tree for the reset to read.
+    #
+    # Handle the generator's failure directly rather than with a `trap`: traps are
+    # global in bash, not function-scoped, so setting one here and clearing it
+    # with `trap - EXIT` on the way out would silently drop any EXIT handler the
+    # script gains later. `if !` also disables `set -e` for this one command,
+    # which is exactly what lets us clean up before exiting on the path this
+    # cleanup exists for — the generator's own asserts aborting mid-write.
+    #
+    # `download_verified` above does use a trap, and is fine doing so today only
+    # because it can assume the script sets no others; that assumption is what
+    # this avoids rather than adds a second copy of.
+    if ! "$python_dir/$python_bin" "$SCRIPT_DIR/write_base_manifest.py" "$python_dir" > "$partial"; then
+        rm -f "$partial"
+        echo "ERROR: could not record the base packages" >&2
+        exit 1
+    fi
+
+    # The count we print. `grep -c` exits 1 on zero matches and `set -e` acts on a
+    # bare assignment, so absorb it — but do not gate on it: the generator refuses
+    # to emit a keep-less manifest, and `parse_base_manifest` refuses to read one,
+    # so a third assertion here could only ever be unreachable.
+    local keeps
+    keeps=$(grep -c '^keep ' "$partial") || keeps=0
+
+    mv -f "$partial" "$manifest"
+    echo "Recorded ${keeps} base entries"
+}
+
 # Install ESPHome + ESPHome Device Builder into the standalone Python and
 # post-process the install (rewrite shebangs, strip __pycache__) so the
 # tree is relocatable and bundle-ready.
@@ -487,6 +544,10 @@ install_python_packages() {
     echo ""
     echo "=== Upgrading pip (${platform}) ==="
     "$python_dir/$python_bin" -m pip install --upgrade pip
+
+    # The tree is Python + pip and nothing else at exactly this point, which is
+    # the whole reason the manifest is written here rather than anywhere else.
+    write_base_manifest "$platform" "$python_dir" "$python_bin"
 
     echo ""
     echo "=== Installing ESPHome (${platform}) ==="

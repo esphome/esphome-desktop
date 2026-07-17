@@ -469,6 +469,24 @@ const PYTHON_REFRESH_DEFER_MARKER: &str = ".refresh-defer-count";
 /// many defers we stop deferring and wipe to re-copy a clean bundle.
 const MAX_REFRESH_DEFERS: u32 = 3;
 
+/// Why [`ensure_user_python`] was called. The caller always knows; passing it in
+/// keeps one function the single place that decides whether to refresh the tree,
+/// and lets that decision differ by intent instead of guessing from the marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshReason {
+    /// A normal launch. Copy on first run or when the app version changed, and
+    /// defer if the package versions cannot be read (see [`MAX_REFRESH_DEFERS`]).
+    Startup,
+    /// A user migrating off the removed classic dashboard backend. Never defers:
+    /// the daemon now always launches `esphome_device_builder`, and an old
+    /// classic tree may not have it.
+    ClassicMigration,
+    /// The tree is known broken (#330). Refresh unconditionally: the marker is
+    /// beside the point, and deferring would leave a tree we have already proven
+    /// cannot build.
+    Repair,
+}
+
 /// Ensure the user Python exists by copying from bundled Python if needed.
 ///
 /// A version marker file is written into the user Python directory after the
@@ -476,10 +494,22 @@ const MAX_REFRESH_DEFERS: u32 = 3;
 /// current desktop-app version, the directory is wiped and re-copied so that
 /// updated app releases ship a fresh Python tree (e.g. new ESPHome version,
 /// changed dependencies). Without this, the first-run copy persisted forever.
-pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) -> Result<()> {
+///
+/// [`RefreshReason::Repair`] additionally forces the copy, which is how a broken
+/// tree is fixed on the platforms that keep a pristine bundle.
+pub fn ensure_user_python(app_handle: &AppHandle, reason: RefreshReason) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        let _ = force_device_builder;
+        // Windows keeps no copy: the backend runs straight out of the install
+        // dir. Returning Ok to a caller asking for a repair would report a fix
+        // that never happened, so say so instead. `can_refresh_from_bundle`
+        // steers callers away from here, and this makes the silent no-op
+        // impossible rather than merely unlikely.
+        if reason == RefreshReason::Repair {
+            anyhow::bail!(
+                "Windows has no bundled copy to refresh from; the backend runs out of the install dir"
+            );
+        }
         let resource_dir = get_bundled_resource_dir(app_handle)?;
         let bundled_python = resource_dir.join("python").join("python.exe");
 
@@ -504,7 +534,12 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             .map(|s| s.trim() == current_version)
             .unwrap_or(false);
 
-        let needs_copy = !python_check.exists() || !marker_matches;
+        // A repair refreshes whatever the marker says: it is called because the
+        // tree has already been proven broken, and its marker will match
+        // whenever the breakage arrived without an app update — which is exactly
+        // the #330 case.
+        let needs_copy =
+            reason == RefreshReason::Repair || !python_check.exists() || !marker_matches;
 
         if needs_copy {
             let resource_dir = get_bundled_resource_dir(app_handle)?;
@@ -519,10 +554,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             // Without this, a user who pip-bumped ESPHome past the bundled
             // version would silently get downgraded by every app self-update.
             //
-            // When `force_device_builder` is set (a user migrating off the
-            // removed classic dashboard), `esphome-device-builder` is left out
-            // of the snapshot so the freshly bundled copy always wins and the
-            // user lands on the current device builder.
+            // For `ClassicMigration` (a user migrating off the removed classic
+            // dashboard), `esphome-device-builder` is left out of the snapshot
+            // so the freshly bundled copy always wins and the user lands on the
+            // current device builder.
             //
             // If the probe FAILS (as opposed to the package being absent), we
             // cannot tell whether the user pinned a newer version, so wiping
@@ -530,7 +565,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
             // this snapshot exists to prevent. In that case defer the refresh:
             // keep the working tree, log a warning, and retry next launch.
             let preserved = if python_check.exists() {
-                match snapshot_preserved_versions(&python_check, force_device_builder) {
+                match snapshot_preserved_versions(
+                    &python_check,
+                    reason == RefreshReason::ClassicMigration,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
                         // A probe error means we can't trust a snapshot — but
@@ -550,16 +588,35 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                         // the wipe to re-copy a clean bundle. The counter lives
                         // inside the tree, so it resets the moment we wipe.
                         //
-                        // Never defer while forcing the device builder (classic
-                        // migration): the daemon now always launches
-                        // `esphome_device_builder`, and an old classic tree may
-                        // not have it, so we must refresh to the bundle that
-                        // does rather than keep the old tree another launch.
-                        if !force_device_builder && interpreter_is_usable(&python_check) {
+                        // Only a routine `Startup` may defer, because deferring
+                        // answers a question only `Startup` is asking: "is this
+                        // refresh worth the risk of discarding a pinned
+                        // version?" A `ClassicMigration` must land on the
+                        // bundled device builder, and a `Repair` was called
+                        // because the tree is already proven broken — keeping it
+                        // another launch is the wrong answer to both, and the
+                        // caller has no way to tell that its request was
+                        // silently dropped.
+                        // A check we could not make is not a check that failed.
+                        // Wiping on "we could not tell" would discard the user's
+                        // pinned version on the strength of an unanswered
+                        // question — the very downgrade the snapshot above
+                        // exists to prevent. Assume usable and defer; that is
+                        // bounded, so a persistently unanswerable check still
+                        // self-heals after MAX_REFRESH_DEFERS.
+                        let usable = interpreter_is_usable(&python_check).unwrap_or_else(|probe| {
+                            warn!(
+                                "Could not check whether the interpreter at {python_check:?} is \
+                                 usable ({probe}); assuming it is rather than wiping a tree that \
+                                 may be fine"
+                            );
+                            true
+                        });
+                        if reason == RefreshReason::Startup && usable {
                             let defer_marker = user_python.join(PYTHON_REFRESH_DEFER_MARKER);
-                            let defers = read_refresh_defer_count(&defer_marker);
+                            let defers = read_counter(&defer_marker);
                             if defers < MAX_REFRESH_DEFERS
-                                && bump_refresh_defer_count(&defer_marker, defers + 1)
+                                && bump_counter(&defer_marker, defers + 1)
                             {
                                 warn!(
                                     "Could not read existing Python package versions ({e:#}); \
@@ -581,10 +638,10 @@ pub fn ensure_user_python(app_handle: &AppHandle, force_device_builder: bool) ->
                                  to recover."
                             );
                             PreservedVersions::default()
-                        } else if force_device_builder {
+                        } else if reason != RefreshReason::Startup {
                             warn!(
-                                "Could not read existing Python package versions ({e:#}) while \
-                                 migrating off the classic backend; refreshing to the bundled tree."
+                                "Could not read existing Python package versions ({e:#}) during a \
+                                 {reason:?}; refreshing to the bundled tree anyway."
                             );
                             PreservedVersions::default()
                         } else {
@@ -680,36 +737,56 @@ fn snapshot_preserved_versions(
 /// Used to split a transient probe error (defer) from a genuinely unusable
 /// interpreter (wipe & recover). A bare `-c "pass"` is NOT enough here: a
 /// gutted stdlib still executes it cleanly while every import fails.
-#[cfg(not(target_os = "windows"))]
-fn interpreter_is_usable(python_bin: &Path) -> bool {
-    matches!(
-        run_python_capture(python_bin, ["-c", "import importlib.metadata"]),
-        Ok(o) if o.status.success()
-    )
+///
+/// This asks only about the interpreter, which is what makes it the right way to
+/// answer that question. [`esphome_config_probe`] asks a bigger one — "can this
+/// tree build?" — and fails for reasons that have nothing to do with the
+/// interpreter (an unwritable temp dir, a full disk). Inferring "the interpreter
+/// is broken" from *that* failing would condemn a healthy tree.
+///
+/// Bounded, because both callers are on the launch path: an interpreter wedged
+/// rather than broken would otherwise hang the very startup this is meant to
+/// rescue.
+/// `Err` means the check itself could not be made — the spawn failed for a
+/// reason that says nothing about this interpreter (`EMFILE`, `EPERM`), or it
+/// outran [`PROBE_TIMEOUT`] on a loaded machine. That is not the same as an
+/// interpreter that ran and failed, and callers must not treat it as one:
+/// collapsing the two would wipe a working tree, discarding the user's pinned
+/// versions, on the strength of a question we never got an answer to.
+pub fn interpreter_is_usable(python_bin: &Path) -> std::io::Result<bool> {
+    match run_python_capture_bounded(
+        python_bin,
+        ["-c", "import importlib.metadata"],
+        PROBE_TIMEOUT,
+    ) {
+        Ok(o) => Ok(o.status.success()),
+        // An interpreter that is not there is an answer, not a failure to get
+        // one: nothing about it will run, now or later.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
-/// Read the consecutive-defer counter, returning 0 when the marker is missing
-/// or unparseable (treat a damaged counter as a fresh start rather than
-/// blocking the self-heal wipe).
-#[cfg(not(target_os = "windows"))]
-fn read_refresh_defer_count(marker_path: &Path) -> u32 {
+/// Read a persisted attempt counter, returning 0 when the marker is missing or
+/// unparseable (treat a damaged counter as a fresh start rather than blocking
+/// the self-heal it bounds).
+fn read_counter(marker_path: &Path) -> u32 {
     std::fs::read_to_string(marker_path)
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
 }
 
-/// Persist the consecutive-defer counter. Returns `true` if the new count was
-/// durably written. A `false` (write failed) means the counter can't advance,
-/// so the caller must NOT defer again — otherwise a persistently unwritable
-/// marker would re-introduce the defer-forever shape this counter exists to
-/// bound, just triggered by a failed write instead of a failed read.
-#[cfg(not(target_os = "windows"))]
-fn bump_refresh_defer_count(marker_path: &Path, count: u32) -> bool {
+/// Persist an attempt counter. Returns `true` if the new count was durably
+/// written. A `false` (write failed) means the counter can't advance, so the
+/// caller must NOT take the bounded action again — otherwise a persistently
+/// unwritable marker would re-introduce the very unbounded loop the counter
+/// exists to stop, just triggered by a failed write instead of a failed read.
+fn bump_counter(marker_path: &Path, count: u32) -> bool {
     match crate::util::atomic_write(marker_path, count.to_string()) {
         Ok(()) => true,
         Err(e) => {
-            tracing::warn!("Could not persist refresh-defer counter to {marker_path:?}: {e:#}");
+            tracing::warn!("Could not persist counter to {marker_path:?}: {e:#}");
             false
         }
     }
@@ -825,9 +902,9 @@ fn parse_probe_output(
 }
 
 /// Hard upper bound on a single `pip install` invocation during the
-/// version-restore path. Five minutes is well over the time needed to
-/// upgrade `esphome` on a working connection; bounding it prevents a
-/// stalled network from hanging app startup indefinitely.
+/// version-restore path. Five minutes is well over the time needed to upgrade
+/// `esphome` on a working connection; bounding it prevents a stalled network
+/// from hanging app startup indefinitely.
 #[cfg(not(target_os = "windows"))]
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -835,13 +912,11 @@ const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// resolver and progress output can run to many kilobytes; the actionable
 /// failure reason is almost always at the tail, so we truncate to the last
 /// N bytes to keep log lines (and downstream UI surfaces) bounded.
-#[cfg(not(target_os = "windows"))]
 const PIP_STDERR_TAIL_BYTES: usize = 4096;
 
 /// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
 /// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
 /// char boundary so the result is always valid `str`.
-#[cfg(not(target_os = "windows"))]
 fn tail_for_log(s: &str) -> String {
     let trimmed = s.trim();
     if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
@@ -858,6 +933,161 @@ fn tail_for_log(s: &str) -> String {
     )
 }
 
+/// How often [`run_bounded`] checks whether the child has exited. Small enough
+/// that a deadline fires promptly, large enough that polling costs nothing: even
+/// the five-minute pip bound is only a few thousand `try_wait` calls.
+const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long [`run_bounded`] waits for a reader thread to drain a pipe after the
+/// child is done with it.
+///
+/// Normally instant: the child closed its end, so the reader sees EOF and
+/// returns. This bounds the case where it does not — a grandchild that inherited
+/// the pipe and outlived the kill — where waiting would mean the deadline never
+/// fires at all. Generous enough that a merely slow reader is never cut short.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How a child bounded by [`run_bounded`] finished.
+enum BoundedRun {
+    /// It exited on its own, within the deadline.
+    Exited(std::process::Output),
+    /// It outlived the deadline and was killed. Its stderr survives the kill —
+    /// for a hung install that partial output is the only diagnostic there is.
+    /// stdout is drained too, since that is what keeps the child off a full pipe,
+    /// but not kept: no caller has wanted a killed child's stdout.
+    TimedOut { stderr: Vec<u8> },
+}
+
+/// Run an already-configured `cmd` to completion, killing it if it outlives
+/// `timeout`.
+///
+/// The caller owns the policy — which interpreter, which isolation, which pipes,
+/// and what any of the outcomes mean. This owns the part that is easy to get
+/// subtly wrong and expensive to get wrong twice: a child whose output fills a
+/// pipe buffer (~64 KiB) blocks on `write` until someone reads the other end, so
+/// the pipes must be drained on their own threads or the child outlives the very
+/// deadline meant to bound it.
+///
+/// Waiting on those readers is itself bounded, which is less obvious and just as
+/// load-bearing. A pipe reaches EOF only when *every* writer closes it, and
+/// killing a child does not kill grandchildren that inherited its fds — pip
+/// routinely spawns build backends. So a reader can still be blocked long after
+/// its child is dead, and joining it unconditionally would let a surviving
+/// grandchild hold this call open past the deadline it exists to enforce. The
+/// bytes are accumulated where this function can reach them without the reader's
+/// cooperation, so giving up on a stuck reader costs the tail of the output
+/// rather than the guarantee.
+fn run_bounded(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<BoundedRun> {
+    use std::io::Read;
+    use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    /// A reader thread, and the bytes it has accumulated so far.
+    struct Drain {
+        /// Shared rather than returned from the thread, so a reader still stuck
+        /// on a pipe someone else holds open cannot keep its bytes hostage.
+        buf: Arc<Mutex<Vec<u8>>>,
+        done: Receiver<()>,
+    }
+
+    fn drain<R: Read + Send + 'static>(what: &'static str, handle: Option<R>) -> Option<Drain> {
+        handle.map(|mut h| {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let thread_buf = Arc::clone(&buf);
+            let (tx, done) = channel();
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match h.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => thread_buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                        // Keep whatever arrived before the failure, and say the
+                        // read broke. Silently returning a short buffer would
+                        // surface as "pip install failed: " with nothing after
+                        // it, which reads as a child that printed nothing rather
+                        // than output we lost.
+                        Err(e) => {
+                            tracing::warn!("Lost part of a child's {what}: {e}");
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(());
+            });
+            Drain { buf, done }
+        })
+    }
+
+    fn collect(what: &str, drain: Option<Drain>) -> Vec<u8> {
+        let Some(drain) = drain else {
+            return Vec::new();
+        };
+        match drain.done.recv_timeout(DRAIN_GRACE) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout) => tracing::warn!(
+                "A child's {what} reader did not finish within {DRAIN_GRACE:?}; something that \
+                 inherited the pipe is still holding it open. Returning what arrived."
+            ),
+            // The sender is dropped without sending only if the thread unwound.
+            Err(RecvTimeoutError::Disconnected) => {
+                tracing::warn!("The reader for a child's {what} panicked; returning what arrived.")
+            }
+        }
+        // Recover a poisoned lock rather than unwrapping it. A reader that
+        // panics does so inside `extend_from_slice`, i.e. holding this guard, so
+        // the `Disconnected` arm above and an `unwrap()` here would contradict
+        // each other: the arm promises to return what arrived, and the unwrap
+        // would panic out of `run_bounded` before it could. The bytes are a
+        // `Vec<u8>` with no invariant to break, so there is nothing for the
+        // poison to protect.
+        let mut buf = drain.buf.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut *buf)
+    }
+
+    let mut child = cmd.spawn()?;
+    let stdout_reader = drain("stdout", child.stdout.take());
+    let stderr_reader = drain("stderr", child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Any early exit from here must still reap the child: a `?` that left it
+        // running would leak the very process this function exists to bound.
+        let polled = child.try_wait();
+        match polled {
+            Ok(Some(status)) => {
+                return Ok(BoundedRun::Exited(std::process::Output {
+                    status,
+                    stdout: collect("stdout", stdout_reader),
+                    stderr: collect("stderr", stderr_reader),
+                }))
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = collect("stdout", stdout_reader);
+                let _ = collect("stderr", stderr_reader);
+                return Err(e);
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Join the stdout reader before returning so the thread cannot
+            // outlive the call, even though its bytes go nowhere.
+            let _ = collect("stdout", stdout_reader);
+            return Ok(BoundedRun::TimedOut {
+                stderr: collect("stderr", stderr_reader),
+            });
+        }
+        std::thread::sleep(CHILD_POLL_INTERVAL);
+    }
+}
+
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
 /// needing `--pre`. On timeout the child is killed and an error is returned;
@@ -865,63 +1095,563 @@ fn tail_for_log(s: &str) -> String {
 /// stalled pip can't block app launch.
 #[cfg(not(target_os = "windows"))]
 fn pip_install_blocking(python_bin: &Path, package: &str, version: &str) -> Result<()> {
-    use std::io::Read;
-    use std::time::{Duration, Instant};
-
     let spec = format!("{}=={}", package, version);
-    let mut cmd = std::process::Command::new(python_bin);
-    cmd.args(["-m", "pip", "install", &spec]);
-    cmd.stderr(std::process::Stdio::piped());
+    let mut cmd = python_command(python_bin, ["-m", "pip", "install", &spec]);
+    // The builder isolates the interpreter; pip needs its own env off too, and
+    // every edit is an idempotent `env`/`env_remove`, so layering is a no-op.
     isolate_pip_command(&mut cmd);
-    configure_no_window_command(&mut cmd);
+    // stderr only: pip's diagnostics go there, and nothing reads its stdout —
+    // which also keeps its resolver output out of the capture buffer entirely.
+    cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().context("Failed to spawn pip install")?;
-    let deadline = Instant::now() + PIP_INSTALL_TIMEOUT;
+    let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
+    match run_bounded(cmd, PIP_INSTALL_TIMEOUT).context("Failed to run pip install")? {
+        BoundedRun::Exited(output) if output.status.success() => Ok(()),
+        BoundedRun::Exited(output) => {
+            anyhow::bail!(
+                "pip install {} failed: {}",
+                spec,
+                stderr_tail(&output.stderr)
+            )
+        }
+        BoundedRun::TimedOut { stderr } => anyhow::bail!(
+            "pip install {} timed out after {:?}; partial stderr: {}",
+            spec,
+            PIP_INSTALL_TIMEOUT,
+            stderr_tail(&stderr)
+        ),
+    }
+}
 
-    // Drain stderr in a background thread. pip's progress bars and resolver
-    // diagnostics can easily exceed the OS pipe buffer (~64 KiB on Linux);
-    // if nothing reads the parent's end, pip blocks on `write()` mid-install,
-    // which would defeat the deadline and hang startup. The reader exits
-    // naturally once the child closes its stderr fd (normal exit or kill).
-    let mut stderr_thread = child.stderr.take().map(|mut handle| {
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = handle.read_to_string(&mut buf);
-            buf
-        })
-    });
+/// Filename of the manifest listing everything that ships with the interpreter
+/// itself. Written into the tree at build time by
+/// `build-scripts/prepare_bundle.sh`; read by [`wipe_installed_packages`].
+const BASE_MANIFEST: &str = ".base-packages";
 
-    loop {
-        match child.try_wait().context("Failed to poll pip install")? {
-            Some(status) => {
-                let stderr = stderr_thread
-                    .take()
-                    .and_then(|t| t.join().ok())
-                    .unwrap_or_default();
-                if status.success() {
-                    return Ok(());
-                }
-                anyhow::bail!("pip install {} failed: {}", spec, tail_for_log(&stderr));
+/// The parsed [`BASE_MANIFEST`]: which directories the reset cleans out, and
+/// which entries inside them belong to Python rather than to us.
+#[derive(Debug, Default)]
+struct BaseManifest {
+    /// Directories to clean, relative to the tree root.
+    sweep: Vec<PathBuf>,
+    /// Entries to spare, relative to the tree root.
+    keep: std::collections::HashSet<PathBuf>,
+}
+
+/// Resolve the root of a managed Python tree from its interpreter path.
+///
+/// `<root>/python.exe` on Windows, `<root>/bin/python3` elsewhere. Deriving the
+/// root from the interpreter rather than rebuilding it from the data dir keeps
+/// this correct for whichever tree [`get_python_path`] actually selected, which
+/// is not the same directory on every platform (on Windows it is the install
+/// dir, not app data).
+fn python_tree_root(python_bin: &Path) -> Option<&Path> {
+    let bin_dir = python_bin.parent()?;
+    let root = if cfg!(target_os = "windows") {
+        bin_dir
+    } else {
+        bin_dir.parent()?
+    };
+    // `get_python_path` falls back to a bare `python3`/`python` for development
+    // builds with no bundle. That resolves to an empty root, i.e. the current
+    // directory, which is not a managed tree and must not be swept or marked.
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(root)
+}
+
+/// Reject a manifest path that is absolute or climbs out of the tree.
+///
+/// The manifest drives recursive deletion, so a corrupt or hand-edited line
+/// (`sweep ../../..`) would otherwise aim `remove_dir_all` at the user's home
+/// directory. Paths are relative to the tree root by construction, so anything
+/// else is a bug and must fail loudly rather than resolve to somewhere real.
+fn manifest_path_is_safe(rel: &Path) -> bool {
+    use std::path::Component;
+    rel.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+        && rel.components().any(|c| matches!(c, Component::Normal(_)))
+}
+
+/// Match key for a `site-packages` entry: the distribution name for a
+/// `<name>-<version>.dist-info` directory, the entry name unchanged otherwise.
+///
+/// Comparing versioned metadata dirs by name alone would make the manifest go
+/// stale the moment any base package's version moves — most obviously pip's own,
+/// since `pip install esphome` runs after the manifest is captured and could
+/// bump it. The reset would then not recognise `pip-27.0.dist-info` as pip's,
+/// delete it, and leave pip importable but with no `RECORD` — which is exactly
+/// the state that makes pip abort with `uninstall-no-record-file`. That is the
+/// bug this whole change exists to remove, so the reset must not be able to
+/// manufacture it. Match on identity, not version.
+fn keep_key(name: &str) -> &str {
+    match name.strip_suffix(".dist-info") {
+        Some(stem) => stem.split_once('-').map_or(stem, |(dist, _version)| dist),
+        None => name,
+    }
+}
+
+/// Rewrite a relative path's final component to its [`keep_key`].
+fn keep_path(rel: &Path) -> PathBuf {
+    match rel.file_name().and_then(|n| n.to_str()) {
+        Some(name) => rel.with_file_name(keep_key(name)),
+        // A non-UTF-8 entry name has no version to normalise away; match it
+        // verbatim rather than dropping it from the keep set.
+        None => rel.to_path_buf(),
+    }
+}
+
+/// Parse [`BASE_MANIFEST`] text: `sweep <relpath>` / `keep <relpath>` lines,
+/// `#` comments and blank lines ignored.
+///
+/// Paths use POSIX separators on every platform. `Path` compares and hashes
+/// component-wise and treats `/` as a separator on Windows too, so the entries
+/// match natively-separated paths without rewriting.
+///
+/// `keep` paths are stored under their [`keep_key`], so the file stays readable
+/// (it names the exact versions that shipped) while matching stays
+/// version-independent.
+fn parse_base_manifest(text: &str) -> Result<BaseManifest> {
+    let mut manifest = BaseManifest::default();
+
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (verb, rest) = line
+            .split_once(char::is_whitespace)
+            .with_context(|| format!("{BASE_MANIFEST} line {}: expected '<verb> <path>'", i + 1))?;
+        let rel = PathBuf::from(rest.trim());
+        if !manifest_path_is_safe(&rel) {
+            anyhow::bail!(
+                "{BASE_MANIFEST} line {}: unsafe path {:?}",
+                i + 1,
+                rel.display()
+            );
+        }
+        match verb {
+            "sweep" => manifest.sweep.push(rel),
+            "keep" => {
+                manifest.keep.insert(keep_path(&rel));
             }
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let stderr = stderr_thread
-                        .take()
-                        .and_then(|t| t.join().ok())
-                        .unwrap_or_default();
-                    anyhow::bail!(
-                        "pip install {} timed out after {:?}; partial stderr: {}",
-                        spec,
-                        PIP_INSTALL_TIMEOUT,
-                        tail_for_log(&stderr)
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
+            other => anyhow::bail!("{BASE_MANIFEST} line {}: unknown verb {other:?}", i + 1),
         }
     }
+
+    if manifest.sweep.is_empty() {
+        anyhow::bail!("{BASE_MANIFEST} names no directories to sweep; refusing to use it");
+    }
+
+    // pip must be spared, or the reset deletes the one thing it reinstalls with
+    // and the tree can never be repaired again. The generator asserts this too,
+    // but that runs on a build machine; this runs against a file that has since
+    // been copied, shipped, and sat on a user's disk for months, and is the last
+    // check standing between a bad manifest and `remove_dir_all`. `keep_key` has
+    // already folded `pip-X.Y.dist-info` down to `pip`, so this sees either.
+    if !manifest
+        .keep
+        .iter()
+        .any(|keep| keep.file_name() == Some(OsStr::new("pip")))
+    {
+        anyhow::bail!("{BASE_MANIFEST} does not name pip; refusing to use it");
+    }
+
+    // Every swept directory must spare something. Checking the keep set only
+    // globally would accept a manifest that sweeps one directory clean because
+    // some *other* directory happened to name entries — and sweeping
+    // site-packages clean takes the interpreter's own pip with it, which is the
+    // one outcome nothing can come back from. A truncated file fails here too.
+    for sweep_rel in &manifest.sweep {
+        if !manifest
+            .keep
+            .iter()
+            .any(|keep| keep.parent() == Some(sweep_rel.as_path()))
+        {
+            anyhow::bail!(
+                "{BASE_MANIFEST} sweeps {} but names nothing to keep in it; refusing to use it",
+                sweep_rel.display()
+            );
+        }
+    }
+
+    Ok(manifest)
+}
+
+/// Whether this platform can repair the managed tree by re-copying the bundle
+/// it shipped with, rather than reinstalling from PyPI.
+///
+/// True on macOS and Linux, where the resource tree is read-only by design (a
+/// signed `.app`, a squashfs AppImage mount) and so [`ensure_user_python`] keeps
+/// a working copy in the app data dir. That copy is exactly what a repair wants:
+/// a known-good tree, already on disk, needing no network.
+///
+/// False on Windows, which has no second copy — the backend runs straight out of
+/// the install dir and `ensure_user_python` returns early — so there is nothing
+/// to re-copy from and the repair has to come from PyPI.
+///
+/// That Windows gap is the only reason the manifest and [`wipe_installed_packages`]
+/// exist. Close it (#335 — give Windows the app-data copy) and this function,
+/// the whole manifest subsystem, and the PyPI reset all go, leaving
+/// `ensure_user_python(.., RefreshReason::Repair)` as the one repair everywhere.
+pub fn can_refresh_from_bundle(app_handle: &AppHandle) -> bool {
+    if cfg!(target_os = "windows") {
+        return false;
+    }
+    match get_bundled_resource_dir(app_handle) {
+        Ok(dir) => dir.join("python").is_dir(),
+        Err(e) => {
+            // Say why. Otherwise this is indistinguishable from "this platform
+            // ships no bundle", and the repair quietly downgrades from a free
+            // local copy to a network-dependent PyPI rebuild with nothing in the
+            // log to explain the difference.
+            tracing::warn!(
+                "Cannot locate the bundled Python to repair from ({e:#}); falling back to a reinstall"
+            );
+            false
+        }
+    }
+}
+
+/// Resolve the interpreter the package reset is allowed to delete from,
+/// refusing any tree we do not own.
+///
+/// [`get_python_path`] answers "what should we run?", and its last two fallbacks
+/// are the shipped resource tree and a bare system `python3`. That is right for
+/// running, and wrong for deleting. `ensure_user_python` is log-and-continue at
+/// startup, so a copy that fails for any transient reason (a full disk) leaves
+/// `get_python_path` pointing inside `ESPHome Device Builder.app/Contents/
+/// Resources/python` on macOS. Wiping *that* succeeds on an admin account,
+/// breaks the bundle's code signature, and turns a transient failure into a
+/// mandatory reinstall of the app.
+///
+/// So the reset resolves its target through here instead: the tree must be one
+/// we own and put there ourselves. On macOS and Linux that is only ever the copy
+/// in the app data dir. On Windows there is no copy — the backend runs straight
+/// out of the install dir, which is an ordinary per-user writable directory we
+/// wrote — so the resource tree is a legitimate target there and only there.
+pub fn python_path_for_reset(app_handle: &AppHandle) -> Result<PathBuf> {
+    let python = get_python_path(app_handle)?;
+    let root = python_tree_root(&python)
+        .with_context(|| format!("Cannot resolve a Python tree root from {python:?}"))?;
+
+    // The tree we copy to and own, on every platform.
+    let user_root = get_data_dir(app_handle)?.join("python");
+
+    if is_resettable_tree(root, &user_root, || {
+        Ok(get_bundled_resource_dir(app_handle)?.join("python"))
+    })? {
+        return Ok(python);
+    }
+
+    anyhow::bail!(
+        "Refusing to reset packages in {root:?}: not a Python tree this app owns. \
+         The managed tree is missing, so the bundled copy is in use; repairing it \
+         would damage the installed app rather than fix anything."
+    )
+}
+
+/// Whether `root` is a Python tree the package reset may delete from.
+///
+/// Split out from [`python_path_for_reset`] so the rule itself is testable
+/// without a live app: it is the guard standing between a recursive delete and
+/// the inside of the installed `.app`.
+///
+/// `resource_root` is resolved lazily because most answers do not need it, and
+/// resolving it can fail — a dev build with no bundled resources, say. Asking
+/// eagerly would let that failure refuse a reset of the copy we own, on the
+/// strength of a directory the decision never depended on.
+fn is_resettable_tree(
+    root: &Path,
+    user_root: &Path,
+    resource_root: impl FnOnce() -> Result<PathBuf>,
+) -> Result<bool> {
+    // The copy in the app data dir is ours everywhere.
+    if root == user_root {
+        return Ok(true);
+    }
+    // Everywhere else the resource tree is read-only by design — a signed `.app`
+    // bundle, or a squashfs AppImage mount — so writing to it is damage, not
+    // repair, and there is no need to find out where it is.
+    if !cfg!(target_os = "windows") {
+        return Ok(false);
+    }
+    // On Windows there is no copy: `ensure_user_python` returns early and the
+    // backend runs straight out of the install dir, an ordinary per-user
+    // writable directory the installer wrote. So the resource tree is the live
+    // tree there, and repairing it is the whole point.
+    Ok(root == resource_root()?)
+}
+
+/// Delete every package we installed, sparing everything that ships with the
+/// interpreter. Returns how many entries were removed.
+///
+/// Callers must resolve `python_bin` through [`python_path_for_reset`], never
+/// [`get_python_path`] directly: this deletes recursively, and the latter falls
+/// back to trees we must not touch.
+///
+/// This is the "wipe" half of the recovery for issue #330. `--ignore-installed`
+/// used to be how a broken tree was worked around, but it skips pip's uninstall
+/// and so orphans the previous version's files: an `esphome/components/rp2040/`
+/// left behind by a 2026.6 -> 2026.7 upgrade is what made every compile fail,
+/// and orphaned `.dist-info` dirs did the same to version detection (#190).
+/// Deleting our packages outright and reinstalling them leaves nothing behind
+/// to orphan.
+///
+/// Scoped by [`BASE_MANIFEST`] rather than by pip's metadata on purpose: the
+/// trees that need repairing are exactly the ones whose metadata is unreliable
+/// (a missing `RECORD` is what starts this whole failure mode), and an orphaned
+/// directory has no metadata at all to consult. The manifest is captured at
+/// build time, when the answer is knowable for certain.
+///
+/// Only ever touches `site-packages` and the scripts dir, never the interpreter
+/// or its DLLs, so it cannot hit the locked-`python.exe` problem that a manual
+/// Windows reinstall does. Requires the daemon to be stopped: a running backend
+/// holds its own imports open.
+pub fn wipe_installed_packages(python_bin: &Path) -> Result<usize> {
+    use std::fs;
+
+    let root = python_tree_root(python_bin)
+        .with_context(|| format!("Cannot resolve Python tree root from {python_bin:?}"))?;
+    let manifest_path = root.join(BASE_MANIFEST);
+
+    // Bail rather than fall back to a guessed keep-list. Deleting on an inferred
+    // idea of what belongs to Python risks taking pip with it, and the only
+    // trees without a manifest are ones built before it existed.
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {manifest_path:?}"))?;
+    let manifest = parse_base_manifest(&text)?;
+
+    let mut removed = 0;
+    for sweep_rel in &manifest.sweep {
+        let sweep_dir = root.join(sweep_rel);
+        let entries = match fs::read_dir(&sweep_dir) {
+            Ok(entries) => entries,
+            // A sweep dir that isn't there yet is not an error: nothing of ours
+            // can be in it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("Failed to read {sweep_dir:?}")),
+        };
+
+        for entry in entries {
+            let entry = entry.with_context(|| format!("Failed to read entry in {sweep_dir:?}"))?;
+            // Normalise both sides the same way, so a base package whose version
+            // moved since the manifest was captured is still recognised as the
+            // interpreter's. See `keep_key`.
+            if manifest
+                .keep
+                .contains(&keep_path(&sweep_rel.join(entry.file_name())))
+            {
+                continue;
+            }
+            let path = entry.path();
+            // `file_type` does not follow symlinks, so a link is unlinked rather
+            // than having its target recursively deleted.
+            let is_dir = entry
+                .file_type()
+                .with_context(|| format!("Failed to stat {path:?}"))?
+                .is_dir();
+            let result = if is_dir {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            result.with_context(|| format!("Failed to remove {path:?}"))?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Hard upper bound on the health probe. Measured at ~0.2s against a real
+/// bundled tree, so this is not a budget — it is the line between "slow" and
+/// "never", on a path the user is waiting behind. Without it a wedged
+/// interpreter means the backend never starts and nothing says why.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The config the health probe validates. Any valid config does the job; it
+/// only has to make ESPHome load its component tree.
+const PROBE_CONFIG: &str = "esphome:\n  name: healthprobe\nesp32:\n  board: esp32dev\n";
+
+/// Create a scratch directory for the health probe that we know we created.
+///
+/// `create_dir` fails rather than succeeding when the path already exists, so a
+/// name another user pre-created in the shared, world-writable temp dir — a
+/// directory, or a symlink pointing somewhere of theirs — is stepped over
+/// instead of adopted and written into. The alternative, removing whatever is
+/// already there and recreating it, is what the repo avoids for exactly this
+/// reason when caching downloads (`prepare_bundle.sh`). The pid keeps the names
+/// short for the common case; the counter is what makes it correct.
+fn make_probe_dir() -> Result<PathBuf> {
+    let base = std::env::temp_dir();
+    for attempt in 0..100u32 {
+        let dir = base.join(format!(
+            "esphome-desktop-probe-{}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("Failed to create probe dir {dir:?}")),
+        }
+    }
+    anyhow::bail!("Could not create a probe directory under {base:?}")
+}
+
+/// Filename of the counter bounding how many times the health probe may trigger
+/// a repair. Lives at `<data_dir>/.repair-count`.
+///
+/// Beside the Python tree, never inside it. On macOS and Linux the repair *is*
+/// `remove_dir_all` of the whole tree, so a counter kept within it would be
+/// destroyed by the very repair it exists to bound: every launch would read
+/// zero, wipe, re-copy, and do it again forever — exactly the loop
+/// [`MAX_REPAIRS`] is here to stop.
+const REPAIR_COUNT_MARKER: &str = ".repair-count";
+
+/// Maximum repairs triggered by a failing health probe before giving up.
+///
+/// The probe reports "something makes a real ESPHome command fail", which is
+/// deliberately broader than "a repair will fix it" — ESPHome tightening
+/// validation on [`PROBE_CONFIG`], or a full disk, would fail it just as well.
+/// Unbounded, that would wipe and rebuild the tree on every single launch. Two
+/// covers the real case (one repair fixes it, the next launch probes clean)
+/// while turning an unfixable failure into a bounded cost and a loud log.
+const MAX_REPAIRS: u32 = 2;
+
+/// Whether a failing health probe is allowed to trigger another repair,
+/// recording the attempt if so.
+///
+/// Takes the data dir rather than the tree so the count survives a repair that
+/// replaces the tree wholesale; see [`REPAIR_COUNT_MARKER`]. Nothing resets the
+/// budget implicitly — [`clear_repair_count`] does it, once a probe
+/// actually passes.
+pub fn may_repair_tree(data_dir: &Path) -> bool {
+    let marker = data_dir.join(REPAIR_COUNT_MARKER);
+    let attempts = read_counter(&marker);
+    if attempts >= MAX_REPAIRS {
+        return false;
+    }
+    // Record before acting, not after: a repair that dies partway through must
+    // still count, or a crashing repair would retry forever. An unwritable
+    // counter can never advance, so treat it as exhausted for the same reason.
+    bump_counter(&marker, attempts + 1)
+}
+
+/// Whether a *future* launch would still be allowed a repair, without spending
+/// anything. [`may_repair_tree`] answers the same question by consuming an
+/// attempt, which is the wrong tool for deciding what to tell the user.
+///
+/// This is what makes "reopening will try again" a claim we can check rather
+/// than assume: once the budget is spent, nothing retries until a probe passes.
+pub fn repair_budget_left(data_dir: &Path) -> bool {
+    read_counter(&data_dir.join(REPAIR_COUNT_MARKER)) < MAX_REPAIRS
+}
+
+/// Forget any recorded repair attempts, once the tree is proven healthy.
+///
+/// A missing marker is the normal case and says nothing. Any other failure does:
+/// it pins the counter at [`MAX_REPAIRS`] forever, so a later and
+/// perfectly fixable breakage is never repaired and the log only ever claims the
+/// budget is spent. That is worth a line, for the same reason [`bump_counter`]
+/// reports its own write failures rather than swallowing them.
+pub fn clear_repair_count(data_dir: &Path) {
+    let marker = data_dir.join(REPAIR_COUNT_MARKER);
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            "Could not clear the repair counter at {marker:?} ({e}); a future repair may be \
+             refused as budget-spent"
+        ),
+    }
+}
+
+/// Whether `python_bin` is a Python tree this app manages, as opposed to the
+/// bare `python3`/`python` [`get_python_path`] falls back to in development
+/// builds with no bundle.
+///
+/// The health probe and its repair only make sense for a tree we put there: a
+/// system Python failing `esphome config` (because ESPHome simply is not
+/// installed in it) is not damage, and no repair of ours would touch it.
+pub fn is_managed_python_tree(python_bin: &Path) -> bool {
+    python_tree_root(python_bin).is_some()
+}
+
+/// Check the ESPHome install by running a real `esphome config` validation.
+///
+/// `Ok(None)` means healthy, `Ok(Some(output))` means broken in a way that
+/// breaks real use, `Err` means the probe could not be run at all (which a
+/// package reset cannot fix, since the reset needs this same interpreter).
+///
+/// Runs the actual CLI rather than inspecting package metadata, because the
+/// damage is invisible to metadata. The orphaned `components/rp2040/` directory
+/// behind #330 is named by no `RECORD`, carries no `.dist-info`, and leaves
+/// `importlib.metadata` reporting a perfectly healthy `esphome 2026.7.0` — while
+/// every single compile fails. ESPHome builds its component alias map by
+/// AST-scanning the components *directory*, so only code that reads that
+/// directory can see the conflict.
+///
+/// `config` is the cheapest command that gets there: the alias map is built at
+/// the top of config validation, and a trivial config validates in ~0.2s.
+/// `esphome version` never loads the component tree and reports a broken install
+/// as fine.
+pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
+    use std::fs;
+
+    // `esphome config` writes alongside the config it is given, so hand it a
+    // directory of its own rather than anything of the user's.
+    let dir = make_probe_dir()?;
+
+    let result = (|| {
+        let config = dir.join("probe.yaml");
+        fs::write(&config, PROBE_CONFIG)
+            .with_context(|| format!("Failed to write probe config {config:?}"))?;
+
+        // `-I` matches the other maintenance probes: it keeps user site-packages
+        // and PYTHONPATH off sys.path, so the probe can only ever report on the
+        // managed tree.
+        let output = run_python_capture_bounded(
+            python_bin,
+            [
+                OsStr::new("-I"),
+                OsStr::new("-m"),
+                OsStr::new("esphome"),
+                OsStr::new("config"),
+                config.as_os_str(),
+            ],
+            PROBE_TIMEOUT,
+        )
+        .context("Failed to run esphome config probe")?;
+
+        if output.status.success() {
+            return Ok(None);
+        }
+
+        // ESPHome reports validation failures on stdout and stderr depending on
+        // the stage, so keep both; the reason is what tells a maintainer why a
+        // reset happened.
+        let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+        if !stdout.is_empty() {
+            if !detail.is_empty() {
+                detail.push('\n');
+            }
+            detail.push_str(stdout);
+        }
+        Ok(Some(tail_for_log(&detail)))
+    })();
+
+    // A leaked probe dir is not harmless: `make_probe_dir` steps over names it
+    // did not create, and it only tries 100 of them. Enough of these and the
+    // probe stops running with "Could not create a probe directory" and nothing
+    // in the log tying it back to the cleanup that quietly never happened.
+    if let Err(e) = fs::remove_dir_all(&dir) {
+        tracing::warn!("Could not remove the probe dir {dir:?}: {e}");
+    }
+    result
 }
 
 /// Recursively copy a directory, preserving symlinks.
@@ -1019,21 +1749,70 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Spawn the given Python interpreter with `args` and capture its output,
+/// killing it if it outlives `timeout`.
+///
+/// The unbounded [`run_python_capture`] is right for callers who are already
+/// waiting on something else. It is wrong on the launch path: a child that never
+/// exits there means the backend never starts and the tray never says why. This
+/// module already draws that line for `pip install` — "bounding it prevents a
+/// stalled network from hanging app startup indefinitely" — and the same
+/// reasoning applies to anything else we make a user wait behind.
+fn run_python_capture_bounded<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut cmd = python_command(python, args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    match run_bounded(cmd, timeout)? {
+        BoundedRun::Exited(output) => Ok(output),
+        // Carry what it managed to say. `BoundedRun` goes to the trouble of
+        // draining a killed child precisely so this exists; dropping it here
+        // would reduce a hung probe to "timed out after 60s" with no hint as to
+        // what it was doing, which is the whole question at that point.
+        BoundedRun::TimedOut { stderr } => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "timed out after {timeout:?}; partial stderr: {}",
+                tail_for_log(&String::from_utf8_lossy(&stderr))
+            ),
+        )),
+    }
+}
+
+/// The command every Python we spawn is built from: the given interpreter and
+/// args, isolated from user site-packages (see [`isolate_python_command`]), with
+/// no console window on Windows.
+///
+/// One home for that setup, so "every Python we spawn is isolated" is a property
+/// of the builder rather than something each caller has to remember.
+fn python_command<S: AsRef<OsStr>>(
+    python: &Path,
+    args: impl IntoIterator<Item = S>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(args);
+    isolate_python_command(&mut cmd);
+    configure_no_window_command(&mut cmd);
+    cmd
+}
+
 /// Spawn the given Python interpreter with `args`, suppress the console
 /// window on Windows, isolate it from user site-packages (see
 /// [`isolate_python_command`]), and capture its output. It adds no *flags* of
 /// its own (callers pass exactly the flags they need, `-I` included or not),
 /// and callers keep their own policy for exit status, logging, and
 /// stdout/stderr interpretation.
+///
+/// Unbounded; see [`run_python_capture_bounded`] for callers on the launch path.
 pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
 ) -> std::io::Result<std::process::Output> {
-    let mut cmd = std::process::Command::new(python);
-    cmd.args(args);
-    isolate_python_command(&mut cmd);
-    configure_no_window_command(&mut cmd);
-    cmd.output()
+    python_command(python, args).output()
 }
 
 /// [`run_python_capture`], returning the trimmed stdout on a successful exit
@@ -2282,7 +3061,6 @@ pub fn is_tray_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use crate::util::unique_temp_dir;
 
     /// Collect a command's staged env edits into (set, removed). `get_envs`
@@ -2970,7 +3748,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_passes_short_input_through_trimmed() {
         assert_eq!(tail_for_log("  hello  "), "hello");
@@ -2984,7 +3761,6 @@ mod tests {
         assert_eq!(v, Some("2026.5.0".to_string()));
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
         let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
@@ -3000,7 +3776,6 @@ mod tests {
         assert_eq!(v, None, "clean exit with no output means not installed");
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_truncates_to_the_tail_with_marker() {
         let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
@@ -3015,7 +3790,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn tail_for_log_does_not_split_a_multibyte_char() {
         // 1366 * 3 bytes = 4098 > 4096; the naive cut at len-4096 lands at
@@ -3061,7 +3835,8 @@ mod tests {
     fn interpreter_is_usable_false_for_missing_binary() {
         let base = unique_temp_dir("interp-missing");
         let _ = std::fs::remove_dir_all(&base);
-        assert!(!interpreter_is_usable(&base.join("python3")));
+        // A missing interpreter is a definitive "no", not an unanswered question.
+        assert!(!interpreter_is_usable(&base.join("python3")).unwrap());
     }
 
     #[cfg(unix)]
@@ -3078,7 +3853,7 @@ mod tests {
         const ATTEMPTS: usize = 20;
         let mut usable = false;
         for attempt in 0..ATTEMPTS {
-            if interpreter_is_usable(&bin) {
+            if interpreter_is_usable(&bin).unwrap_or(false) {
                 usable = true;
                 break;
             }
@@ -3098,6 +3873,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn interpreter_is_usable_separates_a_failed_check_from_a_failed_interpreter() {
+        // A check we could not make must not read as an interpreter that failed:
+        // callers wipe on the latter, and wiping on the former discards a user's
+        // pinned version over a question nobody answered. A directory is not an
+        // executable, so spawning it fails with something other than NotFound.
+        let base = unique_temp_dir("interp-unanswerable");
+        let dir_not_a_binary = base.join("bin");
+        std::fs::create_dir_all(&dir_not_a_binary).unwrap();
+        assert!(
+            interpreter_is_usable(&dir_not_a_binary).is_err(),
+            "a spawn that fails for reasons other than absence is an unanswered \
+             question, not a verdict"
+        );
+
+        // Whereas absence is a verdict: nothing about it will ever run.
+        assert!(!interpreter_is_usable(&base.join("nope")).unwrap());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn interpreter_is_usable_false_when_imports_fail() {
         // Regression test for the corrupt-stdlib shape: an interpreter
         // whose stdlib is gutted still runs `-c "pass"` cleanly but fails any
@@ -3112,10 +3909,642 @@ mod tests {
             "case \"$2\" in *import*) echo \"ModuleNotFoundError: No module named 'types'\" >&2; exit 1;; esac; exit 0",
         );
         assert!(
-            !interpreter_is_usable(&bin),
+            !interpreter_is_usable(&bin).unwrap(),
             "an interpreter that cannot import its stdlib must not count as usable"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// site-packages path used by the fake trees below. Its literal spelling
+    /// does not matter: the manifest names the directories to sweep, so nothing
+    /// in the reset infers this layout.
+    const TEST_PURELIB: &str = "lib/python3.13/site-packages";
+
+    /// The interpreter path for a Python tree laid out the way the real bundle
+    /// is on this platform, so [`python_tree_root`] resolves back to `root`.
+    /// Used by both the fabricated trees below and the real-bundle e2e.
+    fn interpreter_in_tree(root: &Path) -> PathBuf {
+        if cfg!(target_os = "windows") {
+            root.join("python.exe")
+        } else {
+            root.join("bin").join("python3")
+        }
+    }
+
+    /// Build a fake Python tree holding the interpreter's own pip plus an
+    /// installed esphome, and write `manifest` as its base manifest.
+    fn fake_tree(tag: &str, manifest: &str) -> PathBuf {
+        let root = unique_temp_dir(tag);
+        let purelib = root.join(TEST_PURELIB);
+        std::fs::create_dir_all(purelib.join("pip")).unwrap();
+        std::fs::create_dir_all(purelib.join("pip-26.1.2.dist-info")).unwrap();
+        // The orphan from #330 lives inside the package dir, so removing the
+        // package removes it too.
+        std::fs::create_dir_all(purelib.join("esphome").join("components").join("rp2040")).unwrap();
+        std::fs::create_dir_all(purelib.join("esphome-2026.7.0.dist-info")).unwrap();
+        std::fs::write(purelib.join("pip").join("__init__.py"), "").unwrap();
+
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for name in ["python3", "pip3", "esphome", "esptool"] {
+            std::fs::write(bin.join(name), "").unwrap();
+        }
+
+        std::fs::write(root.join(BASE_MANIFEST), manifest).unwrap();
+        root
+    }
+
+    /// A manifest describing [`fake_tree`]'s Python-owned entries.
+    fn fake_manifest() -> String {
+        format!(
+            "# comment\n\
+             sweep {TEST_PURELIB}\n\
+             sweep bin\n\
+             \n\
+             keep {TEST_PURELIB}/pip\n\
+             keep {TEST_PURELIB}/pip-26.1.2.dist-info\n\
+             keep bin/python3\n\
+             keep bin/pip3\n"
+        )
+    }
+
+    #[test]
+    fn wipe_removes_our_packages_and_keeps_pythons_own() {
+        let root = fake_tree("wipe-keeps-base", &fake_manifest());
+        let purelib = root.join(TEST_PURELIB);
+
+        let removed = wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
+
+        // esphome + its dist-info, and the esphome/esptool scripts.
+        assert_eq!(removed, 4, "removed the wrong number of entries");
+
+        // Everything we installed is gone, including the #330 orphan that lived
+        // inside it and that no metadata knew about.
+        assert!(!purelib.join("esphome").exists());
+        assert!(!purelib.join("esphome-2026.7.0.dist-info").exists());
+        assert!(!root.join("bin").join("esphome").exists());
+        assert!(!root.join("bin").join("esptool").exists());
+
+        // Python's own packages survive. Wiping pip would leave nothing able to
+        // reinstall anything, which is the one unrecoverable outcome here.
+        assert!(purelib.join("pip").join("__init__.py").exists());
+        assert!(purelib.join("pip-26.1.2.dist-info").exists());
+        assert!(root.join("bin").join("python3").exists());
+        assert!(root.join("bin").join("pip3").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_keeps_pip_after_its_version_moves() {
+        // The manifest is captured before `pip install esphome`, so anything in
+        // that dependency tree bumping pip leaves the shipped bundle disagreeing
+        // with its own manifest; a user upgrading pip by hand does the same.
+        // Matching pip's metadata by exact name would then delete it, leaving
+        // pip importable with no RECORD, which is precisely the
+        // `uninstall-no-record-file` state this whole change exists to remove.
+        let root = fake_tree("wipe-pip-upgraded", &fake_manifest());
+        let purelib = root.join(TEST_PURELIB);
+
+        // pip upgrades itself: same package dir, new versioned metadata.
+        std::fs::remove_dir_all(purelib.join("pip-26.1.2.dist-info")).unwrap();
+        std::fs::create_dir_all(purelib.join("pip-27.0.dist-info")).unwrap();
+        std::fs::write(purelib.join("pip-27.0.dist-info").join("RECORD"), "").unwrap();
+
+        wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
+
+        assert!(
+            purelib.join("pip-27.0.dist-info").join("RECORD").exists(),
+            "pip's metadata must survive a version bump; deleting it would \
+             recreate the missing-RECORD bug"
+        );
+        assert!(purelib.join("pip").exists());
+        // Ours still goes, version notwithstanding.
+        assert!(!purelib.join("esphome-2026.7.0.dist-info").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keep_key_ignores_dist_info_versions_only() {
+        // Versioned metadata collapses to the distribution name...
+        assert_eq!(keep_key("pip-26.1.2.dist-info"), "pip");
+        assert_eq!(keep_key("pip-27.0.dist-info"), "pip");
+        assert_eq!(keep_key("setuptools-80.9.0.dist-info"), "setuptools");
+        // ...including local/pre-release versions, which contain dashes.
+        assert_eq!(keep_key("foo-1.0-beta.dist-info"), "foo");
+        // Everything else is matched verbatim. `bin/pip3.13` carries Python's
+        // version, not the package's, and is fixed for a given bundle.
+        assert_eq!(keep_key("pip"), "pip");
+        assert_eq!(keep_key("pip3.13"), "pip3.13");
+        assert_eq!(
+            keep_key("distutils-precedence.pth"),
+            "distutils-precedence.pth"
+        );
+        // A dist-info with no version at all still yields its name.
+        assert_eq!(keep_key("weird.dist-info"), "weird");
+    }
+
+    #[test]
+    fn wipe_without_a_manifest_deletes_nothing() {
+        // A tree built before the manifest existed. Guessing which entries are
+        // Python's own risks taking pip with them, so refuse outright.
+        let root = fake_tree("wipe-no-manifest", &fake_manifest());
+        std::fs::remove_file(root.join(BASE_MANIFEST)).unwrap();
+
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
+        assert!(root.join(TEST_PURELIB).join("esphome").exists());
+        assert!(root.join(TEST_PURELIB).join("pip").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_rejects_a_manifest_that_escapes_the_tree() {
+        // The manifest aims a recursive delete, so a path climbing out of the
+        // tree must fail rather than resolve to somewhere real.
+        let root = fake_tree("wipe-escape", "sweep ../../..\nkeep bin/python3\n");
+
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
+        assert!(root.join(TEST_PURELIB).join("esphome").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_rejects_a_manifest_with_nothing_to_keep() {
+        // A truncated manifest would otherwise sweep site-packages clean,
+        // taking pip with it.
+        let root = fake_tree("wipe-empty-keep", &format!("sweep {TEST_PURELIB}\n"));
+
+        assert!(wipe_installed_packages(&interpreter_in_tree(&root)).is_err());
+        assert!(root.join(TEST_PURELIB).join("pip").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_tolerates_a_sweep_dir_that_does_not_exist() {
+        // Windows has no `bin`; nothing of ours can be in a dir that isn't
+        // there, so it is skipped rather than failing the whole reset.
+        let root = fake_tree("wipe-missing-sweep", &fake_manifest());
+        std::fs::remove_dir_all(root.join("bin")).unwrap();
+
+        let removed = wipe_installed_packages(&interpreter_in_tree(&root)).unwrap();
+        assert_eq!(removed, 2, "only the site-packages entries remained to go");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_trees_we_own_may_be_reset() {
+        let user_root = Path::new("/data/io.esphome.builder/python");
+        let resource_root = Path::new("/Applications/ESPHome.app/Contents/Resources/python");
+        let resources = || Ok(resource_root.to_path_buf());
+
+        // The copy in the app data dir is ours to repair, everywhere.
+        assert!(is_resettable_tree(user_root, user_root, resources).unwrap());
+
+        // The shipped resource tree is a legitimate target only on Windows,
+        // where it IS the live tree. Everywhere else `get_python_path` only
+        // returns it because `ensure_user_python`'s copy failed (it is
+        // log-and-continue at startup), and deleting inside a signed `.app` or a
+        // read-only AppImage mount turns a transient failure into a reinstall.
+        assert_eq!(
+            is_resettable_tree(resource_root, user_root, resources).unwrap(),
+            cfg!(target_os = "windows"),
+            "the bundled resource tree is resettable on Windows and nowhere else"
+        );
+
+        // Anything else — a system Python, a user's own tree — is never ours.
+        assert!(
+            !is_resettable_tree(Path::new("/usr/local/lib/python3.13"), user_root, resources)
+                .unwrap()
+        );
+        assert!(
+            !is_resettable_tree(Path::new("/data/io.esphome.builder"), user_root, resources)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn the_resource_tree_is_not_resolved_when_the_answer_does_not_need_it() {
+        // Resolving it can fail — a dev build with no bundled resources — and
+        // asking eagerly would let that refuse a reset of the copy we own, on
+        // the strength of a directory the decision never depended on.
+        let user_root = Path::new("/data/io.esphome.builder/python");
+        let asked = std::cell::Cell::new(false);
+        let resources = || {
+            asked.set(true);
+            Ok(PathBuf::from("/never/needed"))
+        };
+
+        assert!(is_resettable_tree(user_root, user_root, resources).unwrap());
+        assert!(
+            !asked.get(),
+            "resolved the resource tree to answer 'that is ours'"
+        );
+
+        // And a resolution failure cannot refuse a tree we own.
+        let boom = || anyhow::bail!("no bundled resources in this build");
+        assert!(is_resettable_tree(user_root, user_root, boom).unwrap());
+    }
+
+    #[test]
+    fn parse_base_manifest_reads_the_generated_format() {
+        // Pins the contract with write_base_manifest() in
+        // build-scripts/prepare_bundle.sh, which is the only writer.
+        let manifest = parse_base_manifest(&fake_manifest()).unwrap();
+        assert_eq!(
+            manifest.sweep,
+            vec![PathBuf::from(TEST_PURELIB), PathBuf::from("bin")]
+        );
+        assert!(manifest.keep.contains(&PathBuf::from("bin/python3")));
+        assert!(manifest.keep.contains(&PathBuf::from("bin/pip3")));
+        assert!(manifest
+            .keep
+            .contains(&PathBuf::from(format!("{TEST_PURELIB}/pip"))));
+        // Four `keep` lines collapse to three entries: `pip` and
+        // `pip-26.1.2.dist-info` share the key `pip`, which is the point — it is
+        // what lets pip's metadata survive a version bump.
+        assert_eq!(manifest.keep.len(), 3);
+    }
+
+    #[test]
+    fn parse_base_manifest_rejects_a_manifest_that_does_not_name_pip() {
+        // The generator refuses to emit one, but that runs on a build machine.
+        // This runs against a file that has been copied, shipped and sat on disk
+        // since — and it is the last thing between a bad manifest and a
+        // recursive delete of the pip the repair reinstalls with.
+        let err = parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep {TEST_PURELIB}/setuptools\nkeep bin/python3\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("pip"), "{err}");
+
+        // Named either way round: `keep_key` folds the versioned metadata dir
+        // down to the distribution name.
+        assert!(parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep {TEST_PURELIB}/pip-26.1.2.dist-info\nkeep bin/python3\n"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_base_manifest_rejects_a_sweep_dir_with_nothing_kept() {
+        // Checking the keep set only globally would accept this: `bin` names
+        // entries, so the manifest looks populated, while site-packages is swept
+        // clean — taking the interpreter's own pip with it.
+        let err = parse_base_manifest(&format!(
+            "sweep {TEST_PURELIB}\nsweep bin\nkeep bin/python3\nkeep bin/pip\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(TEST_PURELIB), "{err}");
+
+        // Both covered is fine.
+        assert!(parse_base_manifest(&fake_manifest()).is_ok());
+    }
+
+    #[test]
+    fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
+        // The probe runs in front of daemon.start(); an unbounded child there
+        // means the backend never starts and nothing says why.
+        let python = Path::new(TEST_PYTHON);
+        let started = std::time::Instant::now();
+        let err = run_python_capture_bounded(
+            python,
+            ["-c", "import time; time.sleep(600)"],
+            std::time::Duration::from_millis(300),
+        )
+        .expect_err("a sleeping child must hit the deadline");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the deadline did not fire promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_surviving_grandchild_cannot_defeat_the_deadline() {
+        // A pipe reaches EOF only when every writer closes it, and killing a
+        // child does not kill grandchildren that inherited its fds -- pip spawns
+        // build backends that do exactly this. Joining the reader unconditionally
+        // would then block forever on a dead child's pipe, and the deadline this
+        // helper exists to enforce would never fire.
+        //
+        // The child here spawns a grandchild that holds stderr open for far
+        // longer than the test could tolerate, then exits itself.
+        let started = std::time::Instant::now();
+        let out = run_python_capture_bounded(
+            Path::new(TEST_PYTHON),
+            [
+                "-c",
+                "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
+                 subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); \
+                 sys.exit(0)",
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the child exited, so this must return");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "a grandchild holding the pipe stalled the call for {:?}",
+            started.elapsed()
+        );
+        assert!(out.status.success());
+        // What the child managed to write before the grandchild pinned the pipe
+        // still comes back.
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("before"),
+            "gave up on the reader without keeping what it had already read"
+        );
+    }
+
+    #[test]
+    fn run_python_capture_bounded_returns_output_within_the_deadline() {
+        let out = run_python_capture_bounded(
+            Path::new(TEST_PYTHON),
+            ["-c", "print('hi')"],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("a trivial script must not time out");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
+    }
+
+    /// Any interpreter will do for the bounded-capture tests: they exercise the
+    /// process plumbing, not the bundled tree. Named rather than probed for, so a
+    /// host without it fails these tests loudly instead of skipping them — a
+    /// timeout test that quietly reports green is worse than no timeout test.
+    /// Every platform we build on has `python3` (the Python jobs install it, and
+    /// `prepare_bundle.sh` needs one regardless).
+    #[cfg(not(target_os = "windows"))]
+    const TEST_PYTHON: &str = "python3";
+    #[cfg(target_os = "windows")]
+    const TEST_PYTHON: &str = "python";
+
+    #[test]
+    fn parse_base_manifest_rejects_an_unknown_verb() {
+        // A verb we don't understand means the file was written by something
+        // that disagrees with us about the format; deleting on that basis is
+        // not safe.
+        assert!(parse_base_manifest("sweep bin\nkeep bin/python3\ndelete bin/pip3\n").is_err());
+    }
+
+    /// Env var naming the real bundled Python tree the e2e test runs against.
+    const E2E_TREE_ENV: &str = "ESPHOME_E2E_PYTHON_TREE";
+
+    /// Run the tree's interpreter and return (success, stdout+stderr).
+    ///
+    /// Goes through [`run_python_capture`] so the harness is isolated exactly as
+    /// the code under test is. Spawning the interpreter directly would let the
+    /// runner's user site-packages or an ambient `PYTHONPATH` satisfy an import
+    /// (#318) — and this test asserts on *absence* ("esphome survived the
+    /// wipe"), which is precisely what a stray import would invert.
+    fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
+        let output = run_python_capture(python, args)
+            .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), combined)
+    }
+
+    /// The tree's site-packages, straight from its own sysconfig.
+    fn e2e_purelib(python: &Path) -> PathBuf {
+        let (ok, out) = e2e_run(
+            python,
+            &[
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+        );
+        assert!(ok, "could not resolve purelib: {out}");
+        PathBuf::from(out.trim())
+    }
+
+    /// The whole #330 lifecycle against a real bundled Python tree: detect the
+    /// orphan, wipe, prove pip survived, reinstall, prove it is fixed.
+    ///
+    /// Ignored by default because it needs the genuine article — the
+    /// python-build-standalone tree with esphome in it that
+    /// `build-scripts/prepare_bundle.sh` produces — plus network to reinstall.
+    /// The `Python tree repair (e2e)` workflow builds that tree on every OS we
+    /// ship and runs this with `--ignored`.
+    ///
+    /// A venv would not do: on Windows a venv puts `python.exe` in `Scripts/`,
+    /// while the real bundle has it at the tree root, so `python_tree_root`'s
+    /// platform assumption would go untested against the layout we actually
+    /// ship. This uses the shipped layout.
+    ///
+    /// One test rather than several because each step depends on the last
+    /// leaving the tree in a particular state, and Rust does not order tests.
+    #[test]
+    #[ignore = "needs a real bundled Python tree; run by the python-tree-repair CI job"]
+    fn e2e_repair_cycle() {
+        let root = PathBuf::from(std::env::var(E2E_TREE_ENV).unwrap_or_else(|_| {
+            panic!("{E2E_TREE_ENV} must point at a tree built by prepare_bundle.sh")
+        }));
+        // One spelling of the shipped layout, shared with the unit tests: a
+        // second copy here could drift from it, and this is the test that would
+        // have to catch that drift.
+        let python = interpreter_in_tree(&root);
+        assert!(python.is_file(), "no interpreter at {python:?}");
+
+        // The tree the build produces must resolve back to itself, or the reset
+        // would aim at the wrong directory on this platform.
+        assert_eq!(
+            python_tree_root(&python),
+            Some(root.as_path()),
+            "python_tree_root disagrees with the shipped layout"
+        );
+        assert!(
+            root.join(BASE_MANIFEST).is_file(),
+            "prepare_bundle.sh must ship {BASE_MANIFEST}"
+        );
+
+        let purelib = e2e_purelib(&python);
+
+        // 1. A freshly built tree is healthy.
+        assert_eq!(
+            esphome_config_probe(&python).expect("probe could not run"),
+            None,
+            "a freshly built bundle must pass the health probe"
+        );
+        let (ok, version) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(ok, "esphome version failed: {version}");
+        let version = version
+            .trim()
+            .rsplit(' ')
+            .next()
+            .expect("esphome version printed nothing")
+            .to_string();
+
+        // 2. Orphan a component directory exactly the way --ignore-installed
+        //    did: `rp2` declares `rp2040` as a legacy alias, so a leftover
+        //    `rp2040` package from the previous version collides with it.
+        let orphan = purelib.join("esphome").join("components").join("rp2040");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("__init__.py"), "").unwrap();
+
+        // 3. The probe must catch it. This is the assertion the whole change
+        //    rests on: no metadata check sees this, because the orphan has no
+        //    RECORD and no dist-info, and importlib still reports a healthy
+        //    esphome. Only running a real command finds it.
+        let detail = esphome_config_probe(&python)
+            .expect("probe could not run")
+            .expect("the orphaned rp2040 component must fail the health probe");
+        assert!(
+            detail.contains("rp2040"),
+            "probe failed for some other reason: {detail}"
+        );
+
+        // 4. Reset the packages.
+        let removed = wipe_installed_packages(&python).expect("wipe failed");
+        assert!(removed > 0, "the wipe removed nothing");
+
+        // 5. pip must still work. If the wipe takes pip with it the tree is
+        //    unrepairable, which is the one truly unrecoverable outcome here.
+        let (ok, out) = e2e_run(&python, &["-m", "pip", "--version"]);
+        assert!(
+            ok,
+            "the wipe broke pip, so nothing can be reinstalled: {out}"
+        );
+
+        // 6. Everything of ours is gone, orphan included.
+        assert!(!orphan.exists(), "the orphan survived the wipe");
+        assert!(!purelib.join("esphome").exists());
+        let (esphome_gone, _) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(!esphome_gone, "esphome survived the wipe");
+        let (builder_gone, _) = e2e_run(&python, &["-c", "import esphome_device_builder"]);
+        assert!(!builder_gone, "esphome-device-builder survived the wipe");
+
+        // 7. Reinstall, as `reset_python_packages` does after the wipe.
+        let (ok, out) = e2e_run(
+            &python,
+            &["-m", "pip", "install", &format!("esphome=={version}")],
+        );
+        assert!(ok, "reinstalling esphome=={version} failed: {out}");
+
+        // 8. The tree is healthy again, and the orphan did not come back.
+        assert_eq!(
+            esphome_config_probe(&python).expect("probe could not run"),
+            None,
+            "the tree is still broken after the reset"
+        );
+        assert!(!orphan.exists(), "the orphan came back");
+    }
+
+    #[test]
+    fn manifest_path_safety() {
+        assert!(manifest_path_is_safe(Path::new("lib/site-packages/pip")));
+        assert!(manifest_path_is_safe(Path::new("bin")));
+        assert!(!manifest_path_is_safe(Path::new("../escape")));
+        assert!(!manifest_path_is_safe(Path::new("bin/../../escape")));
+        assert!(!manifest_path_is_safe(Path::new("")));
+        #[cfg(unix)]
+        assert!(!manifest_path_is_safe(Path::new("/etc")));
+        #[cfg(windows)]
+        assert!(!manifest_path_is_safe(Path::new(r"C:\Windows")));
+    }
+
+    #[test]
+    fn probe_dir_is_never_a_directory_we_did_not_create() {
+        // The temp dir is shared and world-writable, so a name another user
+        // pre-created (a directory of theirs, or a symlink into one) must be
+        // stepped over rather than adopted and written into.
+        let squatted =
+            std::env::temp_dir().join(format!("esphome-desktop-probe-{}-0", std::process::id()));
+        let _ = std::fs::remove_dir_all(&squatted);
+        std::fs::create_dir_all(&squatted).unwrap();
+        std::fs::write(squatted.join("theirs.txt"), "not ours").unwrap();
+
+        let dir = make_probe_dir().unwrap();
+        assert_ne!(dir, squatted, "must not adopt a pre-existing directory");
+        assert!(dir.is_dir());
+        assert!(
+            squatted.join("theirs.txt").exists(),
+            "must not delete another user's directory to take its name"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&squatted);
+    }
+
+    #[test]
+    fn the_system_python_fallback_is_not_a_managed_tree() {
+        // `get_python_path` returns a bare command name in dev builds with no
+        // bundle. There is no managed tree behind it, so nothing may be swept,
+        // and probing it would tell a developer their install is broken when
+        // all that is true is that ESPHome is not in their system Python.
+        for fallback in ["python3", "python"] {
+            assert!(
+                python_tree_root(Path::new(fallback)).is_none(),
+                "{fallback}"
+            );
+            assert!(!is_managed_python_tree(Path::new(fallback)), "{fallback}");
+        }
+
+        // A real tree still resolves, and is ours to probe.
+        let root = unique_temp_dir("tree-root");
+        let python = interpreter_in_tree(&root);
+        assert_eq!(python_tree_root(&python), Some(root.as_path()));
+        assert!(is_managed_python_tree(&python));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repairs_are_bounded() {
+        // The probe reports "a real command fails", which is broader than "a
+        // repair fixes it". Without a bound, a failure a repair can't fix would
+        // rebuild the tree on every single launch, forever.
+        let data_dir = unique_temp_dir("repair-bound");
+
+        for attempt in 1..=MAX_REPAIRS {
+            assert!(
+                may_repair_tree(&data_dir),
+                "repair {attempt} should be allowed"
+            );
+        }
+        assert!(
+            !may_repair_tree(&data_dir),
+            "the budget must run out rather than rebuild forever"
+        );
+
+        // A tree that proves healthy starts over, so an unrelated future
+        // breakage still gets its full budget.
+        clear_repair_count(&data_dir);
+        assert!(may_repair_tree(&data_dir));
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn reset_budget_survives_the_repair_it_bounds() {
+        // On macOS/Linux the repair is `remove_dir_all` of the whole Python
+        // tree. A counter kept inside that tree would be destroyed by the very
+        // repair it bounds, so every launch would read zero and rebuild again:
+        // the unbounded loop MAX_REPAIRS exists to prevent.
+        let data_dir = unique_temp_dir("repair-budget-survives");
+        let python_tree = data_dir.join("python");
+        std::fs::create_dir_all(python_tree.join("bin")).unwrap();
+
+        assert!(may_repair_tree(&data_dir), "first repair allowed");
+
+        // The repair replaces the tree.
+        std::fs::remove_dir_all(&python_tree).unwrap();
+        std::fs::create_dir_all(python_tree.join("bin")).unwrap();
+
+        assert!(may_repair_tree(&data_dir), "second repair allowed");
+        assert!(
+            !may_repair_tree(&data_dir),
+            "the budget must not be reset by the repair that spends it"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -3123,10 +4552,7 @@ mod tests {
     fn refresh_defer_count_missing_marker_is_zero() {
         let base = unique_temp_dir("defer-missing");
         let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(
-            read_refresh_defer_count(&base.join(".refresh-defer-count")),
-            0
-        );
+        assert_eq!(read_counter(&base.join(".refresh-defer-count")), 0);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3140,11 +4566,11 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let marker = base.join(".refresh-defer-count");
 
-        let mut count = read_refresh_defer_count(&marker);
+        let mut count = read_counter(&marker);
         let mut defers = 0;
         while count < MAX_REFRESH_DEFERS {
-            bump_refresh_defer_count(&marker, count + 1);
-            count = read_refresh_defer_count(&marker);
+            bump_counter(&marker, count + 1);
+            count = read_counter(&marker);
             defers += 1;
         }
         assert_eq!(defers, MAX_REFRESH_DEFERS, "defers are bounded");

@@ -58,7 +58,13 @@
     "builder_update_failed": "Failed to update ESPHome Device Builder: {error}",
     "builder_updated": "ESPHome Device Builder has been updated to version {version}.",
     "builder_partial": "Device builder updated to {version}, but failed to restart backend: {error}",
-    "builder_available_title": "Device Builder Update Available"
+    "builder_available_title": "Device Builder Update Available",
+    "repair_failed_title": "ESPHome Needs Attention",
+    "repair_failed": "Your ESPHome install is damaged and could not be repaired automatically.\n\n{error}\n\nBuilds will fail until this is fixed. {hint}",
+    "repair_incomplete": "Your ESPHome install is damaged and could not be repaired automatically.\n\nBuilds will fail until this is fixed. {hint}",
+    "repair_hint_reinstall": "Uninstalling and reinstalling ESPHome Device Builder will recover it.",
+    "repair_hint_retry": "Reopening the app will try the repair again.",
+    "repair_hint_delete_tree": "Deleting this folder and reopening the app will restore it:\n{path}"
   },
   "app_update": {
     "available_title": "Desktop Update Available",
