@@ -63,26 +63,39 @@ def _code_before_comment(line: str) -> str:
     end of line, because it can be followed by real code: truncating at the
     opener turns `mod tests { /* todo */ }` into `mod tests {`, throwing away
     the brace that closes the body and losing the terminator the same way.
-    rustfmt happens to break that exact line in two, so this tree cannot hold
-    it while `cargo fmt --check` blocks, but the helper should not depend on
-    that to be right.
+
+    Rust's block comments nest, so the span is tracked by depth rather than
+    closed at the first `*/`: `} /* a /* b */ */` is one comment and a brace,
+    and stopping at the inner `*/` leaves `}   */`, which is not a terminator
+    either. rustfmt keeps that line as written, unlike `mod tests { /* todo */
+    }` which it breaks in two, so it is a shape this tree can actually hold.
 
     This is applied to every line, not only to the shapes matched on. That is
     safe for the two callers comparing the result to a constant, and it is why
     the third — the self-contained check, which reads the result as content —
-    needs the span closed rather than truncated. A `//` inside a string
-    literal would be mangled here; that costs nothing on the shapes actually
-    compared, and a raw string holding a column-0 `}` only ever ends a block
-    early, which counts more lines rather than fewer.
+    needs the spans removed accurately rather than approximately. A `//` or
+    `/*` inside a string literal would be mangled here; that costs nothing on
+    the shapes actually compared, and a raw string holding a column-0 `}` only
+    ever ends a block early, which counts more lines rather than fewer.
     """
-    while (start := line.find("/*")) != -1:
-        end = line.find("*/", start + 2)
-        if end == -1:
-            line = line[:start]
-            break
-        line = f"{line[:start]} {line[end + 2 :]}"
-    cut = line.find("//")
-    return (line if cut == -1 else line[:cut]).rstrip()
+    kept: list[str] = []
+    depth = 0
+    index = 0
+    while index < len(line):
+        if line.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif depth and line.startswith("*/", index):
+            depth -= 1
+            index += 2
+        elif depth:
+            index += 1
+        elif line.startswith("//", index):
+            break  # line comment: the rest really does run to end of line.
+        else:
+            kept.append(line[index])
+            index += 1
+    return "".join(kept).rstrip()
 
 
 def code_line_count(source: str) -> int:

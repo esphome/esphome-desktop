@@ -19,8 +19,15 @@ The high-leverage ones to keep in working memory while editing:
   add an entry to the `EXEMPT` list in `.github/scripts/check_file_size.py`;
   that list is the record of files that predate the cap and it is meant to
   shrink, not grow.
-- **`cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` all block the
-  merge.** Run them from `src-tauri/` before pushing. CI pins the toolchain, so
-  match that version if a local result differs.
+- **These three block the merge.** Run them from `src-tauri/` before pushing,
+  with these exact flags; a bare `cargo clippy` lints neither the test targets
+  nor the feature-gated code, so it passes on things CI then fails on. CI pins
+  the toolchain, so match that version if a local result differs.
+
+  ```bash
+  cargo fmt --all --check
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test --all-features
+  ```
 - **Don't add `Co-Authored-By: Claude` to commits**, and don't mention Claude
   in PR descriptions or commit messages.

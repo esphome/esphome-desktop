@@ -231,6 +231,42 @@ def test_an_unclosed_block_comment_truncates() -> None:
     assert check_file_size._code_before_comment("} /* unfinished") == "}"
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("} /* a /* b */ */", "}"),  # nested: one comment, then the brace
+        ("} /* a */", "}"),
+        ("} // end", "}"),
+        ("} /* unfinished", "}"),
+        ("mod tests { /* todo */ }", "mod tests {  }"),
+        ("mod tests {} /* note */", "mod tests {}"),
+        ("#[cfg(test)] /* x */", "#[cfg(test)]"),
+        ("#[cfg(test)]", "#[cfg(test)]"),
+        ("mod tests;", "mod tests;"),
+        ("mod tests {", "mod tests {"),
+    ],
+)
+def test_code_before_comment(line: str, expected: str) -> None:
+    """Rust block comments nest, so `/* a /* b */ */` is one comment.
+
+    Closing at the first `*/` leaves `}   */`, which is not a terminator, so
+    the block runs on and the file undercounts. rustfmt keeps that line as
+    written, so it is a shape this tree can hold, unlike `mod tests { /* todo
+    */ }` which it breaks in two.
+    """
+    assert check_file_size._code_before_comment(line) == expected
+
+
+def test_a_nested_block_comment_cannot_hide_an_over_cap_file(tmp_path: Path) -> None:
+    source = (
+        "#[cfg(test)]\nmod tests {\n    fn t() {}\n} /* a /* b */ */\n"
+        + "".join(f"// code {n}\n" for n in range(CAP + 1))
+        + "fn tail() {\n}\n"
+    )
+    write(tmp_path, "a.rs", source)
+    assert len(check_file_size.check(tmp_path, ["a.rs"], set())) == 1
+
+
 def test_a_comment_on_the_declaration_still_reads_as_self_contained() -> None:
     """Only `fn a` and `fn b`; the attribute and declaration are both skipped."""
     source = "fn a() {}\n#[cfg(test)]\nmod tests {} // nothing yet\nfn b() {}\n"
