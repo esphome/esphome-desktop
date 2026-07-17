@@ -66,6 +66,10 @@ ruff format --check .
 python3 -m pytest tests/ -v
 ```
 
+On Windows, use `py -m` rather than `python3`; a python.org install never ships a
+`python3.exe`, and the `py` launcher is the reliable spelling there (plain
+`python` works only if you added it to PATH during install).
+
 ---
 
 [![ESPHome - A project from the Open Home Foundation](https://www.openhomefoundation.org/badges/esphome.png)](https://www.openhomefoundation.org/)
