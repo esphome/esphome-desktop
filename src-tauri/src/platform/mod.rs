@@ -3648,6 +3648,146 @@ mod tests {
         assert!(parse_base_manifest("sweep bin\nkeep bin/python3\ndelete bin/pip3\n").is_err());
     }
 
+    /// Env var naming the real bundled Python tree the e2e test runs against.
+    const E2E_TREE_ENV: &str = "ESPHOME_E2E_PYTHON_TREE";
+
+    /// Run the tree's interpreter and return (success, stdout+stderr).
+    fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
+        let output = std::process::Command::new(python)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
+        let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+        (output.status.success(), combined)
+    }
+
+    /// The tree's site-packages, straight from its own sysconfig.
+    fn e2e_purelib(python: &Path) -> PathBuf {
+        let (ok, out) = e2e_run(
+            python,
+            &[
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+        );
+        assert!(ok, "could not resolve purelib: {out}");
+        PathBuf::from(out.trim())
+    }
+
+    /// The whole #330 lifecycle against a real bundled Python tree: detect the
+    /// orphan, wipe, prove pip survived, reinstall, prove it is fixed.
+    ///
+    /// Ignored by default because it needs the genuine article — the
+    /// python-build-standalone tree with esphome in it that
+    /// `build-scripts/prepare_bundle.sh` produces — plus network to reinstall.
+    /// The `Python tree repair (e2e)` workflow builds that tree on every OS we
+    /// ship and runs this with `--ignored`.
+    ///
+    /// A venv would not do: on Windows a venv puts `python.exe` in `Scripts/`,
+    /// while the real bundle has it at the tree root, so `python_tree_root`'s
+    /// platform assumption would go untested against the layout we actually
+    /// ship. This uses the shipped layout.
+    ///
+    /// One test rather than several because each step depends on the last
+    /// leaving the tree in a particular state, and Rust does not order tests.
+    #[test]
+    #[ignore = "needs a real bundled Python tree; run by the python-tree-repair CI job"]
+    fn e2e_repair_cycle() {
+        let root = PathBuf::from(std::env::var(E2E_TREE_ENV).unwrap_or_else(|_| {
+            panic!("{E2E_TREE_ENV} must point at a tree built by prepare_bundle.sh")
+        }));
+        let python = if cfg!(target_os = "windows") {
+            root.join("python.exe")
+        } else {
+            root.join("bin").join("python3")
+        };
+        assert!(python.is_file(), "no interpreter at {python:?}");
+
+        // The tree the build produces must resolve back to itself, or the reset
+        // would aim at the wrong directory on this platform.
+        assert_eq!(
+            python_tree_root(&python),
+            Some(root.as_path()),
+            "python_tree_root disagrees with the shipped layout"
+        );
+        assert!(
+            root.join(BASE_MANIFEST).is_file(),
+            "prepare_bundle.sh must ship {BASE_MANIFEST}"
+        );
+
+        let purelib = e2e_purelib(&python);
+
+        // 1. A freshly built tree is healthy.
+        assert_eq!(
+            esphome_config_probe(&python).expect("probe could not run"),
+            None,
+            "a freshly built bundle must pass the health probe"
+        );
+        let (ok, version) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(ok, "esphome version failed: {version}");
+        let version = version
+            .trim()
+            .rsplit(' ')
+            .next()
+            .expect("esphome version printed nothing")
+            .to_string();
+
+        // 2. Orphan a component directory exactly the way --ignore-installed
+        //    did: `rp2` declares `rp2040` as a legacy alias, so a leftover
+        //    `rp2040` package from the previous version collides with it.
+        let orphan = purelib.join("esphome").join("components").join("rp2040");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("__init__.py"), "").unwrap();
+
+        // 3. The probe must catch it. This is the assertion the whole change
+        //    rests on: no metadata check sees this, because the orphan has no
+        //    RECORD and no dist-info, and importlib still reports a healthy
+        //    esphome. Only running a real command finds it.
+        let detail = esphome_config_probe(&python)
+            .expect("probe could not run")
+            .expect("the orphaned rp2040 component must fail the health probe");
+        assert!(
+            detail.contains("rp2040"),
+            "probe failed for some other reason: {detail}"
+        );
+
+        // 4. Reset the packages.
+        let removed = wipe_installed_packages(&python).expect("wipe failed");
+        assert!(removed > 0, "the wipe removed nothing");
+
+        // 5. pip must still work. If the wipe takes pip with it the tree is
+        //    unrepairable, which is the one truly unrecoverable outcome here.
+        let (ok, out) = e2e_run(&python, &["-m", "pip", "--version"]);
+        assert!(
+            ok,
+            "the wipe broke pip, so nothing can be reinstalled: {out}"
+        );
+
+        // 6. Everything of ours is gone, orphan included.
+        assert!(!orphan.exists(), "the orphan survived the wipe");
+        assert!(!purelib.join("esphome").exists());
+        let (esphome_gone, _) = e2e_run(&python, &["-m", "esphome", "version"]);
+        assert!(!esphome_gone, "esphome survived the wipe");
+        let (builder_gone, _) = e2e_run(&python, &["-c", "import esphome_device_builder"]);
+        assert!(!builder_gone, "esphome-device-builder survived the wipe");
+
+        // 7. Reinstall, as `reset_python_packages` does after the wipe.
+        let (ok, out) = e2e_run(
+            &python,
+            &["-m", "pip", "install", &format!("esphome=={version}")],
+        );
+        assert!(ok, "reinstalling esphome=={version} failed: {out}");
+
+        // 8. The tree is healthy again, and the orphan did not come back.
+        assert_eq!(
+            esphome_config_probe(&python).expect("probe could not run"),
+            None,
+            "the tree is still broken after the reset"
+        );
+        assert!(!orphan.exists(), "the orphan came back");
+    }
+
     #[test]
     fn manifest_path_safety() {
         assert!(manifest_path_is_safe(Path::new("lib/site-packages/pip")));
