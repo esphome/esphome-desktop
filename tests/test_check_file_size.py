@@ -331,6 +331,18 @@ def test_repo_is_clean() -> None:
     assert check_file_size.check(REPO_ROOT, files, check_file_size.EXEMPT) == []
 
 
+def test_a_git_failure_says_why(tmp_path: Path) -> None:
+    """`check=True` + `capture_output` hides git's stderr from the message.
+
+    Without re-raising, a failure here (not a repo, no git on PATH, a bad
+    pathspec) reaches the CI log as a bare traceback saying only that the exit
+    status was non-zero.
+    """
+    with pytest.raises(RuntimeError, match="git ls-files failed") as caught:
+        check_file_size.tracked_rust_files(tmp_path)
+    assert "not a git repository" in str(caught.value)
+
+
 def test_tracked_rust_files_reaches_nested_modules() -> None:
     """`*` crosses `/` in a default git pathspec, so one spec covers the tree.
 

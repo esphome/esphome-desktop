@@ -147,18 +147,29 @@ def tracked_rust_files(root: Path) -> list[str]:
     Python tree carries 20k-line vendored sources and a working tree may hold
     an untracked nested checkout of this repo. Neither is ours to measure and
     neither is tracked.
+
+    One pathspec, not two: in a default pathspec git's `*` matches across `/`,
+    so this already covers nested files. (It is `:(glob)` magic that sets
+    FNM_PATHNAME and stops that; `src-tauri/src/**/*.rs` would match only the
+    14 nested files and miss lib.rs, main.rs and dialog.rs.)
     """
-    # One pathspec, not two: git's fnmatch lets `*` cross `/`, so this already
-    # matches nested files. (`src-tauri/src/**/*.rs` would match only the 14
-    # nested ones, missing lib.rs, main.rs and dialog.rs.)
-    out = subprocess.run(
-        ["git", "ls-files", "-z", "src-tauri/src/*.rs"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    return sorted(entry for entry in out.split("\0") if entry)
+    try:
+        completed = subprocess.run(
+            ["git", "ls-files", "-z", "src-tauri/src/*.rs"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        # capture_output hides git's stderr, and CalledProcessError does not
+        # include it in its message, so without this a failure here (not a
+        # repo, no git on PATH, bad pathspec) reaches the log as a bare
+        # traceback saying only that the exit status was non-zero.
+        raise RuntimeError(
+            f"git ls-files failed ({error.returncode}): {error.stderr.strip()}"
+        ) from error
+    return sorted(entry for entry in completed.stdout.split("\0") if entry)
 
 
 def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
