@@ -460,10 +460,16 @@ jobs:
               ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*)
                 return 0 ;;
             esac
-            [ -e "$LIB_DIR/$base" ] && return 0
+            # Skip if sharun already bundled this lib anywhere under shared/,
+            # including the multiarch subdirs (shared/lib/x86_64-linux-gnu, seen
+            # in the wild per platform/linux.rs) — copying a second host-sourced
+            # copy risks a version-skewed duplicate of a lib the app loads.
+            [ -n "$(find "$APPDIR/shared" -name "$base" -print -quit 2>/dev/null)" ] && return 0
             cp -L "$src" "$LIB_DIR/$base"
             # Resolve co-bundled deps relative to the library's own directory.
-            patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base" || true
+            if ! patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base"; then
+              echo "::warning::patchelf --set-rpath failed for $base; co-bundled deps may not resolve at runtime"
+            fi
           }
 
           copy_dep "$APPINDICATOR"
