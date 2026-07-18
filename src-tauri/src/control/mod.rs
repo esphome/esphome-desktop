@@ -10,6 +10,7 @@ pub mod client;
 pub mod ops;
 pub mod protocol;
 pub mod server;
+pub mod update_check;
 
 /// The running AppImage's own path from `$APPIMAGE`, if set and non-empty.
 /// `current_exe` is unusable under an AppImage: it points inside the FUSE
