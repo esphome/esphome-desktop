@@ -4,9 +4,9 @@
 //! a one-shot request/reply exchange needs. `logs` never touches the channel
 //! at all — the log paths are deterministic from the bundle identifier.
 
-use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
 use std::io::Read;
+use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
