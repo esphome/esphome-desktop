@@ -1287,8 +1287,9 @@ fn is_missing_record_error(stderr: &str) -> bool {
 /// `run` performs a normal install. If it aborts because a package has no
 /// `dist-info/RECORD` (`is_missing_record_error`), the tree is corrupt rather
 /// than the install being wrong, so `repair` restores it and `run` is tried once
-/// more against the clean tree. Any other failure bails immediately, surfacing
-/// the original stderr.
+/// more against the clean tree. Any other failure bails immediately, reported
+/// through [`platform::pip_output_report`] so a resolution failure carries its
+/// cause from both of pip's streams.
 ///
 /// The repair puts back the version the user had and `run` then installs the
 /// target over it, so this path can pip-install twice. That is deliberate, not
@@ -1330,7 +1331,7 @@ where
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !is_missing_record_error(&stderr) {
-        anyhow::bail!("{fail_prefix}: {stderr}");
+        anyhow::bail!("{fail_prefix}: {}", platform::pip_output_report(&output));
     }
 
     info!("{fail_prefix}: missing RECORD file; repairing the Python tree");
@@ -1341,7 +1342,7 @@ where
         info!("{success_msg} (after repairing the Python tree)");
         Ok(())
     } else {
-        anyhow::bail!("{fail_prefix}: {}", String::from_utf8_lossy(&retry.stderr));
+        anyhow::bail!("{fail_prefix}: {}", platform::pip_output_report(&retry));
     }
 }
 

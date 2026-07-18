@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use super::process::{
-    configure_no_window_tokio_command, isolate_python_command, python_command, run_bounded,
-    tail_for_log, BoundedRun,
+    configure_no_window_tokio_command, head_for_log, isolate_python_command, python_command,
+    run_bounded, tail_for_log, BoundedRun,
 };
 
 /// Hard upper bound on a single `pip install` invocation during the
@@ -30,27 +30,72 @@ pub(super) fn pip_install_blocking(python_bin: &Path, package: &str, version: &s
     // The builder isolates the interpreter; pip needs its own env off too, and
     // every edit is an idempotent `env`/`env_remove`, so layering is a no-op.
     isolate_pip_command(&mut cmd);
-    // stderr only: pip's diagnostics go there, and nothing reads its stdout —
-    // which also keeps its resolver output out of the capture buffer entirely.
+    // Both streams: pip logs a resolution failure's headline at CRITICAL
+    // (stderr) but the block explaining WHICH requirements conflict at INFO
+    // (stdout). This is a GUI process, so inherited stdout goes nowhere, and
+    // stderr alone reports the symptom with none of the cause (#339).
+    cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let stderr_tail = |bytes: &[u8]| tail_for_log(&String::from_utf8_lossy(bytes));
     match run_bounded(cmd, PIP_INSTALL_TIMEOUT).context("Failed to run pip install")? {
         BoundedRun::Exited(output) if output.status.success() => Ok(()),
         BoundedRun::Exited(output) => {
             anyhow::bail!(
                 "pip install {} failed: {}",
                 spec,
-                stderr_tail(&output.stderr)
+                pip_output_report(&output)
             )
         }
         BoundedRun::TimedOut { stderr } => anyhow::bail!(
             "pip install {} timed out after {:?}; partial stderr: {}",
             spec,
             PIP_INSTALL_TIMEOUT,
-            stderr_tail(&stderr)
+            tail_for_log(&String::from_utf8_lossy(&stderr))
         ),
     }
+}
+
+/// Start of the block in which pip explains a resolution failure.
+const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
+
+/// Build the reported text for a failed pip install from its two streams.
+///
+/// pip splits a resolution failure across both. stderr carries the headline
+/// alone — `ERROR: Cannot install esphome and esphome==2026.7.0 because these
+/// package versions have conflicting dependencies` — because that line is the
+/// only part logged at CRITICAL. The block naming *which* requirements
+/// conflict, and whether one has no distribution for this environment at all,
+/// is logged at INFO and therefore goes to stdout. Reporting stderr alone left
+/// a bug report holding the symptom and none of the cause (#327, #339).
+///
+/// Everything from the marker onwards is that diagnostic, so append that and
+/// nothing else: earlier stdout is `Collecting`/`Downloading` progress that
+/// would bury it. A failure pip words differently (a build error, no network)
+/// has no marker and reports stderr alone.
+///
+/// Each half is bounded on its own, because their interesting ends differ:
+/// stderr's actionable line is last (tail), while the diagnostic opens with
+/// the conflicting requirements and trails off into generic advice (head).
+/// Bounding the joined report instead would let a long diagnostic evict the
+/// headline and its own opening — the symptom and the cause — keeping only
+/// the boilerplate.
+fn pip_failure_report(stdout: &str, stderr: &str) -> String {
+    let stderr = tail_for_log(stderr);
+    match stdout.find(PIP_CONFLICT_MARKER) {
+        Some(start) => format!("{stderr}\n{}", head_for_log(&stdout[start..])),
+        None => stderr,
+    }
+}
+
+/// [`pip_failure_report`] over a captured pip [`std::process::Output`].
+/// Already bounded, so callers put it in an error or a log line as is.
+/// `pub` because the update flows report their pip failures through the same
+/// extraction (see `install_with_record_recovery`).
+pub fn pip_output_report(output: &std::process::Output) -> String {
+    pip_failure_report(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
 }
 
 /// pip settings that would send an install somewhere other than the managed
@@ -164,7 +209,9 @@ pub async fn run_pip(mut cmd: tokio::process::Command) -> std::io::Result<std::p
 
 #[cfg(test)]
 mod tests {
-    use super::super::process::{env_edits, PYTHON_ISOLATION_REMOVE, PYTHON_ISOLATION_SET};
+    use super::super::process::{
+        env_edits, LOG_TAIL_BYTES, PYTHON_ISOLATION_REMOVE, PYTHON_ISOLATION_SET,
+    };
     use super::*;
 
     /// pip resolves and installs against the same interpreter the backend runs
@@ -256,5 +303,93 @@ mod tests {
             );
             assert!(!removed.contains(&var.to_string()));
         }
+    }
+
+    /// pip stdout for the #327 failure: progress noise, then the diagnostic.
+    const CONFLICT_STDOUT: &str = "Collecting esphome==2026.7.0\n  Using cached esphome-2026.7.0-py3-none-any.whl\nINFO: pip is looking at multiple versions of esphome\n\nThe conflict is caused by:\n    The user requested esphome==2026.7.0\n    esphome 2026.7.0 depends on some-dep>=2\n\nAdditionally, some packages in these conflicts have no matching distributions available for your environment:\n    some-dep\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n";
+
+    /// pip stderr for the same failure: the headline, and nothing else.
+    const CONFLICT_STDERR: &str = "ERROR: Cannot install esphome and esphome==2026.7.0 because these package versions have conflicting dependencies.\nERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/\n";
+
+    #[test]
+    fn pip_failure_report_keeps_the_conflict_diagnostic() {
+        // #327: stderr alone says two requirements conflict but never which,
+        // so the report must carry stdout's block — including the line naming
+        // the dependency with no distribution for this environment, which is
+        // the whole reason the pinned install cannot resolve.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(report.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(report.contains("The conflict is caused by:"));
+        assert!(report.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(report.contains("no matching distributions available for your environment"));
+    }
+
+    #[test]
+    fn pip_failure_report_drops_progress_noise_before_the_marker() {
+        // Only the diagnostic tail is wanted; the Collecting/Downloading
+        // chatter ahead of it would bury the cause in the dialog and the log.
+        let report = pip_failure_report(CONFLICT_STDOUT, CONFLICT_STDERR);
+        assert!(!report.contains("Collecting esphome==2026.7.0"));
+        assert!(!report.contains("Using cached"));
+    }
+
+    #[test]
+    fn pip_failure_report_bounds_a_huge_diagnostic_without_losing_its_start() {
+        // A real resolution failure can push the conflict block far past the
+        // log cap. Tailing the joined report would evict the stderr headline
+        // and the block's opening — the packages that actually conflict —
+        // keeping only pip's trailing boilerplate advice. Each half is
+        // bounded on its own instead, so both survive.
+        let huge_stdout = format!(
+            "Collecting esphome==2026.7.0\nThe conflict is caused by:\n    \
+             esphome 2026.7.0 depends on some-dep>=2\n{}",
+            "x".repeat(LOG_TAIL_BYTES * 3)
+        );
+        let report = pip_failure_report(&huge_stdout, CONFLICT_STDERR);
+        assert!(report.contains("ERROR: Cannot install esphome and esphome==2026.7.0"));
+        assert!(report.contains("The conflict is caused by:"));
+        assert!(report.contains("esphome 2026.7.0 depends on some-dep>=2"));
+        assert!(report.contains("...(truncated to first"));
+        assert!(
+            report.len() <= 2 * LOG_TAIL_BYTES + 100,
+            "report is bounded"
+        );
+    }
+
+    #[test]
+    fn pip_failure_report_without_a_marker_is_stderr_alone() {
+        // A failure pip words differently (a build error, no network) has no
+        // marker, and must report exactly what it did before.
+        let report = pip_failure_report(
+            "Collecting esphome==2026.7.0\n",
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0\n",
+        );
+        assert_eq!(
+            report,
+            "ERROR: Could not find a version that satisfies the requirement esphome==2026.7.0"
+        );
+    }
+
+    /// The wiring the pure tests above cannot see: both streams are actually
+    /// piped and drained into the report. A stub pip prints the resolution
+    /// story the way the real one splits it (headline on stderr, marker block
+    /// on stdout) and exits 1; un-piping stdout again would reproduce #339,
+    /// an error holding the symptom and none of the cause.
+    #[cfg(unix)]
+    #[test]
+    fn pip_install_blocking_failure_carries_the_stdout_diagnostic() {
+        let base = crate::util::unique_temp_dir("pip-blocking-diagnostic");
+        let bin = crate::platform::python_env::write_stub_interpreter(
+            &base,
+            "echo 'The conflict is caused by:'\n\
+             echo 'ERROR: ResolutionImpossible' >&2\n\
+             exit 1",
+        );
+
+        let err = pip_install_blocking(&bin, "esphome", "2026.7.0").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("ERROR: ResolutionImpossible"), "{msg}");
+        assert!(msg.contains("The conflict is caused by:"), "{msg}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

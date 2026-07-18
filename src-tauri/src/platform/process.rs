@@ -12,28 +12,47 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
-/// Maximum length of pip stderr included in a failure error message. pip's
-/// resolver and progress output can run to many kilobytes; the actionable
-/// failure reason is almost always at the tail, so we truncate to the last
-/// N bytes to keep log lines (and downstream UI surfaces) bounded.
-const PIP_STDERR_TAIL_BYTES: usize = 4096;
+/// Maximum length of a child's output included in a failure error message.
+/// pip's resolver and progress output can run to many kilobytes; the
+/// actionable failure reason is almost always at the tail, so we truncate to
+/// the last N bytes to keep log lines (and downstream UI surfaces) bounded.
+pub(super) const LOG_TAIL_BYTES: usize = 4096;
 
-/// Return `s` trimmed and truncated to the last [`PIP_STDERR_TAIL_BYTES`]
-/// bytes, with a marker line if anything was dropped. Backs up to a UTF-8
-/// char boundary so the result is always valid `str`.
+/// Return `s` trimmed and truncated to the last [`LOG_TAIL_BYTES`] bytes,
+/// with a marker line if anything was dropped. Backs up to a UTF-8 char
+/// boundary so the result is always valid `str`.
 pub(super) fn tail_for_log(s: &str) -> String {
     let trimmed = s.trim();
-    if trimmed.len() <= PIP_STDERR_TAIL_BYTES {
+    if trimmed.len() <= LOG_TAIL_BYTES {
         return trimmed.to_string();
     }
-    let mut start = trimmed.len() - PIP_STDERR_TAIL_BYTES;
+    let mut start = trimmed.len() - LOG_TAIL_BYTES;
     while start < trimmed.len() && !trimmed.is_char_boundary(start) {
         start += 1;
     }
     format!(
-        "...(stderr truncated to last {} bytes)\n{}",
-        PIP_STDERR_TAIL_BYTES,
+        "...(truncated to last {} bytes)\n{}",
+        LOG_TAIL_BYTES,
         &trimmed[start..]
+    )
+}
+
+/// [`tail_for_log`]'s counterpart for text whose interesting part comes
+/// first: `s` trimmed and truncated to the first [`LOG_TAIL_BYTES`] bytes,
+/// with a marker line if anything was dropped.
+pub(super) fn head_for_log(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() <= LOG_TAIL_BYTES {
+        return trimmed.to_string();
+    }
+    let mut end = LOG_TAIL_BYTES;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n...(truncated to first {} bytes)",
+        &trimmed[..end],
+        LOG_TAIL_BYTES
     )
 }
 
@@ -1027,7 +1046,7 @@ mod tests {
 
     #[test]
     fn tail_for_log_keeps_input_at_exactly_the_limit() {
-        let s = "a".repeat(PIP_STDERR_TAIL_BYTES);
+        let s = "a".repeat(LOG_TAIL_BYTES);
         let out = tail_for_log(&s);
         assert_eq!(out, s, "input exactly at the limit must pass through");
         assert!(!out.contains("truncated"), "no marker at the boundary");
@@ -1035,16 +1054,10 @@ mod tests {
 
     #[test]
     fn tail_for_log_truncates_to_the_tail_with_marker() {
-        let s = "x".repeat(PIP_STDERR_TAIL_BYTES + 904);
+        let s = "x".repeat(LOG_TAIL_BYTES + 904);
         let out = tail_for_log(&s);
-        assert!(
-            out.starts_with("...(stderr truncated"),
-            "marker comes first"
-        );
-        assert!(
-            out.ends_with(&s[s.len() - PIP_STDERR_TAIL_BYTES..]),
-            "keeps tail"
-        );
+        assert!(out.starts_with("...(truncated"), "marker comes first");
+        assert!(out.ends_with(&s[s.len() - LOG_TAIL_BYTES..]), "keeps tail");
     }
 
     #[test]
@@ -1057,10 +1070,7 @@ mod tests {
         let out = tail_for_log(&s);
         assert!(out.contains("truncated"), "long input must be marked");
         let tail = out.split_once('\n').unwrap().1;
-        assert!(
-            tail.len() <= PIP_STDERR_TAIL_BYTES,
-            "tail stays within bound"
-        );
+        assert!(tail.len() <= LOG_TAIL_BYTES, "tail stays within bound");
         assert!(tail.chars().all(|c| c == '€'), "no partial char survives");
     }
 
@@ -1144,4 +1154,18 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     const TEST_PYTHON: &str = "python";
+
+    #[test]
+    fn head_for_log_does_not_split_a_multibyte_char() {
+        // Mirror of the tail_for_log boundary test: 1366 * 3 bytes = 4098 >
+        // 4096, and the naive cut at byte 4096 lands mid-"€". The function
+        // backs up to the previous char boundary, so the slice stays valid
+        // UTF-8 and never panics.
+        let s = "€".repeat(1366);
+        let out = head_for_log(&s);
+        assert!(out.ends_with("bytes)"), "long input must be marked");
+        let head = out.split_once('\n').unwrap().0;
+        assert!(head.len() <= LOG_TAIL_BYTES, "head stays within bound");
+        assert!(head.chars().all(|c| c == '€'), "no partial char survives");
+    }
 }

@@ -521,6 +521,21 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Test helper: write an executable `python3` shell script into `dir` whose
+/// body is `body`, and return its path. Module-level (like
+/// [`crate::util::unique_temp_dir`]) so sibling modules' tests can stub an
+/// interpreter without re-writing the shebang/chmod recipe.
+#[cfg(test)]
+#[cfg(unix)]
+pub(super) fn write_stub_interpreter(dir: &Path, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let bin = dir.join("python3");
+    std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,16 +747,6 @@ mod tests {
             err.to_string().contains("esphome"),
             "error names the package"
         );
-    }
-
-    #[cfg(unix)]
-    fn write_stub_interpreter(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(dir).unwrap();
-        let bin = dir.join("python3");
-        std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        bin
     }
 
     #[cfg(unix)]
