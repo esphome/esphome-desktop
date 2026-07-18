@@ -454,12 +454,20 @@ jobs:
           # ABI-consistent. ldd already resolves the closure recursively, so a
           # single pass is enough.
           copy_dep() {
-            local src="$1" base
+            local src="$1" base soname
             base=$(basename "$src")
             case "$base" in
               ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*)
                 return 0 ;;
             esac
+            # Name the bundled file after the ELF SONAME, not the on-disk
+            # filename. ldconfig/ldd may resolve to a fully-versioned real file
+            # (e.g. libfoo.so.1.2.3), but the loader — and the dlopen() by bare
+            # soname described above — searches by SONAME (libfoo.so.1). Bundle
+            # under the SONAME so runtime resolution finds it; fall back to the
+            # basename only if the object has no SONAME.
+            soname=$(patchelf --print-soname "$src" 2>/dev/null || true)
+            [ -n "$soname" ] && base="$soname"
             # Skip if sharun already bundled this lib anywhere under shared/,
             # including the multiarch subdirs (shared/lib/x86_64-linux-gnu, seen
             # in the wild per platform/linux.rs) — copying a second host-sourced
@@ -467,8 +475,12 @@ jobs:
             [ -n "$(find "$APPDIR/shared" -name "$base" -print -quit 2>/dev/null)" ] && return 0
             cp -L "$src" "$LIB_DIR/$base"
             # Resolve co-bundled deps relative to the library's own directory.
+            # patchelf is installed by linux-tauri-deps; a failure here would
+            # ship a lib that resolves against the host and silently regress the
+            # tray, so fail the build loud rather than continue.
             if ! patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base"; then
-              echo "::warning::patchelf --set-rpath failed for $base; co-bundled deps may not resolve at runtime"
+              echo "::error::patchelf --set-rpath failed for $base; refusing to ship an AppImage whose bundled libs resolve against the host (issue #87)"
+              exit 1
             fi
           }
 
