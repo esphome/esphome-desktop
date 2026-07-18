@@ -212,10 +212,16 @@ jobs:
           targets: ${{ matrix.rust_target }}
           cache-key: ${{ matrix.target }}
 
-      # Resolve a tauri-cli version from the locked `tauri` crate version so it
-      # tracks Dependabot's cargo bumps automatically (no hardcoded version to go
-      # stale). Used for the prebuilt install on the stock jobs below. The
-      # AppImage jobs build a pinned fork instead, so they skip this.
+      # Resolve a tauri-cli requirement from the locked `tauri` crate's
+      # major.minor so it tracks Dependabot's cargo bumps automatically (no
+      # hardcoded version to go stale). We pin the minor line, not the exact
+      # patch: `tauri` (the library) and `tauri-cli` publish on independent
+      # cadences, so an exact-patch pin breaks whenever they diverge by a patch
+      # (e.g. library 2.11.5 with no matching CLI 2.11.5). A `~major.minor`
+      # requirement installs the newest CLI patch in the same minor, which Tauri
+      # keeps compatible with the library. Used for the prebuilt install on the
+      # stock jobs below; the AppImage jobs build a pinned fork instead, so they
+      # skip this.
       - name: Resolve Tauri CLI version
         if: ${{ !matrix.tauri_rev }}
         shell: bash
@@ -231,8 +237,11 @@ jobs:
             echo "::error::unexpected tauri version from src-tauri/Cargo.lock: '$ver'"
             exit 1
           fi
-          echo "TAURI_CLI_VERSION=$ver" >> "$GITHUB_ENV"
-          echo "Resolved tauri-cli version: $ver"
+          # Derive the minor line (2.11.5 -> 2.11) from the already-validated
+          # string, then hand cargo-binstall a `~2.11` requirement.
+          minor=$(echo "$ver" | cut -d. -f1,2)
+          echo "TAURI_CLI_VERSION=~$minor" >> "$GITHUB_ENV"
+          echo "Resolved tauri-cli requirement: ~$minor (from tauri $ver)"
 
       # Stock jobs install a prebuilt cargo-tauri via cargo-binstall (seconds)
       # rather than compiling tauri-cli from source, which dominated the per-job
