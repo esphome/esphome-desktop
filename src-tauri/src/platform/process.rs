@@ -1343,7 +1343,11 @@ mod tests {
                  sys.stderr.write('GRANDCHILD_PID=%d\\n'%p.pid); sys.stderr.flush(); \
                  time.sleep(600)",
             ],
-            std::time::Duration::from_secs(2),
+            // Generous enough that a cold, loaded CI interpreter has surely
+            // spawned the grandchild and written its pid before the bound fires
+            // (both then sleep far longer); a tighter bound could kill the child
+            // mid-startup and leave no pid to assert on.
+            std::time::Duration::from_secs(5),
         );
         let err = out.expect_err("the child never exits, so this must time out");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
