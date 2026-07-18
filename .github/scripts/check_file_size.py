@@ -45,7 +45,6 @@ EXEMPT: frozenset[str] = frozenset(
         "src-tauri/src/update/mod.rs",
         "src-tauri/src/tray/mod.rs",
         "src-tauri/src/control/client.rs",
-        "src-tauri/src/control/ops.rs",
         "src-tauri/src/lib.rs",
     }
 )

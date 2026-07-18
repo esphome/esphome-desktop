@@ -15,6 +15,7 @@ use super::ops::{self, SwitchOutcome, UpdateGuard};
 use super::protocol::{
     self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, UpdateCheckReply,
 };
+use super::update_check;
 use crate::AppState;
 
 /// Backoff before retrying a failed accept or pipe re-create, so a
@@ -479,8 +480,8 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
     // them concurrently so `status` pays the slowest, not the sum.
     let (backend_healthy, esphome_version, device_builder_version, launch_at_startup) = tokio::join!(
         async { crate::daemon::health_check(port).await.unwrap_or(false) },
-        ops::detect(app, crate::update::installed_esphome_version),
-        ops::detect(app, crate::update::get_installed_device_builder_version),
+        update_check::detect(app, crate::update::installed_esphome_version),
+        update_check::detect(app, crate::update::get_installed_device_builder_version),
         ops::startup_enabled(app, launch_fallback),
     );
     let esphome_version = esphome_version.ok().flatten();
@@ -511,9 +512,9 @@ async fn build_update_check(app: &AppHandle, state: &Arc<AppState>) -> UpdateChe
         (settings.release_channel, settings.backend)
     };
     let (app_update, esphome, device_builder) = tokio::join!(
-        ops::desktop_update_available(app),
-        ops::esphome_update_available(app, state, channel),
-        ops::device_builder_update_available(app, state, backend),
+        update_check::desktop_update_available(app),
+        update_check::esphome_update_available(app, state, channel),
+        update_check::device_builder_update_available(app, state, backend),
     );
     UpdateCheckReply {
         any_available: app_update.available || esphome.available || device_builder.available,
