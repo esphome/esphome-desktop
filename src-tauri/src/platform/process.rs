@@ -1242,20 +1242,34 @@ mod tests {
             .ok()
     }
 
+    /// Assert `pid` (a grandchild the bounded call should have reaped) is dead.
+    ///
+    /// Unix: a SIGKILL'd grandchild is reaped by init asynchronously, so poll --
+    /// signal 0 probes existence and ESRCH means gone. pid reuse in the poll
+    /// window is not a concern here (sequential, slow-cycling pids).
     #[cfg(not(target_os = "windows"))]
-    fn pid_is_alive(pid: u32) -> bool {
+    fn assert_pid_reaped(pid: u32) {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
-        // Signal 0 probes existence; ESRCH means gone (and reaped). A zombie
-        // still reports alive, which is why the caller polls until it clears.
-        !matches!(
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(
             kill(Pid::from_raw(pid as i32), None),
             Err(nix::errno::Errno::ESRCH)
-        )
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild pid {pid} survived the bounded call; the tree was not reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
+    /// Windows: open ONE handle and wait on it rather than re-opening by pid
+    /// each poll -- the handle pins this exact process object, so a pid recycled
+    /// on a busy runner can't make a dead grandchild look alive. A failed open
+    /// means the process is already gone.
     #[cfg(target_os = "windows")]
-    fn pid_is_alive(pid: u32) -> bool {
+    fn assert_pid_reaped(pid: u32) {
         use ::windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use ::windows::Win32::System::Threading::{
             OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
@@ -1263,25 +1277,14 @@ mod tests {
         // SAFETY: OpenProcess by pid; the handle is closed on every path.
         unsafe {
             let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
-                return false; // no such process -> gone
+                return;
             };
-            let waited = WaitForSingleObject(handle, 0);
+            let waited = WaitForSingleObject(handle, 10_000);
             let _ = CloseHandle(handle);
-            waited != WAIT_OBJECT_0 // signaled == terminated == not alive
-        }
-    }
-
-    /// Assert `pid` is no longer a live process, polling briefly: a SIGKILL'd
-    /// grandchild is reaped by init asynchronously on Unix, so it does not vanish
-    /// the instant the bounded call returns.
-    fn assert_pid_reaped(pid: u32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while pid_is_alive(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
+            assert_eq!(
+                waited, WAIT_OBJECT_0,
                 "grandchild pid {pid} survived the bounded call; the tree was not reaped"
             );
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
