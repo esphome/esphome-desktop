@@ -53,9 +53,16 @@ jobs:
           # this job sees the newest head and can only cancel runs the newest
           # push has itself superseded, never the newest run.
           current=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq .head.sha)
-          # An empty anchor must abort: the filter below would otherwise
-          # match every active run, including the current head's.
-          [ -n "$current" ] || exit 0
+          # Anything but a full commit sha aborts, loudly: jq renders a
+          # missing field as the non-empty string "null", and any such
+          # degenerate anchor would make the filter below match every active
+          # run, including the current head's. Failing the step (rather than
+          # a silent exit 0) leaves an annotation to find when the canceller
+          # stops cancelling; continue-on-error keeps it from blocking anyone.
+          if ! printf '%s' "$current" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::unexpected PR head sha '$current'; refusing to cancel anything"
+            exit 1
+          fi
           export CURRENT="$current"
           # head_branch alone is not unique across forks (two forks can share
           # a branch name), so match the head repository too, or we could
