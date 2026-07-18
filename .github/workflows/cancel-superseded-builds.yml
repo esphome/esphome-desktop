@@ -31,6 +31,10 @@ jobs:
     continue-on-error: true
     permissions:
       actions: write
+      # For the head-sha read below; without it the PR lookup is denied (the
+      # determine-jobs job in build.yml documents the same requirement) and
+      # continue-on-error would hide the resulting silent no-op.
+      pull-requests: read
     steps:
       - name: Cancel Build runs for commits this PR has moved past
         env:
@@ -49,6 +53,9 @@ jobs:
           # this job sees the newest head and can only cancel runs the newest
           # push has itself superseded, never the newest run.
           current=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq .head.sha)
+          # An empty anchor must abort: the filter below would otherwise
+          # match every active run, including the current head's.
+          [ -n "$current" ] || exit 0
           export CURRENT="$current"
           # head_branch alone is not unique across forks (two forks can share
           # a branch name), so match the head repository too, or we could
