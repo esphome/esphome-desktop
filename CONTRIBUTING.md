@@ -57,7 +57,7 @@ locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 The first-party Python (the release tooling under `.github/scripts/` and the
 runtime helpers under `src-tauri/scripts/` that the Rust binary embeds) is gated
 by the `Scripts Test` workflow, which lints with `ruff` and runs the `pytest`
-suite across macOS, Windows, and Linux on the CPython 3.13 line we bundle:
+suite across macOS, Windows, and Linux on the CPython 3.14 line we bundle:
 
 ```bash
 python3 -m pip install pytest ruff   # one-time

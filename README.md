@@ -9,7 +9,7 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 - **Auto-Updates**: Checks for ESPHome (Python) updates and notifies you
 - **Self-Updating App**: macOS DMG, Windows NSIS, and Linux AppImage installs can update themselves in-place from GitHub Releases
 - **Cross-Platform**: Native installers for macOS (DMG), Windows (NSIS), and Linux (AppImage/deb)
-- **Bundled Python**: Includes a full Python 3.13 runtime - no system Python required
+- **Bundled Python**: Includes a full Python 3.14 runtime - no system Python required
 
 ## Installation
 
