@@ -16,7 +16,7 @@
 
 set -e
 
-PYTHON_VERSION="3.13.14"
+PYTHON_VERSION="3.14.6"
 PBS_VERSION="20260718"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
@@ -419,7 +419,7 @@ EOF
 # machine the kernel can't find the interpreter and every `esphome`,
 # `platformio`, `pip`, … invocation fails silently (see issue #34).
 # Replace each shebang with the same sh/Python polyglot that
-# python-build-standalone uses for its own scripts (idle3, pydoc3.13, …),
+# python-build-standalone uses for its own scripts (idle3, pydoc3.14, …),
 # so the whole bin/ directory is consistent and relocatable.
 # Windows uses .exe launchers (not text scripts) so it's not called there.
 make_scripts_relocatable() {
