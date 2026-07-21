@@ -543,6 +543,15 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/e2e_windows_backend_lifetime.ps1
 
+      # The firewall pairing flow (#384): the app must settle without a
+      # prompt when the rule already exists, an update-mode uninstall must
+      # keep the rule, a real uninstall must remove it. Runs after the
+      # lifetime script, which leaves the runner uninstalled.
+      - name: E2E firewall rule (Windows CI)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_firewall.ps1
+
       - name: Upload NSIS updater signature
         if: contains(matrix.bundles, 'nsis') && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
