@@ -39,7 +39,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       # Pin ruff exactly: its lint rules and formatter output can change between
       # releases, so an unpinned upgrade could fail this gate on an unrelated PR
@@ -64,7 +64,7 @@ jobs:
         # The device-builder maintenance helper depends on importlib.metadata
         # behavior and filesystem semantics that differ by OS (the #190 loop
         # manifested on Windows), so exercise every platform we ship. We bundle
-        # CPython 3.13, so that is the only version worth testing.
+        # CPython 3.14, so that is the only version worth testing.
         os: [ubuntu-22.04, macos-15, windows-latest]
     steps:
       - name: Checkout
@@ -73,7 +73,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       # Pin to a major so a breaking/yanked pytest release can't fail this gate
       # on unrelated PRs (same reasoning the repo pins the Rust toolchain).
