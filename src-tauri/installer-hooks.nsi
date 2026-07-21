@@ -31,19 +31,22 @@
 ; must keep the rule.
 !define FIREWALL_RULE_NAME "ESPHome Device Builder"
 
+; netsh and powershell by absolute $SYSDIR paths throughout: the fallback
+; runs elevated, and a by-name lookup could resolve a planted binary from a
+; user-writable directory into that elevation.
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
-    nsExec::ExecToStack 'netsh advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
+    nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
     Pop $0
     Pop $1
     ${If} $0 == "0"
       DetailPrint "Removing firewall rule..."
-      nsExec::ExecToStack 'netsh advfirewall firewall delete rule name="${FIREWALL_RULE_NAME}"'
+      nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${FIREWALL_RULE_NAME}"'
       Pop $0
       Pop $1
       ${If} $0 != "0"
       ${AndIfNot} ${Silent}
-        ExecWait `powershell -NoProfile -NonInteractive -Command "Start-Process -FilePath netsh.exe -ArgumentList 'advfirewall firewall delete rule name=\"${FIREWALL_RULE_NAME}\"' -Verb RunAs -Wait"`
+        ExecWait `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Start-Process -FilePath '$SYSDIR\netsh.exe' -ArgumentList 'advfirewall firewall delete rule name=\"${FIREWALL_RULE_NAME}\"' -Verb RunAs -Wait"`
       ${EndIf}
     ${EndIf}
   ${EndIf}

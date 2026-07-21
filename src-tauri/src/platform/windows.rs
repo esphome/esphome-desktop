@@ -117,10 +117,21 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
     });
 }
 
+/// Absolute path of a binary under `System32`. The firewall flow launches an
+/// *elevated* subprocess, and both `CreateProcessW` and `ShellExecuteEx`
+/// include the current directory in their by-name search order — a planted
+/// `netsh.exe` in a user-writable CWD would run as administrator behind the
+/// one UAC prompt the user expects. Resolving from `%SystemRoot%` pins the
+/// real binaries; the unelevated query uses it too for consistency.
+fn system32(tail: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    Path::new(&root).join("System32").join(tail)
+}
+
 /// Whether a rule named [`FIREWALL_RULE_NAME`] exists. Querying the firewall
 /// needs no elevation; `netsh` exits non-zero when no rule matches.
 fn firewall_rule_exists() -> bool {
-    let mut cmd = std::process::Command::new("netsh");
+    let mut cmd = std::process::Command::new(system32("netsh.exe"));
     cmd.args([
         "advfirewall",
         "firewall",
@@ -153,10 +164,14 @@ fn netsh_add_rule_args(python_exe: &Path) -> String {
 fn add_firewall_rule(python_exe: &Path) -> Result<()> {
     // PowerShell single-quoted strings escape ' by doubling it.
     let netsh_args = netsh_add_rule_args(python_exe).replace('\'', "''");
+    let netsh = system32("netsh.exe")
+        .display()
+        .to_string()
+        .replace('\'', "''");
     let command =
-        format!("Start-Process -FilePath netsh.exe -ArgumentList '{netsh_args}' -Verb RunAs -Wait");
+        format!("Start-Process -FilePath '{netsh}' -ArgumentList '{netsh_args}' -Verb RunAs -Wait");
 
-    let mut cmd = std::process::Command::new("powershell");
+    let mut cmd = std::process::Command::new(system32(r"WindowsPowerShell\v1.0\powershell.exe"));
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
     configure_no_window_command(&mut cmd);
     let output = cmd.output().context("Failed to run powershell")?;
