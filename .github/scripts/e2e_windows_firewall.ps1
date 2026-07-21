@@ -20,7 +20,6 @@ $ErrorActionPreference = 'Stop'
 # drift without anything failing.
 $conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
 $InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
-$AppDataDir = Join-Path $env:APPDATA $conf.identifier
 $LocalDataDir = Join-Path $env:LOCALAPPDATA $conf.identifier
 
 $src = Get-Content 'src-tauri/src/platform/windows.rs' -Raw
@@ -31,7 +30,8 @@ $RuleName = $Matches[1]
 if ($src -notmatch 'MARKER_NAME: &str = "([^"]+)"') {
     throw 'could not read MARKER_NAME from src/platform/windows.rs'
 }
-$Marker = Join-Path $AppDataDir $Matches[1]
+# Machine local on purpose, next to the managed tree; see MARKER_NAME's doc.
+$Marker = Join-Path $LocalDataDir $Matches[1]
 
 # Mirrors managed_interpreter_path in src-tauri/src/platform/mod.rs: the
 # interpreter the daemon actually runs, and therefore the path the rule is

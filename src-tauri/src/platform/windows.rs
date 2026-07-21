@@ -23,9 +23,11 @@ use super::process::configure_no_window_command;
 /// spellings in sync.
 const FIREWALL_RULE_NAME: &str = "ESPHome Device Builder";
 
-/// Marker file in the app data dir recording that the flow already ran, so
-/// later launches stop at one file stat (same pattern as
-/// `cleanup_legacy_macos_app`).
+/// Marker file recording that the flow already settled, so later launches
+/// stop at one file stat. It lives in the machine-local data dir
+/// (`get_python_parent_dir`), not the roaming one: the rule is per machine,
+/// and a marker that roamed to another machine would suppress the prompt
+/// where the rule does not exist.
 const MARKER_NAME: &str = ".windows_firewall_prompt";
 
 pub fn init(app_handle: &AppHandle) {
@@ -37,14 +39,17 @@ pub fn init(app_handle: &AppHandle) {
 /// `netsh` probe included, runs off the setup thread, and every failure is
 /// logged and dropped.
 fn ensure_firewall_rule(app_handle: &AppHandle) {
-    let data_dir = match super::get_data_dir(app_handle) {
+    let local_dir = match super::get_python_parent_dir(app_handle) {
         Ok(d) => d,
         Err(e) => {
-            debug!("Skipping firewall prompt; data dir unavailable: {}", e);
+            debug!(
+                "Skipping firewall prompt; local data dir unavailable: {}",
+                e
+            );
             return;
         }
     };
-    let marker = data_dir.join(MARKER_NAME);
+    let marker = local_dir.join(MARKER_NAME);
     if marker.exists() {
         return;
     }
@@ -85,15 +90,25 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
             if confirmed {
                 match tokio::task::spawn_blocking(move || add_firewall_rule(&python_exe)).await {
                     Ok(Ok(())) => info!("Added firewall rule {:?}", FIREWALL_RULE_NAME),
-                    Ok(Err(e)) => warn!("Failed to add firewall rule: {}", e),
-                    Err(e) => warn!("Firewall rule task failed: {}", e),
+                    // The user wanted the rule but did not get it — a
+                    // declined or mis-clicked UAC prompt, a transient netsh
+                    // failure. Skip the marker so the next launch retries;
+                    // only a settled outcome (rule present, or an explicit
+                    // decline of the dialog) is final.
+                    Ok(Err(e)) => {
+                        warn!("Failed to add firewall rule: {}", e);
+                        return;
+                    }
+                    Err(e) => {
+                        warn!("Firewall rule task failed: {}", e);
+                        return;
+                    }
                 }
             }
         }
 
-        // Written regardless of the outcome (also when the rule already
-        // exists) so the user is not nagged and later launches stop at the
-        // marker check above.
+        // Rule present or dialog declined: settled, so the user is not
+        // nagged and later launches stop at the marker check above.
         if let Err(e) = std::fs::write(&marker, "") {
             warn!("Failed to write firewall-prompt marker: {}", e);
         }
