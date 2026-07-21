@@ -88,19 +88,19 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
             .await;
 
             if confirmed {
-                match tokio::task::spawn_blocking(move || add_firewall_rule(&python_exe)).await {
-                    Ok(Ok(())) => info!("Added firewall rule {:?}", FIREWALL_RULE_NAME),
+                let added = tokio::task::spawn_blocking(move || add_firewall_rule(&python_exe))
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|r| r);
+                match added {
+                    Ok(()) => info!("Added firewall rule {:?}", FIREWALL_RULE_NAME),
                     // The user wanted the rule but did not get it — a
                     // declined or mis-clicked UAC prompt, a transient netsh
                     // failure. Skip the marker so the next launch retries;
                     // only a settled outcome (rule present, or an explicit
                     // decline of the dialog) is final.
-                    Ok(Err(e)) => {
-                        warn!("Failed to add firewall rule: {}", e);
-                        return;
-                    }
                     Err(e) => {
-                        warn!("Firewall rule task failed: {}", e);
+                        warn!("Failed to add firewall rule: {}", e);
                         return;
                     }
                 }
@@ -108,7 +108,9 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
         }
 
         // Rule present or dialog declined: settled, so the user is not
-        // nagged and later launches stop at the marker check above.
+        // nagged and later launches stop at the marker check above. A dialog
+        // that failed to show also lands here as a decline; accepted, the
+        // two cannot be told apart through `confirm`.
         if let Err(e) = std::fs::write(&marker, "") {
             warn!("Failed to write firewall-prompt marker: {}", e);
         }

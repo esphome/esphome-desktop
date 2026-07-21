@@ -14,14 +14,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Read the product name rather than duplicating it; the install directory is
-# derived from it. Same for the rule and marker names, which live in the Rust
-# source — this script asserting against its own copies would let the two
-# drift without anything failing.
-$conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
-$InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
-$LocalDataDir = Join-Path $env:LOCALAPPDATA $conf.identifier
+. "$PSScriptRoot/e2e_windows_common.ps1"
 
+# Read the rule and marker names from the Rust source rather than duplicating
+# them; this script asserting against its own copies would let the two drift
+# without anything failing.
 $src = Get-Content 'src-tauri/src/platform/windows.rs' -Raw
 if ($src -notmatch 'FIREWALL_RULE_NAME: &str = "([^"]+)"') {
     throw 'could not read FIREWALL_RULE_NAME from src/platform/windows.rs'
@@ -36,9 +33,7 @@ $Marker = Join-Path $LocalDataDir $Matches[1]
 # Mirrors managed_interpreter_path in src-tauri/src/platform/mod.rs: the
 # interpreter the daemon actually runs, and therefore the path the rule is
 # scoped to.
-$ManagedPython = Join-Path $LocalDataDir 'python\python.exe'
-# The install-dir copy only marks whether the (un)installer has finished.
-$BundledPython = Join-Path $InstallDir 'python\python.exe'
+$ManagedPython = Join-Path $LocalDataDir (Join-Path $PythonDirName 'python.exe')
 
 function Test-FirewallRule {
     netsh advfirewall firewall show rule name="$RuleName" *> $null
@@ -46,36 +41,8 @@ function Test-FirewallRule {
 }
 
 function Remove-FirewallRule {
-    if (Test-FirewallRule) {
-        netsh advfirewall firewall delete rule name="$RuleName" | Out-Null
-    }
-}
-
-function Install-Bundle {
-    $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $installer) { throw 'no NSIS installer found; did the bundle step run?' }
-    $proc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
-    if ($proc.ExitCode -ne 0) { throw "silent install failed with exit code $($proc.ExitCode)" }
-    if (-not (Test-Path $BundledPython)) { throw "installer reported success but $BundledPython does not exist" }
-}
-
-# A bare `/S` uninstall copies itself to $TEMP and re-execs, so `-Wait` on the
-# process started here returns before the work is done (see the backend
-# lifetime script for the full story); poll for the bundle instead. The
-# firewall hook runs after file deletion, so once the bundle is gone give the
-# uninstaller a moment to finish before asserting on the rule.
-function Uninstall-Bundle {
-    param([string[]]$Arguments)
-    $uninstaller = Join-Path $InstallDir 'uninstall.exe'
-    if (-not (Test-Path $uninstaller)) { throw "no uninstaller at $uninstaller" }
-    Start-Process -FilePath $uninstaller -ArgumentList $Arguments -Wait
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    while ($watch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $BundledPython)) {
-        Start-Sleep -Milliseconds 500
-    }
-    if (Test-Path $BundledPython) { throw "$BundledPython still exists after uninstalling" }
-    Start-Sleep -Seconds 10
+    # Unconditional; "no rules match" is a nonzero exit and exactly as gone.
+    netsh advfirewall firewall delete rule name="$RuleName" *> $null
 }
 
 # --- fresh state, whatever earlier steps left behind ------------------------
@@ -86,24 +53,26 @@ try {
     # --- rule already present: the app must settle without prompting --------
     Install-Bundle
 
+    # Mirrors the rule shape add_firewall_rule builds (and its unit test
+    # pins) in src-tauri/src/platform/windows.rs, so the fixture matches an
+    # accepting user's machine.
     netsh advfirewall firewall add rule name="$RuleName" dir=in action=allow `
         program="$ManagedPython" enable=yes profile=private,domain | Out-Null
-    if (-not (Test-FirewallRule)) { throw 'pre-creating the firewall rule failed' }
-
-    $exe = Get-ChildItem $InstallDir -Filter *.exe |
-        Where-Object { $_.Name -ine 'uninstall.exe' } | Select-Object -First 1
-    if (-not $exe) { throw "no main binary in $InstallDir" }
+    if ($LASTEXITCODE -ne 0) { throw 'pre-creating the firewall rule failed' }
 
     # `--no-open-dashboard` for the same two reasons as the backend lifetime
     # script: no browser on the runner, and any explicit flag stops main.rs
     # treating this console-attached launch as a bare terminal invocation
     # that prints --help and exits.
+    $exe = Get-MainExe
     Write-Host "Launching $($exe.Name) with the rule pre-created"
     $app = Start-Process -FilePath $exe.FullName -ArgumentList '--no-open-dashboard' -PassThru
     try {
         # The marker is the app's own record that the flow settled without a
         # dialog. It is written early in setup, well before the backend is
-        # up, so this ceiling is generous.
+        # up, so this ceiling is generous. Hand-rolled rather than Wait-Until
+        # because a desktop that exits early should fail with its exit code,
+        # not with a timeout.
         $deadline = [Diagnostics.Stopwatch]::StartNew()
         while ($deadline.Elapsed.TotalSeconds -lt 120 -and -not (Test-Path $Marker)) {
             if ($app.HasExited) {
@@ -135,7 +104,9 @@ try {
     Install-Bundle
     Write-Host 'Uninstalling for real'
     Uninstall-Bundle -Arguments '/S'
-    if (Test-FirewallRule) { throw 'the firewall rule survived a real uninstall' }
+    if (-not (Wait-Until { -not (Test-FirewallRule) } 30)) {
+        throw 'the firewall rule survived a real uninstall'
+    }
     Write-Host 'PASS: the real uninstall removed the rule'
 }
 finally {
