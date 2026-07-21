@@ -121,11 +121,22 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
 /// *elevated* subprocess, and both `CreateProcessW` and `ShellExecuteEx`
 /// include the current directory in their by-name search order — a planted
 /// `netsh.exe` in a user-writable CWD would run as administrator behind the
-/// one UAC prompt the user expects. Resolving from `%SystemRoot%` pins the
-/// real binaries; the unelevated query uses it too for consistency.
+/// one UAC prompt the user expects. Resolved via `GetSystemDirectoryW`
+/// rather than `%SystemRoot%`, since the environment is user-writable state
+/// too; the unelevated query uses it as well for consistency.
 fn system32(tail: &str) -> std::path::PathBuf {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    Path::new(&root).join("System32").join(tail)
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut buf = [0u16; 260];
+    let len =
+        unsafe { ::windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut buf)) }
+            as usize;
+    let dir = if len > 0 && len <= buf.len() {
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]))
+    } else {
+        std::path::PathBuf::from(r"C:\Windows\System32")
+    };
+    dir.join(tail)
 }
 
 /// Whether a rule named [`FIREWALL_RULE_NAME`] exists. Querying the firewall

@@ -43,6 +43,10 @@ function Test-FirewallRule {
 function Remove-FirewallRule {
     # Unconditional; "no rules match" is a nonzero exit and exactly as gone.
     netsh advfirewall firewall delete rule name="$RuleName" *> $null
+    # This runs last (the `finally` below), and the Actions pwsh shell exits
+    # with the trailing $LASTEXITCODE — an already-gone rule must not turn a
+    # fully-passed run into a failed step. Real failures throw.
+    $global:LASTEXITCODE = 0
 }
 
 # --- fresh state, whatever earlier steps left behind ------------------------
