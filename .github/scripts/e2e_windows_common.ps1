@@ -21,10 +21,20 @@ if ($modSrc -notmatch 'PYTHON_TREE_DIRNAME: &str = "([^"]+)"') {
 }
 $PythonDirName = $Matches[1]
 
+# The install-dir side is the bundled *resource* name from tauri.conf.json,
+# which mod.rs's get_bundled_python_root keeps deliberately independent of
+# PYTHON_TREE_DIRNAME (renaming the managed tree must not move the shipped
+# bundle, and vice versa). Assert it is really listed rather than trusting
+# the literal.
+$BundledPythonDirName = 'python'
+if ($conf.bundle.resources -notcontains $BundledPythonDirName) {
+    throw "tauri.conf.json bundle.resources no longer lists '$BundledPythonDirName'"
+}
+
 # The bundled interpreter's presence marks whether the (un)installer has
 # finished. The backend runs from the managed copy under $LocalDataDir, not
 # from this one (#335).
-$BundledPython = Join-Path $InstallDir (Join-Path $PythonDirName 'python.exe')
+$BundledPython = Join-Path $InstallDir (Join-Path $BundledPythonDirName 'python.exe')
 
 # Poll $Condition every 500ms until it returns truth or $TimeoutSec elapses;
 # returns whether it did.

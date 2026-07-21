@@ -102,16 +102,20 @@ try {
     Write-Host 'Uninstalling in update mode'
     Uninstall-Bundle -Arguments '/UPDATE', '/S'
     if (-not (Test-FirewallRule)) { throw 'the update-mode uninstall removed the firewall rule' }
-    Write-Host 'PASS: the update-mode uninstall kept the rule'
+    if (-not (Test-Path $Marker)) { throw 'the update-mode uninstall removed the prompt marker' }
+    Write-Host 'PASS: the update-mode uninstall kept the rule and the marker'
 
-    # --- a real uninstall must remove it ------------------------------------
+    # --- a real uninstall must remove both ----------------------------------
+    # The marker has to go with the rule: a reinstall that found a stale
+    # marker would skip the prompt and pairing would be broken again.
     Install-Bundle
     Write-Host 'Uninstalling for real'
     Uninstall-Bundle -Arguments '/S'
     if (-not (Wait-Until { -not (Test-FirewallRule) } 30)) {
         throw 'the firewall rule survived a real uninstall'
     }
-    Write-Host 'PASS: the real uninstall removed the rule'
+    if (Test-Path $Marker) { throw 'the prompt marker survived a real uninstall' }
+    Write-Host 'PASS: the real uninstall removed the rule and the marker'
 }
 finally {
     Remove-FirewallRule

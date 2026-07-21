@@ -127,10 +127,17 @@ fn ensure_firewall_rule(app_handle: &AppHandle) {
 fn system32(tail: &str) -> std::path::PathBuf {
     use std::os::windows::ffi::OsStringExt;
 
-    let mut buf = [0u16; 260];
-    let len =
-        unsafe { ::windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut buf)) }
-            as usize;
+    use ::windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buf = vec![0u16; 260];
+    let mut len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    if len > buf.len() {
+        // Returned length is the required size; retry rather than fall back,
+        // the hardcoded default would point at the wrong drive on systems
+        // where the path really is that long.
+        buf.resize(len, 0);
+        len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    }
     let dir = if len > 0 && len <= buf.len() {
         std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]))
     } else {
@@ -221,8 +228,9 @@ mod tests {
         assert!(args.contains("profile=private,domain"), "{args}");
     }
 
-    /// The uninstaller deletes rules by name; its spelling lives in
-    /// `installer-hooks.nsi` and must match [`FIREWALL_RULE_NAME`].
+    /// The uninstaller deletes the rule by name and the settle marker by
+    /// filename; both spellings live in `installer-hooks.nsi` and must match
+    /// [`FIREWALL_RULE_NAME`] and [`MARKER_NAME`].
     #[test]
     fn installer_hook_rule_name_matches() {
         let hooks = include_str!("../../installer-hooks.nsi");
@@ -231,6 +239,17 @@ mod tests {
                 "!define FIREWALL_RULE_NAME \"{FIREWALL_RULE_NAME}\""
             )),
             "installer-hooks.nsi must define the same firewall rule name"
+        );
+        assert!(
+            hooks.contains(&format!("!define FIREWALL_PROMPT_MARKER \"{MARKER_NAME}\"")),
+            "installer-hooks.nsi must define the same firewall marker name"
+        );
+        assert!(
+            hooks.contains(&format!(
+                "\\{}\\${{FIREWALL_PROMPT_MARKER}}",
+                super::super::BUNDLE_IDENTIFIER
+            )),
+            "installer-hooks.nsi must delete the marker under the bundle identifier's local data dir"
         );
     }
 }
