@@ -20,3 +20,31 @@
   Delete "$SMPROGRAMS\ESPHome Builder.lnk"
   Delete "$DESKTOP\ESPHome Builder.lnk"
 !macroend
+
+; On first run the app offers to add an inbound firewall rule for the managed
+; Python interpreter so other dashboards can pair with this machine (issue
+; #384). The name must match FIREWALL_RULE_NAME in src/platform/windows.rs;
+; a drift test there checks this !define. Removal is best effort: this
+; per-user uninstaller runs unelevated, so if a direct netsh fails the user
+; gets one UAC prompt, and declining just leaves the rule behind (inert once
+; python.exe is gone). Updates run the uninstaller too ($UpdateMode = 1) and
+; must keep the rule.
+!define FIREWALL_RULE_NAME "ESPHome Device Builder"
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $UpdateMode <> 1
+    nsExec::ExecToStack 'netsh advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
+    Pop $0
+    Pop $1
+    ${If} $0 == "0"
+      DetailPrint "Removing firewall rule..."
+      nsExec::ExecToStack 'netsh advfirewall firewall delete rule name="${FIREWALL_RULE_NAME}"'
+      Pop $0
+      Pop $1
+      ${If} $0 != "0"
+      ${AndIfNot} ${Silent}
+        ExecWait `powershell -NoProfile -NonInteractive -Command "Start-Process -FilePath netsh.exe -ArgumentList 'advfirewall firewall delete rule name=\"${FIREWALL_RULE_NAME}\"' -Verb RunAs -Wait"`
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+!macroend
