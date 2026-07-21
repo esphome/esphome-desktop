@@ -1344,26 +1344,44 @@ mod tests {
         // grandchild that would too; the bound must fire AND leave neither
         // behind. The grandchild pid goes to stderr, which the timed-out error
         // carries in its message.
-        let out = run_python_capture_bounded(
-            Path::new(TEST_PYTHON),
-            [
-                "-c",
-                "import subprocess,sys,time; \
-                 p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(600)']); \
-                 sys.stderr.write('GRANDCHILD_PID=%d\\n'%p.pid); sys.stderr.flush(); \
-                 time.sleep(600)",
-            ],
-            // Generous enough that a cold, loaded CI interpreter has surely
-            // spawned the grandchild and written its pid before the bound fires
-            // (both then sleep far longer); a tighter bound could kill the child
-            // mid-startup and leave no pid to assert on.
-            std::time::Duration::from_secs(5),
+        //
+        // The bound doubles as the setup window: the child must start an
+        // interpreter, Popen a second one, and flush the pid line before it
+        // fires, or there is no pid to assert on. No fixed value settles that
+        // -- the test's wall time IS the bound (the child otherwise sleeps
+        // 600s), so a bound generous enough for a cold, loaded CI runner slows
+        // every run everywhere. Escalate instead: a killed-mid-startup attempt
+        // (seen on Windows CI with six concurrent runs) shows up as a missing
+        // pid, and retrying with a longer bound leaks nothing -- an unreported
+        // grandchild died with its job. Only the last attempt's missing pid is
+        // a failure, so a slow runner gets headroom while the failure mode
+        // stays loud.
+        let mut last_err = None;
+        for secs in [5, 10, 20] {
+            let out = run_python_capture_bounded(
+                Path::new(TEST_PYTHON),
+                [
+                    "-c",
+                    "import subprocess,sys,time; \
+                     p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(600)']); \
+                     sys.stderr.write('GRANDCHILD_PID=%d\\n'%p.pid); sys.stderr.flush(); \
+                     time.sleep(600)",
+                ],
+                std::time::Duration::from_secs(secs),
+            );
+            let err = out.expect_err("the child never exits, so this must time out");
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            if let Some(pid) = parse_grandchild_pid(err.to_string().as_bytes()) {
+                assert_pid_reaped(pid);
+                return;
+            }
+            last_err = Some(err);
+        }
+        panic!(
+            "the timed-out child must have reported its grandchild's pid; \
+             last attempt: {}",
+            last_err.expect("the loop ran")
         );
-        let err = out.expect_err("the child never exits, so this must time out");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
-        let pid = parse_grandchild_pid(err.to_string().as_bytes())
-            .expect("the timed-out child must have reported its grandchild's pid");
-        assert_pid_reaped(pid);
     }
 
     #[test]
