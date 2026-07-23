@@ -112,7 +112,11 @@
     "remove_legacy_title": "Remove old ESPHome Builder",
     "remove_legacy_prompt": "An older version of this app named “ESPHome Builder” was found in your Applications folder. Move it to the Trash?\n\nYour settings and configs are not affected.",
     "move_to_trash": "Move to Trash",
-    "keep": "Keep"
+    "keep": "Keep",
+    "firewall_title": "Allow network pairing",
+    "firewall_prompt": "Windows Firewall is blocking other ESPHome dashboards from pairing with this computer. Allow incoming connections for the app’s Python backend?\n\nWindows will ask for administrator approval.",
+    "firewall_allow": "Allow access",
+    "firewall_decline": "No thanks"
   },
   "hint": {
     "updates_menu": "Open the tray menu and choose \"Check for Updates...\" to update.",

@@ -16,6 +16,8 @@ mod macos;
 mod pip;
 mod process;
 mod python_env;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use health::{
     clear_repair_count, esphome_config_probe, is_managed_python_tree, may_repair_tree,
@@ -194,13 +196,25 @@ fn get_bundled_python_root(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(get_bundled_resource_dir(app_handle)?.join("python"))
 }
 
+/// Interpreter path of the managed user Python tree, whether or not the
+/// first-run copy exists yet.
+///
+/// The single spelling of that composition, shared by [`get_python_path`] and
+/// the Windows firewall rule, which must scope its program filter to the
+/// exact path the daemon executes; a second copy is how the two would drift
+/// apart.
+fn managed_interpreter_path(app_handle: &AppHandle) -> Result<PathBuf> {
+    Ok(interpreter_in_tree(
+        &get_python_parent_dir(app_handle)?.join(PYTHON_TREE_DIRNAME),
+    ))
+}
+
 /// Get the path to the user Python executable: the copy `ensure_user_python`
 /// keeps under [`get_python_parent_dir`], falling back to the bundled tree
 /// before the first-run copy exists and to a bare system Python in development
 /// builds with no bundle.
 pub fn get_python_path(app_handle: &AppHandle) -> Result<PathBuf> {
-    let parent_dir = get_python_parent_dir(app_handle)?;
-    let python_path = interpreter_in_tree(&parent_dir.join(PYTHON_TREE_DIRNAME));
+    let python_path = managed_interpreter_path(app_handle)?;
 
     if python_path.exists() {
         debug!("Using user Python: {:?}", python_path);
@@ -621,13 +635,13 @@ pub fn ensure_ccache_on_path(app_handle: &AppHandle) -> Result<()> {
 }
 
 /// Platform-specific initialization
-#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+#[cfg_attr(target_os = "linux", allow(unused_variables))]
 pub fn init(app_handle: &AppHandle) {
     #[cfg(target_os = "macos")]
     macos::init(app_handle);
 
     #[cfg(target_os = "windows")]
-    windows::init();
+    windows::init(app_handle);
 
     #[cfg(target_os = "linux")]
     linux::init();
@@ -654,13 +668,6 @@ pub fn relaunch_for_update(app_handle: &AppHandle) {
     // Non-macOS, or the LaunchServices path couldn't be set up: fall back to
     // Tauri's direct relaunch (diverges).
     app_handle.restart();
-}
-
-#[cfg(target_os = "windows")]
-mod windows {
-    pub fn init() {
-        // Windows-specific initialization
-    }
 }
 
 /// One-shot cleanup of the legacy `/Applications/ESPHome Builder.app` bundle

@@ -23,19 +23,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Read the product name rather than duplicating it: the install directory is
-# derived from it, and this script already refuses to assume it for the binary
-# name a few lines down. Hardcoding it here and discovering it there would be
-# the same assumption wearing a disguise.
-$conf = Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
-$InstallDir = Join-Path $env:LOCALAPPDATA $conf.productName
-$AppDataDir = Join-Path $env:APPDATA $conf.identifier
+# Paths derived from tauri.conf.json and the install/uninstall helpers live
+# in the shared common file; this script keeps only what is backend-specific.
+. "$PSScriptRoot/e2e_windows_common.ps1"
+
 # The managed Python tree: on first launch the app copies the bundled tree
 # here and the backend runs from the copy, not the install dir (#335).
-$LocalDataDir = Join-Path $env:LOCALAPPDATA $conf.identifier
-# Mirrors PYTHON_TREE_DIRNAME in src-tauri/src/platform/mod.rs (and the
-# 'python' resource name in tauri.conf.json for the install-dir side).
-$PythonDirName = 'python'
 # Trailing separator so `C:\foo` cannot prefix-match `C:\foobar`.
 $Prefix = $InstallDir + '\'
 $TreePrefix = (Join-Path $LocalDataDir $PythonDirName) + '\'
@@ -122,20 +115,9 @@ function Show-Diagnostics {
 }
 
 # --- install the bundle we just built -------------------------------------
-$installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if (-not $installer) { throw 'no NSIS installer found; did the bundle step run?' }
-Write-Host "Installing $($installer.Name)"
+Install-Bundle
 
-$proc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
-if ($proc.ExitCode -ne 0) { throw "silent install failed with exit code $($proc.ExitCode)" }
-if (-not (Test-Path $InstallDir)) { throw "installer reported success but $InstallDir does not exist" }
-
-# Discover the main binary rather than assuming the product name: it is derived
-# from tauri.conf.json and would drift silently.
-$exe = Get-ChildItem $InstallDir -Filter *.exe |
-    Where-Object { $_.Name -ine 'uninstall.exe' } | Select-Object -First 1
-if (-not $exe) { throw "no main binary in $InstallDir" }
+$exe = Get-MainExe
 Write-Host "Launching $($exe.Name)"
 
 # --- start it and wait for the backend ------------------------------------
@@ -225,45 +207,23 @@ try {
     # checks is the install-dir side — the bundled payload, plus anything a
     # backend child like `git.exe` still holds there — being cleanly
     # removable. It is only meaningful sitting on top of the one above.
-    $uninstaller = Join-Path $InstallDir 'uninstall.exe'
-    if (-not (Test-Path $uninstaller)) { throw "no uninstaller at $uninstaller" }
-    Write-Host 'Uninstalling to confirm nothing is left holding the install dir open'
-
-    # Assert on the interpreter, not the whole tree: a locked `python.exe`
-    # fails its `Delete`, keeps `$INSTDIR\python` non-empty and strands the
-    # directory, so its removal is the signal. Assert it exists *before* the
-    # uninstall runs — if the bundle layout ever drifts away from this path,
-    # this check must fail loudly rather than pass on a file that was never
-    # there.
-    #
     # The tree itself legitimately survives a healthy uninstall: Tauri `Delete`s
     # only what its manifest lists and then calls non-recursive `RMDir`, while
     # `prepare_bundle.sh` strips every `__pycache__` before packaging ("Python
     # regenerates .pyc files at runtime"), so the app recreates .pyc files that
     # were never in the manifest and `RMDir` finds the directory non-empty.
     # Asserting the tree disappears is therefore red on every run, for a reason
-    # that has nothing to do with us.
-    $py = Join-Path $InstallDir (Join-Path $PythonDirName 'python.exe')
-    if (-not (Test-Path $py)) {
-        throw "no bundled interpreter at $py; did the bundle layout change?"
-    }
-
-    # `-Wait` is not enough on its own and the reason matters: a bare `/S`
-    # uninstall copies itself to $TEMP and re-execs, so the process started here
-    # returns immediately while the copy does the work. Poll for the tree.
-    # (Passing `_?=` keeps it in place and makes `-Wait` meaningful, but NSIS
-    # then deliberately leaves `uninstall.exe` behind and the directory never
-    # goes away — that same in-place mode is what made the reverted installer
-    # hooks kill themselves, see #328.)
-    Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
-
+    # that has nothing to do with us. `Uninstall-Bundle` (common file) therefore
+    # asserts on the bundled interpreter, and carries the story of why a bare
+    # `/S` uninstall must be polled rather than waited on.
+    Write-Host 'Uninstalling to confirm nothing is left holding the install dir open'
     $unwatch = [Diagnostics.Stopwatch]::StartNew()
-    while ($unwatch.Elapsed.TotalSeconds -lt 90 -and (Test-Path $py)) {
-        Start-Sleep -Milliseconds 500
+    try {
+        Uninstall-Bundle
     }
-    if (Test-Path $py) {
+    catch {
         Show-Diagnostics 'the bundled interpreter survived the uninstall'
-        throw "$py still exists after uninstalling; something is holding it open"
+        throw
     }
     Write-Host "PASS: the bundled interpreter was removed after $([int]$unwatch.Elapsed.TotalSeconds)s"
 
