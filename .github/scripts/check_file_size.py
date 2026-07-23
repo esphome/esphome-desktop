@@ -42,7 +42,6 @@ CAP = 800
 # fails until its entry is deleted, and from then on the cap holds it there.
 EXEMPT: frozenset[str] = frozenset(
     {
-        "src-tauri/src/update/mod.rs",
         "src-tauri/src/tray/mod.rs",
         "src-tauri/src/lib.rs",
     }
