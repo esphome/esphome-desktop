@@ -113,7 +113,7 @@ pub enum CliCommand {
 /// Methods of the machine-readable `esphome-desktop api <method>` interface.
 /// This is the contract the device-builder dashboard codes against; unlike the
 /// human subcommands above it emits only NDJSON and is versioned via
-/// [`control::protocol::API_SCHEMA_VERSION`](crate::control::protocol), so the
+/// [`API_SCHEMA_VERSION`](crate::control::protocol::API_SCHEMA_VERSION), so the
 /// human CLI stays free to change. Every line is one JSON object the caller can
 /// `json.loads`.
 #[derive(clap::Subcommand, Debug, Clone)]
