@@ -239,7 +239,7 @@ pub(super) fn refresh_python_tree(
     // carry both releases' `.dist-info` dirs and the copy above reproduces
     // them (#389). Prune to one dist-info per package before anything reads
     // the fresh tree — the version restore below and every later pip
-    // uninstall reason from `importlib.metadata`, which duplicates make
+    // uninstall rely on `importlib.metadata`, which duplicates make
     // ambiguous. Best-effort: duplicate metadata does not fail the health
     // probe, so failing the refresh over it would turn an ambiguity into a
     // broken tree. Runs before the marker write so a crash mid-prune leaves
