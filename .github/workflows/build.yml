@@ -725,7 +725,13 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_run'
+    # `always()` + an explicit result check, NOT the bare event guard: without
+    # a status function GitHub prepends `success()`, which is false whenever
+    # any job in the transitive needs chain was skipped — and `determine-jobs`
+    # (pull_request only) is always skipped on workflow_run events. That
+    # combination silently skipped this job on every release build after
+    # #357, stranding the draft release with stale assets.
+    if: always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
     permissions:
       contents: write
 
