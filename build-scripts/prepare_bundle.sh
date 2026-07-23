@@ -493,6 +493,9 @@ install_python_packages() {
 
     echo ""
     echo "=== Installing ESPHome (${platform}) ==="
+    # Deliberately unpinned: every bundle build ships whatever ESPHome is
+    # current on PyPI, so picking up a new ESPHome release just needs any
+    # merge to main after it publishes.
     "$python_dir/$python_bin" -m pip install esphome
 
     echo ""
