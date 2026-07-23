@@ -506,6 +506,9 @@ install_python_packages() {
     # release so the bundle matches Backend::default() == BuilderStable in
     # src-tauri/src/settings/mod.rs; a beta binary here would put fresh installs
     # on the beta channel while the UI reports Stable (see #241/#245).
+    # Deliberately unpinned within that channel: every bundle build ships the
+    # latest stable on PyPI, so picking up a new device builder release just
+    # needs any merge to main after it publishes.
     echo ""
     echo "=== Installing ESPHome Device Builder (${platform}) ==="
     "$python_dir/$python_bin" -m pip install esphome-device-builder
