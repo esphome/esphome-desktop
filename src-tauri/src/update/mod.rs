@@ -19,10 +19,7 @@ mod install;
 mod notify;
 mod version;
 
-pub use install::{
-    dedupe_device_builder_dist_info, get_installed_device_builder_version,
-    installed_esphome_version,
-};
+pub use install::{get_installed_device_builder_version, installed_esphome_version};
 pub(crate) use notify::notify_update_available;
 pub(crate) use version::is_newer_version;
 
