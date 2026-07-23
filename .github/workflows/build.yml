@@ -420,6 +420,75 @@ jobs:
           mkdir -p "$RESOURCE_DIR"
           cp -r src-tauri/python "$RESOURCE_DIR/python"
 
+          # Bundle libayatana-appindicator3 and its runtime deps.
+          # The tray backend (libappindicator-sys) dlopen()s this library
+          # lazily by bare soname at runtime, so it is absent from the
+          # binary's DT_NEEDED and sharun/lib4bin never bundles it. Without
+          # it the tray silently disappears on the AppImage even on desktops
+          # that support it, e.g. KDE Plasma / GNOME (issue #87). Copy the
+          # library the build runner installed (libayatana-appindicator3-dev)
+          # plus its closure into sharun's lib dir, which is already on the
+          # loader search path and where platform/linux.rs's AppDir fallback
+          # looks for it.
+          LIB_DIR="$APPDIR/shared/lib"
+          mkdir -p "$LIB_DIR"
+
+          APPINDICATOR=""
+          for soname in libayatana-appindicator3.so.1 libappindicator3.so.1; do
+            found=$(ldconfig -p | awk -v s="$soname" '$1 == s { print $NF; exit }')
+            if [ -n "$found" ] && [ -e "$found" ]; then
+              APPINDICATOR="$found"
+              break
+            fi
+          done
+          if [ -z "$APPINDICATOR" ]; then
+            echo "::error::appindicator library not found on build runner; tray would be missing from the AppImage (issue #87)"
+            exit 1
+          fi
+          echo "Bundling appindicator from: $APPINDICATOR"
+
+          # Copy the library plus every non-core object in its dependency
+          # closure into LIB_DIR, but never clobber a library sharun already
+          # bundled (e.g. the gtk/glib the webkit stack pulls in). Skip the
+          # glibc/loader core, which must come from the host to stay
+          # ABI-consistent. ldd already resolves the closure recursively, so a
+          # single pass is enough.
+          copy_dep() {
+            local src="$1" base soname
+            base=$(basename "$src")
+            case "$base" in
+              ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*)
+                return 0 ;;
+            esac
+            # Name the bundled file after the ELF SONAME, not the on-disk
+            # filename. ldconfig/ldd may resolve to a fully-versioned real file
+            # (e.g. libfoo.so.1.2.3), but the loader — and the dlopen() by bare
+            # soname described above — searches by SONAME (libfoo.so.1). Bundle
+            # under the SONAME so runtime resolution finds it; fall back to the
+            # basename only if the object has no SONAME.
+            soname=$(patchelf --print-soname "$src" 2>/dev/null || true)
+            [ -n "$soname" ] && base="$soname"
+            # Skip if sharun already bundled this lib anywhere under shared/,
+            # including the multiarch subdirs (shared/lib/x86_64-linux-gnu, seen
+            # in the wild per platform/linux.rs) — copying a second host-sourced
+            # copy risks a version-skewed duplicate of a lib the app loads.
+            [ -n "$(find "$APPDIR/shared" -name "$base" -print -quit 2>/dev/null)" ] && return 0
+            cp -L "$src" "$LIB_DIR/$base"
+            # Resolve co-bundled deps relative to the library's own directory.
+            # patchelf is installed by linux-tauri-deps; a failure here would
+            # ship a lib that resolves against the host and silently regress the
+            # tray, so fail the build loud rather than continue.
+            if ! patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base"; then
+              echo "::error::patchelf --set-rpath failed for $base; refusing to ship an AppImage whose bundled libs resolve against the host (issue #87)"
+              exit 1
+            fi
+          }
+
+          copy_dep "$APPINDICATOR"
+          while read -r dep; do
+            [ -n "$dep" ] && [ -e "$dep" ] && copy_dep "$dep"
+          done < <(ldd "$APPINDICATOR" | awk '/=> \// { print $3 }')
+
           # Extract the uruntime header from the existing AppImage
           chmod +x "$APPIMAGE"
           OFFSET=$("$APPIMAGE" --appimage-offset)
