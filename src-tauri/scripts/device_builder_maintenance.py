@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Maintenance for the bundled esphome-device-builder install (#190).
 
-Two modes, selected by argv:
-  detect  -> print the highest installed version (empty if undeterminable)
-  dedupe  -> remove orphaned duplicate *.dist-info dirs; print the count removed
+Three modes, selected by argv:
+  detect     -> print the highest installed version (empty if undeterminable)
+  dedupe     -> remove orphaned duplicate *.dist-info dirs for the device-builder
+                packages; print the count removed
+  dedupe-all -> the same prune over every installed distribution; print the
+                count removed. Run after each bundled-tree copy so a dirty
+                source (the installer overlays the bundle without deleting the
+                previous release's dist-info dirs, #389) still yields a copy
+                with unambiguous importlib.metadata answers.
 
 The bundled Python accumulates duplicate dist-info dirs (orphaned by the
 ``--ignore-installed`` missing-RECORD recovery), which makes importlib.metadata
@@ -77,6 +83,11 @@ def _norm(name: str | None) -> str:
     return (name or "").lower().replace("_", "-")
 
 
+def _dist_path(dist: Distribution) -> object:
+    """``dist``'s private ``_path`` for log messages, or ``"?"`` if absent."""
+    return getattr(dist, "_path", "?")
+
+
 def detect_version(dists: Iterable[Distribution]) -> str | None:
     """Return the highest version among all esphome-device-builder dists.
 
@@ -99,16 +110,20 @@ def detect_version(dists: Iterable[Distribution]) -> str | None:
             # Don't let one unreadable distribution abort detection, but log it:
             # silently dropping the real target would reintroduce the #190 loop
             # with no trace.
-            path = getattr(dist, "_path", "?")
             print(
-                f"detect: skipping unreadable distribution {path}: {err}",
+                f"detect: skipping unreadable distribution {_dist_path(dist)}: {err}",
                 file=sys.stderr,
             )
     return max(versions, key=vkey) if versions else None
 
 
-def dedupe_dist_info(dists: Iterable[Distribution]) -> int:
-    """Keep the highest-version dist-info per target package; remove the rest.
+def dedupe_dist_info(
+    dists: Iterable[Distribution], targets: set[str] | None = TARGETS
+) -> int:
+    """Keep the highest-version dist-info per package; remove the rest.
+
+    ``targets`` limits the prune to the given normalized package names;
+    ``None`` considers every distribution (the ``dedupe-all`` mode).
 
     The newest version is the code installed last by ``pip install --upgrade``,
     so its metadata is the one to keep. Returns the number of stale dist-info
@@ -126,13 +141,22 @@ def dedupe_dist_info(dists: Iterable[Distribution]) -> int:
         except Exception as err:
             # Log rather than silently skip: an unreadable target dist-info that
             # is never considered for dedup leaves the pileup in place (#190).
-            path = getattr(dist, "_path", "?")
             print(
-                f"dedupe: skipping unreadable distribution {path}: {err}",
+                f"dedupe: skipping unreadable distribution {_dist_path(dist)}: {err}",
                 file=sys.stderr,
             )
             continue
-        if name not in TARGETS:
+        if not name:
+            # A dist-info with no Name header cannot be attributed to a
+            # package. Grouping the nameless together (their names all
+            # normalize to "") would treat unrelated broken dist-infos as
+            # duplicates of one another — never prune on missing identity.
+            print(
+                f"dedupe: skipping nameless distribution {_dist_path(dist)}",
+                file=sys.stderr,
+            )
+            continue
+        if targets is not None and name not in targets:
             continue
         # ``_path`` is private; guard it so a future importlib change degrades to
         # a no-op rather than deleting the wrong directory.
@@ -184,6 +208,9 @@ def main(argv: list[str]) -> int:
         return 0
     if mode == "dedupe":
         print(dedupe_dist_info(distributions()))
+        return 0
+    if mode == "dedupe-all":
+        print(dedupe_dist_info(distributions(), targets=None))
         return 0
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2
