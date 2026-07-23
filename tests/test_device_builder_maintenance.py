@@ -30,12 +30,19 @@ maint = load_script_module(SCRIPT_PATH)
 
 
 def _make_dist_info(
-    site: Path, package: str, version: str | None, *, with_version: bool = True
+    site: Path,
+    package: str,
+    version: str | None,
+    *,
+    with_version: bool = True,
+    with_name: bool = True,
 ) -> Path:
     """Create a *.dist-info dir for ``package`` and return its path."""
     dist_info = site / f"{package.replace('-', '_')}-{version}.dist-info"
     dist_info.mkdir(parents=True)
-    lines = ["Metadata-Version: 2.1", f"Name: {package}"]
+    lines = ["Metadata-Version: 2.1"]
+    if with_name:
+        lines.append(f"Name: {package}")
     if with_version and version is not None:
         lines.append(f"Version: {version}")
     (dist_info / "METADATA").write_text("\n".join(lines) + "\n")
@@ -212,6 +219,22 @@ def test_dedupe_all_prunes_any_package(tmp_path: Path) -> None:
     assert single.is_dir()
     assert not esphome_old.exists()
     assert not aioesp_old.exists()
+
+
+def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
+    # Two unrelated dist-infos whose METADATA lost its Name header normalize
+    # to ""; grouping them would prune one as a "duplicate" of the other even
+    # though they belong to different packages. Both must survive, and a
+    # healthy pair must still dedupe normally alongside them.
+    orphan_a = _make_dist_info(tmp_path, "pkg-a", "1.0.0", with_name=False)
+    orphan_b = _make_dist_info(tmp_path, "pkg-b", "2.0.0", with_name=False)
+    keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
+    stale = _make_dist_info(tmp_path, "esphome", "2026.7.0")
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 1
+    assert orphan_a.is_dir()
+    assert orphan_b.is_dir()
+    assert keep.is_dir()
+    assert not stale.exists()
 
 
 def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:

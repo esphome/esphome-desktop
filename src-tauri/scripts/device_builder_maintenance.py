@@ -143,6 +143,14 @@ def dedupe_dist_info(
                 file=sys.stderr,
             )
             continue
+        if not name:
+            # A dist-info with no Name header cannot be attributed to a
+            # package. Grouping the nameless together (their names all
+            # normalize to "") would treat unrelated broken dist-infos as
+            # duplicates of one another — never prune on missing identity.
+            path = getattr(dist, "_path", "?")
+            print(f"dedupe: skipping nameless distribution {path}", file=sys.stderr)
+            continue
         if targets is not None and name not in targets:
             continue
         # ``_path`` is private; guard it so a future importlib change degrades to
