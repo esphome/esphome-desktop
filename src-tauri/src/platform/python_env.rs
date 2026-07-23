@@ -395,15 +395,19 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
 /// if undeterminable); `dedupe` / `dedupe-all` remove orphaned duplicate
 /// `.dist-info` dirs and print how many they removed. Embedded so it ships with
 /// the binary and stays in sync with its pytest suite
-/// (`tests/test_device_builder_maintenance.py`).
-pub(crate) const DEVICE_BUILDER_MAINT_PY: &str =
-    include_str!("../../scripts/device_builder_maintenance.py");
+/// (`tests/test_device_builder_maintenance.py`). Private: the argv-mode
+/// contract is owned entirely by the two runners below.
+const DEVICE_BUILDER_MAINT_PY: &str = include_str!("../../scripts/device_builder_maintenance.py");
 
 /// Which distributions [`dedupe_dist_info`] may prune.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DistInfoDedupeScope {
     /// Only `esphome-device-builder` and its frontend — the lazy #190 heal the
     /// device-builder update check runs when it cannot determine a version.
+    /// Deliberately narrow even though the guards are scope-independent: this
+    /// heal runs on a live user tree mid-session, so it prunes no more than
+    /// the packages whose metadata it needs; the post-copy self-clean owns
+    /// the whole-tree scope.
     DeviceBuilder,
     /// Every installed distribution — the self-clean each bundle copy runs so a
     /// dirty source tree still yields unambiguous metadata (#389).
@@ -442,17 +446,60 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
         );
     }
     // The helper logs dist-info it couldn't read or remove to stderr; surface it
-    // so a partial prune isn't silently lost.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim();
+    // (bounded) so a partial prune isn't silently lost.
+    let stderr = tail_for_log(&String::from_utf8_lossy(&output.stderr));
     if !stderr.is_empty() {
         warn!("dist-info dedup ({mode}): {stderr}");
     }
-    let removed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let removed = stdout.trim();
     if !removed.is_empty() && removed != "0" {
         info!("Removed {removed} stale dist-info dir(s) ({mode})");
     }
     Ok(())
+}
+
+/// Get the installed `esphome-device-builder` package version using the
+/// maintenance helper's `detect` mode, which enumerates every matching
+/// distribution and takes the highest version — robust to the duplicate
+/// dist-info pileup that makes a plain `importlib.metadata.version(...)`
+/// return None or an older version (#190).
+///
+/// - `Ok(Some(v))` — package is installed, returns the version string.
+/// - `Ok(None)` — `detect` ran successfully (exit 0) but printed no version:
+///   the package is not installed, or duplicate dist-info dirs left it
+///   undeterminable (#190).
+/// - `Err(_)` — detection itself failed: the spawn failed or the helper exited
+///   non-zero (a broken interpreter / import error). Callers should surface
+///   this rather than treat it as "not installed".
+pub(crate) fn detect_device_builder_version(python_bin: &Path) -> Result<Option<String>> {
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
+    // sys.path so detection only ever sees the managed bundled install.
+    let output = run_python_capture(python_bin, ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"])
+        .context("Failed to run python")?;
+    if !output.status.success() {
+        // `detect` exits 0 even when the package is absent (it prints nothing),
+        // so a non-zero exit is a real execution failure.
+        anyhow::bail!(
+            "device-builder version detection failed: {}",
+            tail_for_log(&String::from_utf8_lossy(&output.stderr))
+        );
+    }
+    // `detect` logs skipped/unreadable distributions to stderr; surface it so
+    // the reason a version came back undeterminable isn't lost.
+    let stderr = tail_for_log(&String::from_utf8_lossy(&output.stderr));
+    if !stderr.is_empty() {
+        warn!("device-builder version detection: {stderr}");
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.trim();
+    // Empty means "not determinable" (no install or an unresolvable pileup);
+    // the "None" guard is belt-and-suspenders. Either way the caller must not
+    // be offered an endless update (#190).
+    if version.is_empty() || version == "None" {
+        return Ok(None);
+    }
+    Ok(Some(version.to_string()))
 }
 
 /// Read the installed version of a Python package via `importlib.metadata`.
@@ -766,6 +813,19 @@ mod tests {
         assert_marker_current(&user);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn maint_script_pins_the_argv_mode_contract() {
+        // Behavior is covered in depth by tests/test_device_builder_maintenance.py;
+        // here we only pin the argv modes the two runners above invoke, so a
+        // rename of the modes (not the internal functions) can't pass silently.
+        // The bare `dedupe` mode is matched by its dispatch line because any
+        // string containing "dedupe-all" trivially contains "dedupe".
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("if mode == \"dedupe\":"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe-all"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 
     #[cfg(unix)]

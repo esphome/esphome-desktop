@@ -950,57 +950,12 @@ fn find_latest_any(releases: &HashMap<String, Vec<PyPIRelease>>) -> Option<Strin
     highest_version(releases, |_| true)
 }
 
-/// Get the installed `esphome-device-builder` package version.
-///
-/// - `Ok(Some(v))` — package is installed, returns the version string.
-/// - `Ok(None)` — `detect` ran successfully (exit 0) but printed no version: the
-///   package is not installed, or duplicate dist-info dirs left it
-///   undeterminable (#190).
-/// - `Err(e)` — detection itself failed: the bundled Python is missing, the
-///   spawn failed, or the helper exited non-zero (a broken interpreter / import
-///   error). The caller should surface this rather than treat it as "not
-///   installed".
+/// Get the installed `esphome-device-builder` package version. Result
+/// semantics (including why `Err` must not be read as "not installed") are
+/// [`platform::detect_device_builder_version`]'s.
 pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
-
-    // Enumerate all device-builder distributions and take the highest version,
-    // which is robust to the duplicate dist-info pileup that makes a plain
-    // `importlib.metadata.version(...)` return None or an older version (#190).
-    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
-    // sys.path so detection only ever sees the managed bundled install.
-    let output = platform::run_python_capture(
-        &python_path,
-        ["-I", "-c", platform::DEVICE_BUILDER_MAINT_PY, "detect"],
-    )
-    .context("Failed to run python")?;
-
-    if output.status.success() {
-        // `detect` logs skipped/unreadable distributions to stderr; surface it so
-        // the reason a version came back undeterminable isn't lost.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        if !stderr.is_empty() {
-            warn!("device-builder version detection: {stderr}");
-        }
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // `detect` prints nothing when it cannot determine a version (no install
-        // or an unresolvable pileup); the "None" guard is belt-and-suspenders.
-        // Treat either as "not determinable" so the updater does not offer an
-        // endless update (#190).
-        if version.is_empty() || version == "None" {
-            return Ok(None);
-        }
-        Ok(Some(version))
-    } else {
-        // `detect` exits 0 even when the package is absent (it prints nothing),
-        // so a non-zero exit is a real execution failure (broken bundled
-        // interpreter, import error, etc.). Surface it rather than silently
-        // misclassifying it as "not installed" and skipping the update check.
-        anyhow::bail!(
-            "device-builder version detection failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
+    platform::detect_device_builder_version(&python_path)
 }
 
 /// Remove orphaned duplicate `.dist-info` directories for the device-builder
@@ -1009,9 +964,9 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// The `--ignore-installed` install fallback skipped the uninstall and left the
 /// previous version's `.dist-info` behind; once several pile up,
 /// `importlib.metadata` can no longer resolve a single version and the updater
-/// loops forever offering "version None" (#190). This heals that state. An
-/// `Err` covers both a failed spawn and a non-zero helper exit; the one caller
-/// treats it as best-effort, logging rather than blocking the update check.
+/// loops forever offering "version None" (#190). This heals that state. Error
+/// semantics are [`platform::dedupe_dist_info`]'s; the one caller treats an
+/// `Err` as best-effort, logging rather than blocking the update check.
 ///
 /// The `--ignore-installed` fallback that caused most of this damage is gone
 /// (see [`install_with_record_recovery`]), but the damage still arises: the
@@ -1582,19 +1537,6 @@ mod tests {
         assert!(!is_newer_version("2026.5.0-dev", "2026.5.0"));
         // A newer base version dev is still newer than an older stable
         assert!(is_newer_version("2026.5.0-dev", "2026.4.0"));
-    }
-
-    #[test]
-    fn test_device_builder_maint_py_well_formed() {
-        // Behavior is covered in depth by tests/test_device_builder_maintenance.py;
-        // here we only pin the argv-mode contract this module invokes it with, so
-        // a rename of the modes (not the internal functions) can't pass silently.
-        // Match the bare mode words so the check is tolerant of quote style.
-        use crate::platform::DEVICE_BUILDER_MAINT_PY;
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe-all"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 
     #[test]

@@ -83,6 +83,11 @@ def _norm(name: str | None) -> str:
     return (name or "").lower().replace("_", "-")
 
 
+def _dist_path(dist: Distribution) -> object:
+    """``dist``'s private ``_path`` for log messages, or ``"?"`` if absent."""
+    return getattr(dist, "_path", "?")
+
+
 def detect_version(dists: Iterable[Distribution]) -> str | None:
     """Return the highest version among all esphome-device-builder dists.
 
@@ -105,9 +110,8 @@ def detect_version(dists: Iterable[Distribution]) -> str | None:
             # Don't let one unreadable distribution abort detection, but log it:
             # silently dropping the real target would reintroduce the #190 loop
             # with no trace.
-            path = getattr(dist, "_path", "?")
             print(
-                f"detect: skipping unreadable distribution {path}: {err}",
+                f"detect: skipping unreadable distribution {_dist_path(dist)}: {err}",
                 file=sys.stderr,
             )
     return max(versions, key=vkey) if versions else None
@@ -137,9 +141,8 @@ def dedupe_dist_info(
         except Exception as err:
             # Log rather than silently skip: an unreadable target dist-info that
             # is never considered for dedup leaves the pileup in place (#190).
-            path = getattr(dist, "_path", "?")
             print(
-                f"dedupe: skipping unreadable distribution {path}: {err}",
+                f"dedupe: skipping unreadable distribution {_dist_path(dist)}: {err}",
                 file=sys.stderr,
             )
             continue
@@ -148,8 +151,10 @@ def dedupe_dist_info(
             # package. Grouping the nameless together (their names all
             # normalize to "") would treat unrelated broken dist-infos as
             # duplicates of one another — never prune on missing identity.
-            path = getattr(dist, "_path", "?")
-            print(f"dedupe: skipping nameless distribution {path}", file=sys.stderr)
+            print(
+                f"dedupe: skipping nameless distribution {_dist_path(dist)}",
+                file=sys.stderr,
+            )
             continue
         if targets is not None and name not in targets:
             continue

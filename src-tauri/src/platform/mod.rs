@@ -27,10 +27,9 @@ pub use pip::{pip_command, pip_output_report, run_pip};
 #[cfg(target_os = "windows")]
 pub use process::{assign_to_kill_on_close_job, send_ctrl_break};
 pub use process::{
-    configure_daemon_tokio_command, isolate_python_tokio_command, run_python_capture,
-    run_python_capture_stdout,
+    configure_daemon_tokio_command, isolate_python_tokio_command, run_python_capture_stdout,
 };
-pub(crate) use python_env::{dedupe_dist_info, DistInfoDedupeScope, DEVICE_BUILDER_MAINT_PY};
+pub(crate) use python_env::{dedupe_dist_info, detect_device_builder_version, DistInfoDedupeScope};
 pub use python_env::{ensure_user_python, interpreter_is_usable, RefreshReason};
 
 /// Application bundle identifier. Must match the `identifier` field in
@@ -965,13 +964,13 @@ mod tests {
 
     /// Run the tree's interpreter and return (success, stdout+stderr).
     ///
-    /// Goes through [`run_python_capture`] so the harness is isolated exactly as
-    /// the code under test is. Spawning the interpreter directly would let the
-    /// runner's user site-packages or an ambient `PYTHONPATH` satisfy an import
-    /// (#318), and every assertion in the e2e must report on the tree under
-    /// test alone.
+    /// Goes through [`process::run_python_capture`] so the harness is isolated
+    /// exactly as the code under test is. Spawning the interpreter directly
+    /// would let the runner's user site-packages or an ambient `PYTHONPATH`
+    /// satisfy an import (#318), and every assertion in the e2e must report on
+    /// the tree under test alone.
     fn e2e_run(python: &Path, args: &[&str]) -> (bool, String) {
-        let output = run_python_capture(python, args)
+        let output = process::run_python_capture(python, args)
             .unwrap_or_else(|e| panic!("failed to run {python:?} {args:?}: {e}"));
         e2e_verdict(output)
     }
@@ -1216,11 +1215,10 @@ mod tests {
         // 11. The stale dist-info planted in the source must not have survived
         //     the copy: the post-copy dedupe prunes to one dist-info per
         //     package, so importlib has exactly one answer for esphome — the
-        //     direct negation of the #389 symptom. Counted in the refreshed
-        //     tree's own purelib (re-resolved: the refresh wiped and recreated
-        //     the directory the step-2 value pointed into).
-        let refreshed_purelib = e2e_purelib(&python);
-        let esphome_dist_infos: Vec<_> = std::fs::read_dir(&refreshed_purelib)
+        //     direct negation of the #389 symptom. The step-2 `purelib` path
+        //     is still the right place to look: the refresh recreated the
+        //     directory, but at the same location.
+        let esphome_dist_infos: Vec<_> = std::fs::read_dir(&purelib)
             .expect("could not list the refreshed purelib")
             .filter_map(|entry| {
                 let name = entry.unwrap().file_name().into_string().unwrap();
