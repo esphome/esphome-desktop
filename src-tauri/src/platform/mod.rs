@@ -30,6 +30,7 @@ pub use process::{
     configure_daemon_tokio_command, isolate_python_tokio_command, run_python_capture,
     run_python_capture_stdout,
 };
+pub(crate) use python_env::{dedupe_dist_info, DistInfoDedupeScope, DEVICE_BUILDER_MAINT_PY};
 pub use python_env::{ensure_user_python, interpreter_is_usable, RefreshReason};
 
 /// Application bundle identifier. Must match the `identifier` field in
@@ -1163,6 +1164,17 @@ mod tests {
             crate::update::is_newer_version(&current, &downgraded),
             "the downgrade produced {downgraded}, which is not older than {current}"
         );
+        // Dirty the second source the way the installer overlay does (#389):
+        // a stale dist-info stranded beside the real one, so importlib gets
+        // two answers for esphome's version. The refresh below must not
+        // reproduce this into the user tree.
+        let stale_dist_info = e2e_purelib(&old_python).join("esphome-0.0.1.dist-info");
+        std::fs::create_dir_all(&stale_dist_info).unwrap();
+        std::fs::write(
+            stale_dist_info.join("METADATA"),
+            "Metadata-Version: 2.1\nName: esphome\nVersion: 0.0.1\n",
+        )
+        .unwrap();
 
         // 9. Refresh from the older source. The snapshot reads the newer
         //    version from the user tree, the copy lands the older one, and the
@@ -1199,6 +1211,26 @@ mod tests {
         assert!(
             out.contains(&current),
             "esphome reports a version other than {current} after the restore: {out}"
+        );
+
+        // 11. The stale dist-info planted in the source must not have survived
+        //     the copy: the post-copy dedupe prunes to one dist-info per
+        //     package, so importlib has exactly one answer for esphome — the
+        //     direct negation of the #389 symptom. Counted in the refreshed
+        //     tree's own purelib (re-resolved: the refresh wiped and recreated
+        //     the directory the step-2 value pointed into).
+        let refreshed_purelib = e2e_purelib(&python);
+        let esphome_dist_infos: Vec<_> = std::fs::read_dir(&refreshed_purelib)
+            .expect("could not list the refreshed purelib")
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                (name.starts_with("esphome-") && name.ends_with(".dist-info")).then_some(name)
+            })
+            .collect();
+        assert_eq!(
+            esphome_dist_infos,
+            [format!("esphome-{current}.dist-info")],
+            "the refreshed tree must hold exactly one esphome dist-info"
         );
 
         let _ = std::fs::remove_dir_all(&base);

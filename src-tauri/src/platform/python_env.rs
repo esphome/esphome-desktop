@@ -234,6 +234,22 @@ pub(super) fn refresh_python_tree(
     copy_dir_recursive(&bundled_python, user_python)?;
     let copy_elapsed = copy_started.elapsed();
 
+    // The bundle is not guaranteed clean: the installer overlays the install
+    // dir without deleting the previous release's files, so the source can
+    // carry both releases' `.dist-info` dirs and the copy above reproduces
+    // them (#389). Prune to one dist-info per package before anything reads
+    // the fresh tree — the version restore below and every later pip
+    // uninstall reason from `importlib.metadata`, which duplicates make
+    // ambiguous. Best-effort: duplicate metadata does not fail the health
+    // probe, so failing the refresh over it would turn an ambiguity into a
+    // broken tree. Runs before the marker write so a crash mid-prune leaves
+    // no marker and the next launch re-copies and re-prunes.
+    if let Err(e) = dedupe_dist_info(&python_check, DistInfoDedupeScope::All) {
+        warn!(
+            "dist-info dedup after the bundle copy failed ({e:#}); continuing with the copied tree"
+        );
+    }
+
     // Atomic write: a torn marker could read back as a partial version
     // string, mismatching on next launch and re-copying the whole tree.
     crate::util::atomic_write(&marker_path, current_version)
@@ -372,6 +388,71 @@ fn restore_preserved_versions(python_bin: &Path, preserved: &PreservedVersions) 
             );
         }
     }
+}
+
+/// Maintenance helper run with the bundled interpreter as `python -I -c <src>
+/// <mode>`. `detect` prints the highest installed device-builder version (empty
+/// if undeterminable); `dedupe` / `dedupe-all` remove orphaned duplicate
+/// `.dist-info` dirs and print how many they removed. Embedded so it ships with
+/// the binary and stays in sync with its pytest suite
+/// (`tests/test_device_builder_maintenance.py`).
+pub(crate) const DEVICE_BUILDER_MAINT_PY: &str =
+    include_str!("../../scripts/device_builder_maintenance.py");
+
+/// Which distributions [`dedupe_dist_info`] may prune.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DistInfoDedupeScope {
+    /// Only `esphome-device-builder` and its frontend — the lazy #190 heal the
+    /// device-builder update check runs when it cannot determine a version.
+    DeviceBuilder,
+    /// Every installed distribution — the self-clean each bundle copy runs so a
+    /// dirty source tree still yields unambiguous metadata (#389).
+    All,
+}
+
+/// Remove orphaned duplicate `.dist-info` directories, keeping the highest
+/// version's metadata per package (the code on disk is whatever pip installed
+/// last, i.e. the newest).
+///
+/// Duplicates make `importlib.metadata` answer with an arbitrary one of the
+/// piled-up versions, which poisons everything that trusts it: the
+/// device-builder update check loops on "version None" (#190), and the
+/// pinned-version snapshot/restore around a tree refresh compares against a
+/// stale version (#389). The prune itself lives in
+/// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry it cannot rank —
+/// see its pytest suite for the guard behavior.
+///
+/// `Err` covers both a failed spawn and a non-zero exit; callers on paths that
+/// must not fail (the copy in [`refresh_python_tree`], the best-effort heal in
+/// the update check) log and continue.
+pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) -> Result<()> {
+    let mode = match scope {
+        DistInfoDedupeScope::DeviceBuilder => "dedupe",
+        DistInfoDedupeScope::All => "dedupe-all",
+    };
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
+    // sys.path so this destructive prune can only ever touch the managed bundled
+    // install, never a user-site or externally-injected tree.
+    let output = run_python_capture(python_bin, ["-I", "-c", DEVICE_BUILDER_MAINT_PY, mode])
+        .context("Failed to run dist-info dedup")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "dist-info dedup ({mode}) exited non-zero: {}",
+            tail_for_log(&String::from_utf8_lossy(&output.stderr))
+        );
+    }
+    // The helper logs dist-info it couldn't read or remove to stderr; surface it
+    // so a partial prune isn't silently lost.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        warn!("dist-info dedup ({mode}): {stderr}");
+    }
+    let removed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !removed.is_empty() && removed != "0" {
+        info!("Removed {removed} stale dist-info dir(s) ({mode})");
+    }
+    Ok(())
 }
 
 /// Read the installed version of a Python package via `importlib.metadata`.
@@ -630,6 +711,79 @@ mod tests {
         assert!(!orphan.exists(), "the repair must wipe before re-copying");
         assert!(interpreter_in_tree(&user).is_file());
         assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Stub interpreter body that appends the last argv entry — the maintenance
+    /// script's mode argument — to `log`, so a test can assert which mode a
+    /// spawn used without wading through the embedded script text.
+    #[cfg(unix)]
+    fn log_last_arg_stub(log: &Path) -> String {
+        format!(
+            "for a; do last=$a; done; echo \"$last\" >> {}",
+            log.display()
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_copy_runs_the_all_packages_dedupe() {
+        // The copied bundle is not guaranteed clean (#389), so every copy must
+        // finish with a `dedupe-all` pass through the fresh tree's own
+        // interpreter — here a stub that records the mode it was invoked with.
+        let base = unique_temp_dir("refresh-dedupe");
+        let bundle = base.join("bundle");
+        let log = base.join("calls.log");
+        write_stub_interpreter(&bundle.join("bin"), &log_last_arg_stub(&log));
+        let user = base.join("python");
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            calls.lines().any(|line| line == "dedupe-all"),
+            "the copy must run the all-packages dist-info dedupe, got: {calls:?}"
+        );
+        assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_survives_a_failing_dedupe() {
+        // The dedupe is best-effort: duplicate metadata does not fail the
+        // health probe, so a dedupe failure must not fail the refresh either —
+        // the marker still lands and the tree stays usable.
+        let base = unique_temp_dir("refresh-dedupe-fail");
+        let bundle = base.join("bundle");
+        write_stub_interpreter(&bundle.join("bin"), "exit 1");
+        let user = base.join("python");
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup)
+            .expect("a failed dedupe must not fail the refresh");
+        assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dedupe_scope_selects_the_script_mode() {
+        let base = unique_temp_dir("dedupe-scope");
+        let log = base.join("calls.log");
+        let bin = write_stub_interpreter(&base, &log_last_arg_stub(&log));
+
+        dedupe_dist_info(&bin, DistInfoDedupeScope::DeviceBuilder).unwrap();
+        dedupe_dist_info(&bin, DistInfoDedupeScope::All).unwrap();
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            ["dedupe", "dedupe-all"],
+            "each scope must map to its maintenance-script mode"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

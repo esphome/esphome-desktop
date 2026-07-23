@@ -179,3 +179,49 @@ def test_dedupe_groups_frontend_independently(tmp_path: Path) -> None:
     assert maint.dedupe_dist_info(_dists(tmp_path)) == 2
     assert main_keep.is_dir()
     assert fe_keep.is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# dedupe_dist_info(targets=None): the post-copy self-clean (#389).
+# --------------------------------------------------------------------------- #
+
+
+def test_dedupe_default_scope_ignores_non_target_duplicates(tmp_path: Path) -> None:
+    # The #190 heal must stay scoped to the device-builder packages: a plain
+    # esphome pileup is the copy path's job (dedupe-all), not the update
+    # check's.
+    old = _make_dist_info(tmp_path, "esphome", "2026.7.0")
+    new = _make_dist_info(tmp_path, "esphome", "2026.7.1")
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert old.is_dir()
+    assert new.is_dir()
+
+
+def test_dedupe_all_prunes_any_package(tmp_path: Path) -> None:
+    # The live #389 shape: the installer overlays the bundle without deleting
+    # the previous release's files, stranding its dist-info next to the new
+    # one for several packages at once.
+    esphome_old = _make_dist_info(tmp_path, "esphome", "2026.7.0")
+    esphome_new = _make_dist_info(tmp_path, "esphome", "2026.7.1")
+    aioesp_old = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.0")
+    aioesp_new = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2")
+    single = _make_dist_info(tmp_path, "bleak", "2.1.1")
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 2
+    assert esphome_new.is_dir()
+    assert aioesp_new.is_dir()
+    assert single.is_dir()
+    assert not esphome_old.exists()
+    assert not aioesp_old.exists()
+
+
+def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
+    # The guard behavior must survive the scope widening: an all-unparseable
+    # group is left whole, and an unparseable sibling is never deleted on the
+    # strength of the lowest-sort sentinel.
+    amb_a = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.0", with_version=False)
+    amb_b = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2", with_version=False)
+    keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
+    broken = _make_dist_info(tmp_path, "esphome", "2026.7.0", with_version=False)
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 0
+    for path in (amb_a, amb_b, keep, broken):
+        assert path.is_dir()
