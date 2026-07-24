@@ -40,11 +40,7 @@ CAP = 800
 #
 # The list only shrinks. Once a file drops to the cap or below, the check
 # fails until its entry is deleted, and from then on the cap holds it there.
-EXEMPT: frozenset[str] = frozenset(
-    {
-        "src-tauri/src/lib.rs",
-    }
-)
+EXEMPT: frozenset[str] = frozenset()
 
 
 def _code_before_comment(line: str) -> str:
