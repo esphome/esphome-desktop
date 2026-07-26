@@ -13,9 +13,9 @@
     "startup": "Startup",
     "launch_at_login": "Launch at Login",
     "dont_launch_at_login": "Don't Launch at Login",
-    "check_updates": "Check for Updates...",
-    "view_logs": "View Logs...",
-    "open_config": "Open Config Folder...",
+    "check_updates": "Check for Updates",
+    "view_logs": "View Logs",
+    "open_config": "Open Config Folder",
     "restart_dashboard": "Restart Dashboard",
     "quit": "Quit ESPHome"
   },
@@ -99,7 +99,7 @@
   },
   "daemon": {
     "stopped_title": "{backend} stopped",
-    "stopped_body": "{backend} exited unexpectedly ({status}). Open the tray menu and choose \"View Logs...\" for details."
+    "stopped_body": "{backend} exited unexpectedly ({status}). Open the tray menu and choose \"View Logs\" for details."
   },
   "git_check": {
     "missing_title": "Git is not installed",
@@ -119,7 +119,7 @@
     "firewall_decline": "No thanks"
   },
   "hint": {
-    "updates_menu": "Open the tray menu and choose \"Check for Updates...\" to update.",
+    "updates_menu": "Open the tray menu and choose \"Check for Updates\" to update.",
     "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update."
   }
 }
