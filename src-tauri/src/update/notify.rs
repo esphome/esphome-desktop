@@ -185,12 +185,12 @@ mod tests {
         assert_eq!(
             update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", true),
             "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
-             Open the tray menu and choose \"Check for Updates...\" to update."
+             Open the tray menu and choose \"Check for Updates\" to update."
         );
         assert_eq!(
             update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", true),
             "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
-             Open the tray menu and choose \"Check for Updates...\" to update."
+             Open the tray menu and choose \"Check for Updates\" to update."
         );
         // Without a tray, the hint falls back to the CLI.
         assert_eq!(
