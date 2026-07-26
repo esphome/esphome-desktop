@@ -176,7 +176,6 @@ pub fn build_tray_menu(app_handle: &AppHandle, state: &Arc<AppState>) -> Result<
     let menu = MenuBuilder::new(app_handle)
         .item(
             &MenuItemBuilder::with_id(ids::OPEN_DASHBOARD, t("tray.open_dashboard"))
-                .accelerator("CmdOrCtrl+O")
                 .build(app_handle)?,
         )
         .separator()
