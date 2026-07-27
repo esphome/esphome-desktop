@@ -21,13 +21,13 @@ count against it, wherever in the file it sits, so a well tested file is never
 pushed over the cap by its own tests. Everything else does count: code that
 follows a test module, and a test module nested inside another `mod`.
 
-Six files were already over the cap when it landed and are grandfathered in the
-script's `EXEMPT` list. They are allowed to grow, so no in-flight work is
-blocked by a rule it predates. The list only shrinks: once one of them drops to
-the cap or below, the check fails until its entry is removed, and the cap holds
-it there from then on. `src-tauri/src/platform/mod.rs` is the worst of them at
-roughly 2300 code lines; see
-[#342](https://github.com/esphome/esphome-desktop/issues/342) for the split.
+The script's `EXEMPT` list is empty: the six files that were already over the
+cap when it landed have all since been brought back under it. The mechanism
+stays for the next rule that lands on top of in-flight work — an exempt file is
+allowed to grow, so nothing is blocked by a rule it predates — but the list only
+shrinks. Once an exempt file drops to the cap or below, the check fails until
+its entry is removed, and the cap holds it there from then on. Don't add
+entries; split the file instead.
 
 To check before pushing:
 
