@@ -20,7 +20,7 @@ const CHILD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_milli
 const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How a child bounded by [`run_bounded`] finished.
-pub(crate) enum BoundedRun {
+pub(in crate::platform) enum BoundedRun {
     /// It exited on its own, within the deadline.
     Exited(std::process::Output),
     /// It outlived the deadline and was killed. Its stderr survives the kill —
@@ -49,7 +49,7 @@ pub(crate) enum BoundedRun {
 /// bytes are accumulated where this function can reach them without the reader's
 /// cooperation, so giving up on a stuck reader costs the tail of the output
 /// rather than the guarantee.
-pub(crate) fn run_bounded(
+pub(in crate::platform) fn run_bounded(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
 ) -> std::io::Result<BoundedRun> {

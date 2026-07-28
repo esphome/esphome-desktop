@@ -279,7 +279,7 @@ pub fn assign_to_kill_on_close_job(process: std::os::windows::io::RawHandle) -> 
 
 /// Assign a live child process to `job`, warning with the Win32 cause and
 /// returning `false` on failure. Shared by the process-wide singleton
-/// ([`assign_to_kill_on_close_job`]) and `run_bounded`'s per-call [`bounded::Reaper`]:
+/// ([`assign_to_kill_on_close_job`]) and `run_bounded`'s per-call `Reaper`:
 /// which job to use is the caller's choice, the assignment itself is identical.
 /// Takes ownership of neither handle.
 #[cfg(target_os = "windows")]
@@ -337,7 +337,7 @@ fn kill_on_close_job() -> Option<::windows::Win32::Foundation::HANDLE> {
 /// process-wide singleton above and the per-call jobs [`run_bounded`] uses to
 /// reap a bounded child's descendants, so the `KILL_ON_JOB_CLOSE` limit has one
 /// home. The caller owns the returned handle and decides when to close it (the
-/// singleton never does; `run_bounded`'s [`bounded::Reaper`] does on drop).
+/// singleton never does; `run_bounded`'s `Reaper` does on drop).
 #[cfg(target_os = "windows")]
 fn create_kill_on_close_job() -> Option<JobHandle> {
     use ::windows::core::PCWSTR;
