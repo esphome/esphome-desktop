@@ -13,13 +13,10 @@ use std::time::Duration;
 
 use super::{
     connect, read_reply_line, reply_reader, send_request, ConnectError, LineStep, SendError,
-    DEFAULT_TIMEOUT, EXIT_BUSY, EXIT_FAILED, EXIT_NOT_RUNNING, UPDATE_TIMEOUT,
+    DEFAULT_TIMEOUT, EXIT_BUSY, EXIT_FAILED, EXIT_NOT_RUNNING, EXIT_SUCCESS, UPDATE_TIMEOUT,
 };
 use crate::control::protocol::{self, ErrCode, Reply, Request, STEP_APP_RESTARTING};
 use crate::ApiMethod;
-
-/// The operation succeeded.
-const EXIT_SUCCESS: u8 = 0;
 
 /// `check-update` hits GitHub and PyPI and spawns Python for the installed
 /// versions; more headroom than a local request, far less than an install.

@@ -18,6 +18,8 @@ use crate::{CliCommand, OnOff};
 mod api;
 mod logs;
 
+/// The operation succeeded.
+const EXIT_SUCCESS: u8 = 0;
 /// The operation ran and failed.
 const EXIT_FAILED: u8 = 1;
 /// The app is not running (or the control channel is unreachable).
