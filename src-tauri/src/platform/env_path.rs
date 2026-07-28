@@ -111,7 +111,10 @@ fn path_with_prepended(existing: &OsStr, dir: &Path) -> Result<OsString> {
     }
     let mut entries = vec![dir.to_path_buf()];
     entries.extend(std::env::split_paths(existing));
-    std::env::join_paths(entries).context("Failed to build PATH with bundled git prepended")
+    // Name the dir rather than a tool: the prepend path serves git, patch and
+    // ccache, so a hardcoded "bundled git" would misattribute the other two.
+    std::env::join_paths(entries)
+        .with_context(|| format!("Failed to build PATH with {dir:?} prepended"))
 }
 
 /// Build a `PATH` value with `dir` appended after `existing`.
