@@ -17,7 +17,7 @@ use tauri::AppHandle;
 /// MinGit lays out a `cmd/git.exe` wrapper (alongside `mingw64/bin/git.exe`);
 /// `cmd` is the directory Git-for-Windows recommends putting on `PATH`.
 #[cfg(target_os = "windows")]
-pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let resource_dir = super::get_bundled_resource_dir(app_handle)?;
     Ok(resource_dir.join("git").join("cmd"))
 }
@@ -30,7 +30,7 @@ pub fn get_bundled_git_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// We expose only this dir, not MinGit's full `usr/bin`, so the build doesn't
 /// pick up MSYS `sh`/`find`/`sort` that shadow Windows built-ins.
 #[cfg(target_os = "windows")]
-pub fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+fn get_bundled_patch_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let resource_dir = super::get_bundled_resource_dir(app_handle)?;
     Ok(resource_dir.join("git").join("patch"))
 }
@@ -86,7 +86,7 @@ fn bundled_git_ca_bundle(app_handle: &AppHandle) -> Result<Option<PathBuf>> {
 /// Putting this dir on `PATH` lets ESPHome's ESP-IDF build discover ccache and
 /// enable compiler caching automatically.
 #[cfg(target_os = "windows")]
-pub fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
+fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let resource_dir = super::get_bundled_resource_dir(app_handle)?;
     Ok(resource_dir.join("ccache"))
 }
