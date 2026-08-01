@@ -80,33 +80,32 @@ const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 /// headline and its own opening — the symptom and the cause — keeping only
 /// the boilerplate.
 ///
-/// pip's manual-recovery hints are stripped first: see
-/// [`strip_pip_recovery_hints`].
+/// pip's hint lines are stripped first: see [`strip_pip_hint_lines`].
 fn pip_failure_report(stdout: &str, stderr: &str) -> String {
-    let stderr = tail_for_log(&strip_pip_recovery_hints(stderr));
+    let stderr = tail_for_log(&strip_pip_hint_lines(stderr));
     match stdout.find(PIP_CONFLICT_MARKER) {
         Some(start) => format!("{stderr}\n{}", head_for_log(&stdout[start..])),
         None => stderr,
     }
 }
 
-/// Drop pip's "recover from this via: pip install ..." hint lines from a
-/// report the user will see.
+/// Drop pip's `hint:` lines from a report the user will see.
 ///
-/// Under the missing-RECORD abort pip prints `hint: You might be able to
-/// recover from this via: pip install --ignore-installed --no-deps <pkg>==<v>`
-/// (`--force-reinstall` on newer pips). Surfacing that in the failure dialog
-/// is bad advice twice over. The flags skip pip's uninstall bookkeeping, which
-/// piles more orphaned metadata onto an already-corrupt tree and moves the
-/// failure instead of fixing it — the same damage that got `--ignore-installed`
-/// removed from the app (#330). And a user typing the command into a terminal
-/// runs their system pip, not the bundled interpreter, so the "recovery" lands
-/// in a Python this app never imports from. Only command hints are dropped;
-/// hint lines that merely explain stay.
-fn strip_pip_recovery_hints(stderr: &str) -> String {
+/// The hints speak to whoever manages the installed environment directly, and
+/// in this app that is only ever the updater: the environment is the bundled
+/// tree, reachable through the app alone, so no hint is user-actionable. The
+/// worst of them is actively harmful: under the missing-RECORD abort pip
+/// prints `hint: You might be able to recover from this via: pip install
+/// --ignore-installed --no-deps <pkg>==<v>` (`--force-reinstall` on newer
+/// pips), which skips pip's uninstall bookkeeping and piles more orphaned
+/// metadata onto an already-corrupt tree — the same damage that got
+/// `--ignore-installed` removed from the app (#330) — and a user typing it
+/// into a terminal reaches their system pip, not the bundled interpreter. The
+/// error lines above the hint keep carrying the facts a bug report needs.
+fn strip_pip_hint_lines(stderr: &str) -> String {
     stderr
         .lines()
-        .filter(|line| !(line.trim_start().starts_with("hint:") && line.contains("pip install")))
+        .filter(|line| !line.trim_start().starts_with("hint:"))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -404,14 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn pip_failure_report_keeps_hints_that_are_not_commands() {
-        // Only command hints are misleading; a hint that merely explains is
-        // context worth keeping in a bug report.
+    fn pip_failure_report_drops_every_hint_line() {
+        // Not just the recovery command: every pip hint addresses whoever
+        // manages the installed environment directly, and here that is only
+        // ever the updater. The error lines above it stay, since they carry
+        // the facts a bug report needs.
         let report = pip_failure_report(
             "",
             "ERROR: something broke\nhint: See above for the traceback.\n",
         );
-        assert!(report.contains("hint: See above for the traceback."));
+        assert!(report.contains("ERROR: something broke"), "{report}");
+        assert!(!report.contains("hint:"), "{report}");
     }
 
     #[test]
