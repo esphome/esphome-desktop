@@ -79,12 +79,36 @@ const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 /// Bounding the joined report instead would let a long diagnostic evict the
 /// headline and its own opening — the symptom and the cause — keeping only
 /// the boilerplate.
+///
+/// pip's manual-recovery hints are stripped first: see
+/// [`strip_pip_recovery_hints`].
 fn pip_failure_report(stdout: &str, stderr: &str) -> String {
-    let stderr = tail_for_log(stderr);
+    let stderr = tail_for_log(&strip_pip_recovery_hints(stderr));
     match stdout.find(PIP_CONFLICT_MARKER) {
         Some(start) => format!("{stderr}\n{}", head_for_log(&stdout[start..])),
         None => stderr,
     }
+}
+
+/// Drop pip's "recover from this via: pip install ..." hint lines from a
+/// report the user will see.
+///
+/// Under the missing-RECORD abort pip prints `hint: You might be able to
+/// recover from this via: pip install --ignore-installed --no-deps <pkg>==<v>`
+/// (`--force-reinstall` on newer pips). Surfacing that in the failure dialog
+/// is bad advice twice over. The flags skip pip's uninstall bookkeeping, which
+/// piles more orphaned metadata onto an already-corrupt tree and moves the
+/// failure instead of fixing it — the same damage that got `--ignore-installed`
+/// removed from the app (#330). And a user typing the command into a terminal
+/// runs their system pip, not the bundled interpreter, so the "recovery" lands
+/// in a Python this app never imports from. Only command hints are dropped;
+/// hint lines that merely explain stay.
+fn strip_pip_recovery_hints(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| !(line.trim_start().starts_with("hint:") && line.contains("pip install")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// [`pip_failure_report`] over a captured pip [`std::process::Output`].
@@ -354,6 +378,40 @@ mod tests {
             report.len() <= 2 * LOG_TAIL_BYTES + 100,
             "report is bounded"
         );
+    }
+
+    #[test]
+    fn pip_failure_report_drops_pips_manual_recovery_hint() {
+        // The hint is pip talking to a developer at a terminal. In this app it
+        // is wrong twice over: the suggested flags skip pip's uninstall
+        // bookkeeping (the very damage that got --ignore-installed removed,
+        // #330), and a user's terminal pip is the system one, not the bundled
+        // interpreter. A user was sent chasing exactly this "recovery".
+        for flag in ["--ignore-installed", "--force-reinstall"] {
+            let stderr = format!(
+                "error: uninstall-no-record-file\n\n\
+                 × Cannot uninstall esphome-device-builder-frontend None\n\
+                 ╰─> The package's contents are unknown: no RECORD file was \
+                 found for esphome-device-builder-frontend.\n\n\
+                 hint: You might be able to recover from this via: pip install \
+                 {flag} --no-deps esphome-device-builder-frontend==0.1.172\n"
+            );
+            let report = pip_failure_report("", &stderr);
+            assert!(report.contains("no RECORD file was found"), "{report}");
+            assert!(!report.contains("pip install"), "{report}");
+            assert!(!report.contains(flag), "{report}");
+        }
+    }
+
+    #[test]
+    fn pip_failure_report_keeps_hints_that_are_not_commands() {
+        // Only command hints are misleading; a hint that merely explains is
+        // context worth keeping in a bug report.
+        let report = pip_failure_report(
+            "",
+            "ERROR: something broke\nhint: See above for the traceback.\n",
+        );
+        assert!(report.contains("hint: See above for the traceback."));
     }
 
     #[test]
