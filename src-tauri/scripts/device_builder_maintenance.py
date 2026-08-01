@@ -121,9 +121,14 @@ def _infer_name(path: Path) -> str:
     """Normalized package name from a ``*.dist-info`` directory name.
 
     ``pkg_name-1.2.3.dist-info`` -> ``pkg-name``; with no version separator the
-    whole stem is taken as the name. Only used when METADATA is missing or has
-    no Name header, and only for scope filtering and grouping; version ranking
-    never trusts the directory name.
+    whole stem is taken as the name. The wheel spec underscore-normalizes the
+    name part, so the last ``-`` always cuts at the version for anything pip
+    wrote, and pip resolves identity from the directory name the same way when
+    METADATA is gone ("Cannot uninstall esphome-device-builder-frontend None").
+
+    Only used when METADATA is missing or has no Name header, and only to
+    scope-filter the entry and attribute the metadata-dead removal; an
+    inferred name never ranks its entry against properly named siblings.
     """
     stem = path.name[: -len(".dist-info")]
     name, sep, _version = stem.rpartition("-")
@@ -173,7 +178,7 @@ def dedupe_dist_info(
     uninstall one, so it aborts every upgrade with ``uninstall-no-record-file``
     until it is gone. Returns the number of dist-info directories removed.
     """
-    groups: dict[str, list[tuple[str | None, Path, bool]]] = {}
+    groups: dict[str, list[tuple[str | None, Path, bool, bool]]] = {}
     for dist in dists:
         # ``_path`` is private; guard it so a future importlib change degrades to
         # a no-op rather than deleting the wrong directory.
@@ -200,10 +205,11 @@ def dedupe_dist_info(
                 f"dedupe: unreadable metadata in {path}: {err}",
                 file=sys.stderr,
             )
-        if not name:
+        inferred = not name
+        if inferred:
             # No METADATA, or one with no Name header. The directory name still
-            # identifies the package well enough to scope-filter and group the
-            # entry; without it the torn dist-info behind the permanent
+            # identifies the package well enough to scope-filter the entry;
+            # without it the torn dist-info behind the permanent
             # uninstall-no-record-file abort could never be considered at all.
             name = _infer_name(path)
         if not name:
@@ -214,12 +220,14 @@ def dedupe_dist_info(
             continue
         if targets is not None and name not in targets:
             continue
-        groups.setdefault(name, []).append((version, path, (path / "RECORD").is_file()))
+        groups.setdefault(name, []).append(
+            (version, path, (path / "RECORD").is_file(), inferred)
+        )
 
     removed = 0
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
-        for version, path, has_record in entries:
+        for version, path, has_record, inferred in entries:
             if vkey(version) == _UNRANKED and not has_record:
                 # Metadata-dead: no readable version and no RECORD. pip cannot
                 # uninstall this entry, so any install that tries aborts with
@@ -234,6 +242,15 @@ def dedupe_dist_info(
                     removed += 1
                 except OSError as err:
                     print(f"skip {path}: {err}", file=sys.stderr)
+                continue
+            if inferred:
+                # A directory name is identity enough to condemn a
+                # metadata-dead entry above (pip trusts it the same way when
+                # it aborts), but not to rank the entry against properly named
+                # siblings: a corrupted name landing in another package's
+                # group could evict that package's real dist-info. Keep it
+                # and keep it out of the ranking.
+                print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
                 continue
             items.append((version, path))
         if len(items) < 2:

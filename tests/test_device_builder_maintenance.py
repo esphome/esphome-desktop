@@ -344,6 +344,21 @@ def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
     assert torn.is_dir()
 
 
+def test_dedupe_inferred_name_never_ranks(tmp_path: Path) -> None:
+    # A dir-name-only identity is enough to condemn a metadata-dead entry, but
+    # never to rank one: a corrupted dist-info whose METADATA lost its Name but
+    # kept a high-sorting Version, and whose directory name collides with a
+    # real package, must not evict that package's genuine dist-info, and must
+    # not be evicted itself on the strength of the collision.
+    imposter = _make_dist_info(tmp_path, "esphome", "9999.0.0", with_name=False)
+    real = _make_dist_info(tmp_path, "esphome", "2026.7.1")
+    stale = _make_dist_info(tmp_path, "esphome", "2026.7.0")
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 1
+    assert imposter.is_dir()
+    assert real.is_dir()
+    assert not stale.exists()
+
+
 def test_dedupe_default_scope_leaves_non_target_metadata_dead(tmp_path: Path) -> None:
     # The lazy update-check heal stays scoped to the builder packages even for
     # metadata-dead entries; the post-copy dedupe-all owns the whole tree.
