@@ -424,10 +424,10 @@ pub(crate) enum DistInfoDedupeScope {
 /// pinned-version snapshot/restore around a tree refresh compares against a
 /// stale version (#389). The prune itself lives in
 /// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry pip can still
-/// manage but cannot be ranked; a metadata-dead entry (no readable version
-/// and no RECORD) is removed, because pip aborts every upgrade with
-/// `uninstall-no-record-file` while one exists and the bundled tree itself
-/// can carry one (#389). See the pytest suite for the guard behavior.
+/// manage but cannot be ranked; a RECORD-less entry is removed, because pip
+/// aborts every upgrade with `uninstall-no-record-file` while one exists and
+/// the bundled tree itself can carry one (#389). See the pytest suite for the
+/// guard behavior.
 ///
 /// `Err` covers both a failed spawn and a non-zero exit; callers on paths that
 /// must not fail (the copy in [`refresh_python_tree`], the best-effort heal in
@@ -826,8 +826,7 @@ mod tests {
         // The bare `dedupe` mode is matched by its dispatch line because any
         // string containing "dedupe-all" trivially contains "dedupe".
         assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("if mode == \"dedupe\":"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe-all"));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("if mode in (\"dedupe\", \"dedupe-all\"):"));
         assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 

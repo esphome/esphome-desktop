@@ -12,7 +12,7 @@ name: Python Tree Repair
 # self-contained and healthy; an orphaned component directory (exactly what the
 # removed `--ignore-installed` fallback left behind, and what broke every
 # compile on 2026.7) fails the health probe; the repair re-copy removes it with
-# no network; a tree carrying a metadata-dead frontend dist-info makes the real
+# no network; a tree carrying a RECORD-less frontend dist-info makes the real
 # updater pip command abort with uninstall-no-record-file and a repair from a
 # source carrying the same corruption recovers it (the "Cannot uninstall
 # esphome-device-builder-frontend None" report); and a refresh from an older

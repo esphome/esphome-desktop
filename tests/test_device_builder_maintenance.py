@@ -20,6 +20,7 @@ from __future__ import annotations
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
+import pytest
 from script_loader import load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -135,7 +136,7 @@ def test_dedupe_keeps_highest_and_removes_rest(tmp_path: Path) -> None:
         version: _make_dist_info(tmp_path, "esphome-device-builder", version)
         for version in ("1.0.1", "1.0.9", "1.0.10", "1.0.10b1")
     }
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 3
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (3, 0)
     assert paths["1.0.10"].is_dir()
     for version in ("1.0.1", "1.0.9", "1.0.10b1"):
         assert not paths[version].exists()
@@ -152,7 +153,7 @@ def test_dedupe_never_deletes_an_unparseable_duplicate(tmp_path: Path) -> None:
     broken = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.9", with_version=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert keep.is_dir()
     assert broken.is_dir()
     assert maint.detect_version(_dists(tmp_path)) == "1.0.10"
@@ -166,7 +167,7 @@ def test_dedupe_prunes_parseable_but_spares_unparseable_sibling(tmp_path: Path) 
     broken = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.8", with_version=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 1
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
     assert keep.is_dir()
     assert not stale.exists()
     assert broken.is_dir()
@@ -178,14 +179,14 @@ def test_dedupe_skips_group_with_no_parseable_version(tmp_path: Path) -> None:
     b = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.10", with_version=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert a.is_dir()
     assert b.is_dir()
 
 
 def test_dedupe_leaves_single_install_untouched(tmp_path: Path) -> None:
     only = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert only.is_dir()
 
 
@@ -194,7 +195,7 @@ def test_dedupe_groups_frontend_independently(tmp_path: Path) -> None:
     _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
     fe_keep = _make_dist_info(tmp_path, "esphome-device-builder-frontend", "0.1.170")
     _make_dist_info(tmp_path, "esphome-device-builder-frontend", "0.1.158")
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 2
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (2, 0)
     assert main_keep.is_dir()
     assert fe_keep.is_dir()
 
@@ -210,7 +211,7 @@ def test_dedupe_default_scope_ignores_non_target_duplicates(tmp_path: Path) -> N
     # check's.
     old = _make_dist_info(tmp_path, "esphome", "2026.7.0")
     new = _make_dist_info(tmp_path, "esphome", "2026.7.1")
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert old.is_dir()
     assert new.is_dir()
 
@@ -224,7 +225,7 @@ def test_dedupe_all_prunes_any_package(tmp_path: Path) -> None:
     aioesp_old = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.0")
     aioesp_new = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2")
     single = _make_dist_info(tmp_path, "bleak", "2.1.1")
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 2
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (2, 0)
     assert esphome_new.is_dir()
     assert aioesp_new.is_dir()
     assert single.is_dir()
@@ -242,7 +243,7 @@ def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
     orphan_b = _make_dist_info(tmp_path, "pkg-b", "2.0.0", with_name=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
     stale = _make_dist_info(tmp_path, "esphome", "2026.7.0")
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 1
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (1, 0)
     assert orphan_a.is_dir()
     assert orphan_b.is_dir()
     assert keep.is_dir()
@@ -257,19 +258,19 @@ def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
     amb_b = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2", with_version=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
     broken = _make_dist_info(tmp_path, "esphome", "2026.7.0", with_version=False)
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (0, 0)
     for path in (amb_a, amb_b, keep, broken):
         assert path.is_dir()
 
 
 # --------------------------------------------------------------------------- #
-# metadata-dead dist-infos: no readable version and no RECORD. pip can never
-# uninstall one, so every upgrade aborts with uninstall-no-record-file
-# ("Cannot uninstall <pkg> None") until it is removed.
+# RECORD-less dist-infos: pip can never uninstall one, so every upgrade aborts
+# with uninstall-no-record-file ("Cannot uninstall <pkg> None", or with the
+# version when METADATA survived) until it is removed.
 # --------------------------------------------------------------------------- #
 
 
-def test_dedupe_removes_metadata_dead_frontend_beside_healthy(tmp_path: Path) -> None:
+def test_dedupe_removes_record_less_frontend_beside_healthy(tmp_path: Path) -> None:
     # The reported Windows failure: the installer overlay leaves a torn
     # frontend dist-info (no METADATA, no RECORD) in the bundled tree, the
     # repair re-copy faithfully restores it, and the retried install hits the
@@ -284,13 +285,13 @@ def test_dedupe_removes_metadata_dead_frontend_beside_healthy(tmp_path: Path) ->
         with_metadata=False,
         with_record=False,
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 1
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
     assert keep.is_dir()
     assert not dead.exists()
     assert (keep / "RECORD").is_file()
 
 
-def test_dedupe_removes_lone_metadata_dead_entry(tmp_path: Path) -> None:
+def test_dedupe_removes_lone_record_less_entry(tmp_path: Path) -> None:
     # No healthy sibling to compare against: the entry is condemned on its own
     # evidence. A completed pip install always writes RECORD, so this cannot
     # be the real install, and pip aborts the upgrade as long as it exists.
@@ -301,7 +302,7 @@ def test_dedupe_removes_lone_metadata_dead_entry(tmp_path: Path) -> None:
         with_metadata=False,
         with_record=False,
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 1
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
     assert not dead.exists()
 
 
@@ -324,10 +325,71 @@ def test_dedupe_removes_dist_info_with_read_only_contents(tmp_path: Path) -> Non
         locked = dist_info / "locked.txt"
         locked.write_text("")
         locked.chmod(0o444)
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 2
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (2, 0)
     assert keep.is_dir()
     assert not stale.exists()
     assert not dead.exists()
+
+
+def test_dedupe_removes_record_less_entry_with_healthy_metadata(tmp_path: Path) -> None:
+    # The other torn shape: METADATA intact, RECORD gone. pip aborts the
+    # upgrade identically (the message just carries the version instead of
+    # None), so version readability must not shield the entry; the abort keys
+    # off the missing RECORD alone.
+    keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    torn = _make_dist_info(
+        tmp_path, "esphome-device-builder", "1.0.9", with_record=False
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
+    assert keep.is_dir()
+    assert not torn.exists()
+
+
+def test_dedupe_counts_a_record_less_entry_it_cannot_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A RECORD-less dir that survives the prune still aborts every install, so
+    # it must be reported as a failure (the CLI exits non-zero on it), never
+    # folded into "nothing to remove".
+    dead = _make_dist_info(
+        tmp_path,
+        "esphome-device-builder-frontend",
+        "0.1.150",
+        with_metadata=False,
+        with_record=False,
+    )
+
+    def refuse(_path: Path) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(maint, "_rmtree", refuse)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
+    assert dead.is_dir()
+
+
+def test_dedupe_skips_unlistable_dist_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A directory that cannot be listed decides nothing: a transient read
+    # failure must not turn "RECORD not seen" into "RECORD absent" and delete
+    # what might be a real install.
+    dead = _make_dist_info(
+        tmp_path,
+        "esphome-device-builder",
+        "1.0.9",
+        with_metadata=False,
+        with_record=False,
+    )
+    real_iterdir = Path.iterdir
+
+    def failing_iterdir(self: Path) -> object:
+        if self == dead:
+            raise OSError("transient read failure")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", failing_iterdir)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
+    assert dead.is_dir()
 
 
 def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
@@ -339,13 +401,13 @@ def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
     torn = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.9", with_metadata=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert keep.is_dir()
     assert torn.is_dir()
 
 
 def test_dedupe_inferred_name_never_ranks(tmp_path: Path) -> None:
-    # A dir-name-only identity is enough to condemn a metadata-dead entry, but
+    # A dir-name-only identity is enough to condemn a RECORD-less entry, but
     # never to rank one: a corrupted dist-info whose METADATA lost its Name but
     # kept a high-sorting Version, and whose directory name collides with a
     # real package, must not evict that package's genuine dist-info, and must
@@ -353,25 +415,25 @@ def test_dedupe_inferred_name_never_ranks(tmp_path: Path) -> None:
     imposter = _make_dist_info(tmp_path, "esphome", "9999.0.0", with_name=False)
     real = _make_dist_info(tmp_path, "esphome", "2026.7.1")
     stale = _make_dist_info(tmp_path, "esphome", "2026.7.0")
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 1
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (1, 0)
     assert imposter.is_dir()
     assert real.is_dir()
     assert not stale.exists()
 
 
-def test_dedupe_default_scope_leaves_non_target_metadata_dead(tmp_path: Path) -> None:
+def test_dedupe_default_scope_leaves_non_target_record_less(tmp_path: Path) -> None:
     # The lazy update-check heal stays scoped to the builder packages even for
-    # metadata-dead entries; the post-copy dedupe-all owns the whole tree.
+    # RECORD-less entries; the post-copy dedupe-all owns the whole tree.
     dead = _make_dist_info(
         tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert dead.is_dir()
 
 
-def test_dedupe_all_removes_any_metadata_dead(tmp_path: Path) -> None:
+def test_dedupe_all_removes_any_record_less(tmp_path: Path) -> None:
     # The #183 dev-channel shape was a torn zeroconf; dedupe-all must clear a
-    # metadata-dead entry for any package, healthy sibling or not.
+    # RECORD-less entry for any package, healthy sibling or not.
     dead = _make_dist_info(
         tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
     )
@@ -379,7 +441,7 @@ def test_dedupe_all_removes_any_metadata_dead(tmp_path: Path) -> None:
         tmp_path, "bleak", "2.1.0", with_metadata=False, with_record=False
     )
     keep = _make_dist_info(tmp_path, "zeroconf", "0.148.0")
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 2
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (2, 0)
     assert keep.is_dir()
     assert not dead.exists()
     assert not lone_dead.exists()

@@ -476,7 +476,7 @@ mod tests {
     /// is built from the other side: a second bundle source, copied from the
     /// first and pip-downgraded, so the snapshot beats the incoming bundle and
     /// the restore must reinstall. The repair leg itself stays offline; the
-    /// downgrade, the restore, and the metadata-dead abort/retry legs (8b and
+    /// downgrade, the restore, and the RECORD-less abort/retry legs (8b and
     /// 12, the reported "Cannot uninstall esphome-device-builder-frontend
     /// None" failure and its recovery) are where this test reaches PyPI.
     ///
@@ -621,7 +621,7 @@ mod tests {
             "Metadata-Version: 2.1\nName: esphome\nVersion: 0.0.1\n",
         )
         .unwrap();
-        // And the metadata-dead shape from the same overlay: a dist-info with
+        // And the RECORD-less shape from the same overlay: a dist-info with
         // no METADATA and no RECORD, which pip reports as "Cannot uninstall
         // esphome-device-builder-frontend None" and aborts every upgrade on.
         // A repair that reproduces it into the user tree makes the update
@@ -630,7 +630,7 @@ mod tests {
         std::fs::create_dir_all(e2e_purelib(&old_python).join(dead_dist_info_name)).unwrap();
 
         // 8b. Reproduce the reported user state in the user tree: the only
-        //     frontend dist-info is the metadata-dead one. The exact command
+        //     frontend dist-info is the RECORD-less one. The exact command
         //     the app's updater runs must abort the way the user saw, with
         //     uninstall-no-record-file; this is the premise the whole fix
         //     rests on, so assert it rather than assume it. (Reaches PyPI:
@@ -655,7 +655,7 @@ mod tests {
         );
         assert!(
             !ok,
-            "pip must abort on the metadata-dead frontend dist-info: {out}"
+            "pip must abort on the RECORD-less frontend dist-info: {out}"
         );
         assert!(
             out.contains("no RECORD file was found"),
@@ -719,7 +719,7 @@ mod tests {
         );
         assert!(
             !purelib.join(dead_dist_info_name).exists(),
-            "the metadata-dead dist-info survived the copy; pip aborts every \
+            "the RECORD-less dist-info survived the copy; pip aborts every \
              device-builder upgrade with uninstall-no-record-file while it exists"
         );
 

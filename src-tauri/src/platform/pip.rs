@@ -102,10 +102,27 @@ fn pip_failure_report(stdout: &str, stderr: &str) -> String {
 /// `--ignore-installed` removed from the app (#330) — and a user typing it
 /// into a terminal reaches their system pip, not the bundled interpreter. The
 /// error lines above the hint keep carrying the facts a bug report needs.
+///
+/// Indented lines following a `hint:` line are dropped with it: pip does not
+/// wrap the hint when its output is captured, but if a renderer change ever
+/// does, the continuation is where the command itself would land. pip's own
+/// diagnostic lines (`ERROR:`, `×`, `╰─>`) all start flush left, so nothing
+/// factual is indented in real stderr.
 fn strip_pip_hint_lines(stderr: &str) -> String {
+    let mut in_hint = false;
     stderr
         .lines()
-        .filter(|line| !line.trim_start().starts_with("hint:"))
+        .filter(|line| {
+            if line.trim_start().starts_with("hint:") {
+                in_hint = true;
+                return false;
+            }
+            if in_hint && line.starts_with(|c: char| c.is_whitespace()) && !line.trim().is_empty() {
+                return false;
+            }
+            in_hint = false;
+            true
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -400,6 +417,30 @@ mod tests {
             assert!(!report.contains("pip install"), "{report}");
             assert!(!report.contains(flag), "{report}");
         }
+    }
+
+    #[test]
+    fn pip_failure_report_drops_a_wrapped_hint_continuation() {
+        // pip does not wrap the hint when captured, but a renderer change
+        // could; the continuation line is where the pip install command
+        // itself would land, so the block is dropped through its indented
+        // continuations. The blank line and the flush-left diagnostics
+        // around it survive.
+        let report = pip_failure_report(
+            "",
+            "error: uninstall-no-record-file\n\
+             hint: You might be able to recover from this via: pip install\n\
+             \x20     --ignore-installed --no-deps esphome-device-builder-frontend==0.1.172\n\
+             \n\
+             ERROR: some closing line\n",
+        );
+        assert!(
+            report.contains("error: uninstall-no-record-file"),
+            "{report}"
+        );
+        assert!(report.contains("ERROR: some closing line"), "{report}");
+        assert!(!report.contains("pip install"), "{report}");
+        assert!(!report.contains("--ignore-installed"), "{report}");
     }
 
     #[test]

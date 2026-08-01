@@ -17,14 +17,16 @@ return None or the wrong version and loops the updater forever. The version
 ranking is self-contained so this does not depend on the third-party
 ``packaging`` library being importable in the bundled interpreter.
 
-Both dedupe modes also remove metadata-dead dist-info dirs: no readable
-version and no RECORD file. pip cannot uninstall such an entry, so every
-upgrade that touches the package aborts with ``uninstall-no-record-file``
-("Cannot uninstall <pkg> None"), and because the installer overlay can plant
+Both dedupe modes also remove RECORD-less dist-info dirs. pip cannot uninstall
+an entry with no RECORD file, so every upgrade that touches the package aborts
+with ``uninstall-no-record-file`` ("Cannot uninstall <pkg> None", or with the
+version when METADATA survived), and because the installer overlay can plant
 one in the bundled tree itself (#389), the repair re-copy restores it and the
 failure becomes permanent. A completed pip install always writes RECORD, so
 this shape is torn metadata rather than a real install; deleting the dist-info
-dir loses nothing pip could use, and the next install writes a fresh one.
+dir loses nothing pip could use, and the next install writes a fresh one. A
+RECORD-less entry the prune could not remove fails the run (exit 1): leaving
+it in place means that abort loop, which must not read as success.
 
 Embedded into the Rust binary via ``include_str!`` and run with the bundled
 interpreter as ``python -c <this file> <mode>``; also imported directly by the
@@ -103,16 +105,21 @@ def _rmtree(path: Path) -> None:
     """``shutil.rmtree`` that clears Windows' read-only flag and retries.
 
     Files inside a dist-info can carry the read-only attribute on Windows,
-    which fails the plain delete (same handling as ``esphome.helpers.rmtree``).
-    A path that is writable yet still failed re-raises: the flag is not the
-    problem there, and retrying would just fail again.
+    which fails the plain delete (same handling as ``esphome.helpers.rmtree``,
+    plus the execute bit so a chmod'd directory stays traversable for the
+    retry). A path that is writable yet still failed re-raises: the flag is
+    not the problem there, and retrying would just fail again. A retry that
+    fails anew chains the original error so the log names both causes.
     """
 
     def _onexc(func: Callable[[str], object], failed: str, exc: BaseException) -> None:
         if os.access(failed, os.W_OK):
             raise exc
-        Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR)
-        func(failed)
+        try:
+            Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+            func(failed)
+        except OSError as retry_err:
+            raise retry_err from exc
 
     shutil.rmtree(path, onexc=_onexc)
 
@@ -166,17 +173,19 @@ def detect_version(dists: Iterable[Distribution]) -> str | None:
 
 def dedupe_dist_info(
     dists: Iterable[Distribution], targets: set[str] | None = TARGETS
-) -> int:
+) -> tuple[int, int]:
     """Keep the highest-version dist-info per package; remove the rest.
 
     ``targets`` limits the prune to the given normalized package names;
     ``None`` considers every distribution (the ``dedupe-all`` mode).
 
     The newest version is the code installed last by ``pip install --upgrade``,
-    so its metadata is the one to keep. Metadata-dead entries (no readable
-    version and no RECORD) are removed regardless of group size: pip can never
-    uninstall one, so it aborts every upgrade with ``uninstall-no-record-file``
-    until it is gone. Returns the number of dist-info directories removed.
+    so its metadata is the one to keep. RECORD-less entries are removed
+    regardless of group size or version readability: pip can never uninstall
+    one, so it aborts every upgrade with ``uninstall-no-record-file`` until it
+    is gone. Returns ``(removed, failed)``: dist-info directories removed, and
+    RECORD-less ones that could not be removed — those leave the abort loop in
+    place, so the CLI turns them into a non-zero exit.
     """
     groups: dict[str, list[tuple[str | None, Path, bool, bool]]] = {}
     for dist in dists:
@@ -188,6 +197,14 @@ def dedupe_dist_info(
             or path.suffix != ".dist-info"
             or not path.is_dir()
         ):
+            continue
+        try:
+            children = {child.name for child in path.iterdir()}
+        except OSError as err:
+            # A directory that cannot even be listed decides nothing, least of
+            # all its own removal: a transient read failure must not turn
+            # "RECORD not seen" into "RECORD absent" and delete a real install.
+            print(f"dedupe: skipping unlistable {path}: {err}", file=sys.stderr)
             continue
         name = ""
         version = None
@@ -221,26 +238,31 @@ def dedupe_dist_info(
         if targets is not None and name not in targets:
             continue
         groups.setdefault(name, []).append(
-            (version, path, (path / "RECORD").is_file(), inferred)
+            (version, path, "RECORD" in children, inferred)
         )
 
     removed = 0
+    failed = 0
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
         for version, path, has_record, inferred in entries:
-            if vkey(version) == _UNRANKED and not has_record:
-                # Metadata-dead: no readable version and no RECORD. pip cannot
-                # uninstall this entry, so any install that tries aborts with
-                # uninstall-no-record-file ("Cannot uninstall <pkg> None"). A
-                # completed pip install always writes RECORD, so unlike the
-                # unrankable-but-managed case below this cannot be the real
-                # install, and removing the dist-info dir is the only way out
-                # of the abort loop.
-                print(f"dedupe: removing metadata-dead {path}", file=sys.stderr)
+            if not has_record:
+                # No RECORD: pip can never uninstall this entry, so any
+                # install that tries aborts with uninstall-no-record-file,
+                # whether or not the version is still readable ("Cannot
+                # uninstall <pkg> None", or with the version when METADATA
+                # survived). A completed pip install always writes RECORD, so
+                # unlike the unrankable-but-managed case below this cannot be
+                # the real install, and removing the dist-info dir is the only
+                # way out of the abort loop.
+                print(f"dedupe: removing RECORD-less {path}", file=sys.stderr)
                 try:
                     _rmtree(path)
                     removed += 1
                 except OSError as err:
+                    # Counted, not just logged: this entry still blocks every
+                    # install, so the run must not report success around it.
+                    failed += 1
                     print(f"skip {path}: {err}", file=sys.stderr)
                 continue
             if inferred:
@@ -269,7 +291,7 @@ def dedupe_dist_info(
             continue
         for version, path in items[:-1]:
             if vkey(version) == _UNRANKED:
-                # An unparseable version with a RECORD (metadata-dead entries
+                # An unparseable version with a RECORD (RECORD-less entries
                 # never reach this loop) might itself be the real install, so
                 # never delete it on the strength of the lowest-sort sentinel.
                 print(f"dedupe: keeping unrankable {path}", file=sys.stderr)
@@ -279,7 +301,7 @@ def dedupe_dist_info(
                 removed += 1
             except OSError as err:
                 print(f"skip {path}: {err}", file=sys.stderr)
-    return removed
+    return removed, failed
 
 
 def main(argv: list[str]) -> int:
@@ -289,12 +311,15 @@ def main(argv: list[str]) -> int:
         if version:
             print(version)
         return 0
-    if mode == "dedupe":
-        print(dedupe_dist_info(distributions()))
-        return 0
-    if mode == "dedupe-all":
-        print(dedupe_dist_info(distributions(), targets=None))
-        return 0
+    if mode in ("dedupe", "dedupe-all"):
+        removed, failed = dedupe_dist_info(
+            distributions(), targets=TARGETS if mode == "dedupe" else None
+        )
+        print(removed)
+        # A RECORD-less dir that survived the prune still aborts every
+        # install; exit 1 so the caller logs "still corrupt" instead of
+        # retrying into the same wall as if the tree were healed.
+        return 1 if failed else 0
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2
 
