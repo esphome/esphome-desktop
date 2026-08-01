@@ -476,7 +476,9 @@ mod tests {
     /// is built from the other side: a second bundle source, copied from the
     /// first and pip-downgraded, so the snapshot beats the incoming bundle and
     /// the restore must reinstall. The repair leg itself stays offline; the
-    /// downgrade and the restore are where this test reaches PyPI.
+    /// downgrade, the restore, and the metadata-dead abort/retry legs (8b and
+    /// 12, the reported "Cannot uninstall esphome-device-builder-frontend
+    /// None" failure and its recovery) are where this test reaches PyPI.
     ///
     /// One test rather than several because each step depends on the last
     /// leaving the tree in a particular state, and Rust does not order tests.
@@ -627,6 +629,39 @@ mod tests {
         let dead_dist_info_name = "esphome_device_builder_frontend-0.0.0.dist-info";
         std::fs::create_dir_all(e2e_purelib(&old_python).join(dead_dist_info_name)).unwrap();
 
+        // 8b. Reproduce the reported user state in the user tree: the only
+        //     frontend dist-info is the metadata-dead one. The exact command
+        //     the app's updater runs must abort the way the user saw, with
+        //     uninstall-no-record-file; this is the premise the whole fix
+        //     rests on, so assert it rather than assume it. (Reaches PyPI:
+        //     pip resolves the frontend wheel before the uninstall aborts.)
+        for entry in std::fs::read_dir(&purelib).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if name.starts_with("esphome_device_builder_frontend") && name.ends_with(".dist-info") {
+                std::fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
+        std::fs::create_dir_all(purelib.join(dead_dist_info_name)).unwrap();
+        let (ok, out) = e2e_pip(
+            &python,
+            &[
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "esphome-device-builder",
+            ],
+        );
+        assert!(
+            !ok,
+            "pip must abort on the metadata-dead frontend dist-info: {out}"
+        );
+        assert!(
+            out.contains("no RECORD file was found"),
+            "pip failed, but not with the missing-RECORD abort this state must produce: {out}"
+        );
+
         // 9. Refresh from the older source. The snapshot reads the newer
         //    version from the user tree, the copy lands the older one, and the
         //    restore must notice the downgrade and pip-reinstall the newer
@@ -686,6 +721,26 @@ mod tests {
             !purelib.join(dead_dist_info_name).exists(),
             "the metadata-dead dist-info survived the copy; pip aborts every \
              device-builder upgrade with uninstall-no-record-file while it exists"
+        );
+
+        // 12. The recovery the app performs is repair-then-retry with the
+        //     identical command (install_with_record_recovery), and the source
+        //     it repaired from carried the same corruption, exactly the
+        //     reported situation. The command that aborted in step 8b must
+        //     now succeed. (Reaches PyPI.)
+        let (ok, out) = e2e_pip(
+            &python,
+            &[
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "esphome-device-builder",
+            ],
+        );
+        assert!(
+            ok,
+            "the update retry still fails after the repair from a dirty source: {out}"
         );
 
         let _ = std::fs::remove_dir_all(&base);
