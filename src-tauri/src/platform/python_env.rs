@@ -423,8 +423,11 @@ pub(crate) enum DistInfoDedupeScope {
 /// device-builder update check loops on "version None" (#190), and the
 /// pinned-version snapshot/restore around a tree refresh compares against a
 /// stale version (#389). The prune itself lives in
-/// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry it cannot rank —
-/// see its pytest suite for the guard behavior.
+/// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry pip can still
+/// manage but cannot be ranked; a metadata-dead entry (no readable version
+/// and no RECORD) is removed, because pip aborts every upgrade with
+/// `uninstall-no-record-file` while one exists and the bundled tree itself
+/// can carry one (#389). See the pytest suite for the guard behavior.
 ///
 /// `Err` covers both a failed spawn and a non-zero exit; callers on paths that
 /// must not fail (the copy in [`refresh_python_tree`], the best-effort heal in

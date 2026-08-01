@@ -36,16 +36,26 @@ def _make_dist_info(
     *,
     with_version: bool = True,
     with_name: bool = True,
+    with_record: bool = True,
+    with_metadata: bool = True,
 ) -> Path:
-    """Create a *.dist-info dir for ``package`` and return its path."""
+    """Create a *.dist-info dir for ``package`` and return its path.
+
+    ``with_record=False`` and ``with_metadata=False`` fabricate the torn shapes
+    the installer overlay leaves behind; the default is a pip-manageable entry
+    (a completed pip install always writes RECORD).
+    """
     dist_info = site / f"{package.replace('-', '_')}-{version}.dist-info"
     dist_info.mkdir(parents=True)
-    lines = ["Metadata-Version: 2.1"]
-    if with_name:
-        lines.append(f"Name: {package}")
-    if with_version and version is not None:
-        lines.append(f"Version: {version}")
-    (dist_info / "METADATA").write_text("\n".join(lines) + "\n")
+    if with_metadata:
+        lines = ["Metadata-Version: 2.1"]
+        if with_name:
+            lines.append(f"Name: {package}")
+        if with_version and version is not None:
+            lines.append(f"Version: {version}")
+        (dist_info / "METADATA").write_text("\n".join(lines) + "\n")
+    if with_record:
+        (dist_info / "RECORD").write_text("")
     return dist_info
 
 
@@ -134,9 +144,10 @@ def test_dedupe_keeps_highest_and_removes_rest(tmp_path: Path) -> None:
 
 
 def test_dedupe_never_deletes_an_unparseable_duplicate(tmp_path: Path) -> None:
-    # A dist-info whose version can't be parsed might itself be the real install,
-    # so the destructive prune must keep it rather than trust the lowest-sort
-    # sentinel. detect_version still reports the real version regardless.
+    # A dist-info whose version can't be parsed but that pip can still manage
+    # (it has a RECORD) might itself be the real install, so the destructive
+    # prune must keep it rather than trust the lowest-sort sentinel.
+    # detect_version still reports the real version regardless.
     keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
     broken = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.9", with_version=False
@@ -222,10 +233,11 @@ def test_dedupe_all_prunes_any_package(tmp_path: Path) -> None:
 
 
 def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
-    # Two unrelated dist-infos whose METADATA lost its Name header normalize
-    # to ""; grouping them would prune one as a "duplicate" of the other even
-    # though they belong to different packages. Both must survive, and a
-    # healthy pair must still dedupe normally alongside them.
+    # Two unrelated dist-infos whose METADATA lost its Name header are
+    # attributed by their directory names, so they land in separate groups
+    # rather than being pruned as "duplicates" of one another. Both must
+    # survive (each is the only entry for its package and both still have a
+    # RECORD), and a healthy pair must still dedupe normally alongside them.
     orphan_a = _make_dist_info(tmp_path, "pkg-a", "1.0.0", with_name=False)
     orphan_b = _make_dist_info(tmp_path, "pkg-b", "2.0.0", with_name=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
@@ -239,8 +251,8 @@ def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
 
 def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
     # The guard behavior must survive the scope widening: an all-unparseable
-    # group is left whole, and an unparseable sibling is never deleted on the
-    # strength of the lowest-sort sentinel.
+    # group of managed entries is left whole, and an unparseable sibling with
+    # a RECORD is never deleted on the strength of the lowest-sort sentinel.
     amb_a = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.0", with_version=False)
     amb_b = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2", with_version=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
@@ -248,3 +260,86 @@ def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
     assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 0
     for path in (amb_a, amb_b, keep, broken):
         assert path.is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# metadata-dead dist-infos: no readable version and no RECORD. pip can never
+# uninstall one, so every upgrade aborts with uninstall-no-record-file
+# ("Cannot uninstall <pkg> None") until it is removed.
+# --------------------------------------------------------------------------- #
+
+
+def test_dedupe_removes_metadata_dead_frontend_beside_healthy(tmp_path: Path) -> None:
+    # The reported Windows failure: the installer overlay leaves a torn
+    # frontend dist-info (no METADATA, no RECORD) in the bundled tree, the
+    # repair re-copy faithfully restores it, and the retried install hits the
+    # same abort forever. The name comes from the directory alone, so the
+    # prune must still attribute and remove it while keeping the healthy
+    # install.
+    keep = _make_dist_info(tmp_path, "esphome-device-builder-frontend", "0.1.172")
+    dead = _make_dist_info(
+        tmp_path,
+        "esphome-device-builder-frontend",
+        "0.1.150",
+        with_metadata=False,
+        with_record=False,
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 1
+    assert keep.is_dir()
+    assert not dead.exists()
+    assert (keep / "RECORD").is_file()
+
+
+def test_dedupe_removes_lone_metadata_dead_entry(tmp_path: Path) -> None:
+    # No healthy sibling to compare against: the entry is condemned on its own
+    # evidence. A completed pip install always writes RECORD, so this cannot
+    # be the real install, and pip aborts the upgrade as long as it exists.
+    dead = _make_dist_info(
+        tmp_path,
+        "esphome-device-builder-frontend",
+        "0.1.150",
+        with_metadata=False,
+        with_record=False,
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 1
+    assert not dead.exists()
+
+
+def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
+    # Torn the other way: METADATA gone but RECORD intact. pip can still
+    # uninstall this one, so the next upgrade heals it without our help;
+    # deleting it here would discard the file list pip needs for that
+    # uninstall.
+    keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    torn = _make_dist_info(
+        tmp_path, "esphome-device-builder", "1.0.9", with_metadata=False
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert keep.is_dir()
+    assert torn.is_dir()
+
+
+def test_dedupe_default_scope_leaves_non_target_metadata_dead(tmp_path: Path) -> None:
+    # The lazy update-check heal stays scoped to the builder packages even for
+    # metadata-dead entries; the post-copy dedupe-all owns the whole tree.
+    dead = _make_dist_info(
+        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 0
+    assert dead.is_dir()
+
+
+def test_dedupe_all_removes_any_metadata_dead(tmp_path: Path) -> None:
+    # The #183 dev-channel shape was a torn zeroconf; dedupe-all must clear a
+    # metadata-dead entry for any package, healthy sibling or not.
+    dead = _make_dist_info(
+        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
+    )
+    lone_dead = _make_dist_info(
+        tmp_path, "bleak", "2.1.0", with_metadata=False, with_record=False
+    )
+    keep = _make_dist_info(tmp_path, "zeroconf", "0.148.0")
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == 2
+    assert keep.is_dir()
+    assert not dead.exists()
+    assert not lone_dead.exists()

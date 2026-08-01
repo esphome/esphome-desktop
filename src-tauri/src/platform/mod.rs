@@ -619,6 +619,13 @@ mod tests {
             "Metadata-Version: 2.1\nName: esphome\nVersion: 0.0.1\n",
         )
         .unwrap();
+        // And the metadata-dead shape from the same overlay: a dist-info with
+        // no METADATA and no RECORD, which pip reports as "Cannot uninstall
+        // esphome-device-builder-frontend None" and aborts every upgrade on.
+        // A repair that reproduces it into the user tree makes the update
+        // retry fail identically forever, so the post-copy dedupe must drop it.
+        let dead_dist_info_name = "esphome_device_builder_frontend-0.0.0.dist-info";
+        std::fs::create_dir_all(e2e_purelib(&old_python).join(dead_dist_info_name)).unwrap();
 
         // 9. Refresh from the older source. The snapshot reads the newer
         //    version from the user tree, the copy lands the older one, and the
@@ -674,6 +681,11 @@ mod tests {
             esphome_dist_infos,
             [format!("esphome-{current}.dist-info")],
             "the refreshed tree must hold exactly one esphome dist-info"
+        );
+        assert!(
+            !purelib.join(dead_dist_info_name).exists(),
+            "the metadata-dead dist-info survived the copy; pip aborts every \
+             device-builder upgrade with uninstall-no-record-file while it exists"
         );
 
         let _ = std::fs::remove_dir_all(&base);

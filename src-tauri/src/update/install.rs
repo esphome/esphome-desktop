@@ -39,6 +39,13 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// so this lazy device-builder-scoped heal mostly covers trees that predate
 /// that self-clean; duplicate metadata does not fail an install or the
 /// `esphome config` health probe, so nothing else would recover them.
+///
+/// The prune also removes metadata-dead dist-info dirs (no readable version,
+/// no RECORD). Those do fail an install — pip aborts with
+/// `uninstall-no-record-file` — and when the overlay plants one in the bundled
+/// tree, the repair re-copy restores it, so without this removal the
+/// [`install_with_record_recovery`] retry would hit the identical abort
+/// forever ("Cannot uninstall esphome-device-builder-frontend None").
 pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     let python_path = platform::get_python_path(app_handle)?;
     platform::dedupe_dist_info(&python_path, platform::DistInfoDedupeScope::DeviceBuilder)
@@ -276,6 +283,12 @@ fn is_missing_record_error(stderr: &str) -> bool {
 /// more against the clean tree. Any other failure bails immediately, reported
 /// through [`platform::pip_output_report`] so a resolution failure carries its
 /// cause from both of pip's streams.
+///
+/// The retry can only succeed if the repair actually clears the offending
+/// dist-info, and a re-copy alone does not when the bundled tree itself
+/// carries it (the installer overlay, #389): the post-copy dedupe's removal
+/// of metadata-dead dist-info dirs is what breaks that loop (see
+/// [`dedupe_device_builder_dist_info`]).
 ///
 /// The repair puts back the version the user had and `run` then installs the
 /// target over it, so this path can pip-install twice. That is deliberate, not

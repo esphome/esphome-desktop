@@ -17,6 +17,15 @@ return None or the wrong version and loops the updater forever. The version
 ranking is self-contained so this does not depend on the third-party
 ``packaging`` library being importable in the bundled interpreter.
 
+Both dedupe modes also remove metadata-dead dist-info dirs: no readable
+version and no RECORD file. pip cannot uninstall such an entry, so every
+upgrade that touches the package aborts with ``uninstall-no-record-file``
+("Cannot uninstall <pkg> None"), and because the installer overlay can plant
+one in the bundled tree itself (#389), the repair re-copy restores it and the
+failure becomes permanent. A completed pip install always writes RECORD, so
+this shape is torn metadata rather than a real install; deleting the dist-info
+dir loses nothing pip could use, and the next install writes a fresh one.
+
 Embedded into the Rust binary via ``include_str!`` and run with the bundled
 interpreter as ``python -c <this file> <mode>``; also imported directly by the
 pytest suite, which is why the functions take an injectable distributions
@@ -88,6 +97,19 @@ def _dist_path(dist: Distribution) -> object:
     return getattr(dist, "_path", "?")
 
 
+def _infer_name(path: Path) -> str:
+    """Normalized package name from a ``*.dist-info`` directory name.
+
+    ``pkg_name-1.2.3.dist-info`` -> ``pkg-name``; with no version separator the
+    whole stem is taken as the name. Only used when METADATA is missing or has
+    no Name header, and only for scope filtering and grouping; version ranking
+    never trusts the directory name.
+    """
+    stem = path.name[: -len(".dist-info")]
+    name, sep, _version = stem.rpartition("-")
+    return _norm(name if sep else stem)
+
+
 def detect_version(dists: Iterable[Distribution]) -> str | None:
     """Return the highest version among all esphome-device-builder dists.
 
@@ -126,11 +148,24 @@ def dedupe_dist_info(
     ``None`` considers every distribution (the ``dedupe-all`` mode).
 
     The newest version is the code installed last by ``pip install --upgrade``,
-    so its metadata is the one to keep. Returns the number of stale dist-info
-    directories removed.
+    so its metadata is the one to keep. Metadata-dead entries (no readable
+    version and no RECORD) are removed regardless of group size: pip can never
+    uninstall one, so it aborts every upgrade with ``uninstall-no-record-file``
+    until it is gone. Returns the number of dist-info directories removed.
     """
-    groups: dict[str, list[tuple[str | None, Path]]] = {}
+    groups: dict[str, list[tuple[str | None, Path, bool]]] = {}
     for dist in dists:
+        # ``_path`` is private; guard it so a future importlib change degrades to
+        # a no-op rather than deleting the wrong directory.
+        path = getattr(dist, "_path", None)
+        if (
+            not isinstance(path, Path)
+            or path.suffix != ".dist-info"
+            or not path.is_dir()
+        ):
+            continue
+        name = ""
+        version = None
         try:
             # .get() avoids the implicit-None DeprecationWarning (future
             # KeyError) on missing headers, and reading Version here keeps a
@@ -142,35 +177,45 @@ def dedupe_dist_info(
             # Log rather than silently skip: an unreadable target dist-info that
             # is never considered for dedup leaves the pileup in place (#190).
             print(
-                f"dedupe: skipping unreadable distribution {_dist_path(dist)}: {err}",
+                f"dedupe: unreadable metadata in {path}: {err}",
                 file=sys.stderr,
             )
-            continue
         if not name:
-            # A dist-info with no Name header cannot be attributed to a
-            # package. Grouping the nameless together (their names all
-            # normalize to "") would treat unrelated broken dist-infos as
-            # duplicates of one another — never prune on missing identity.
+            # No METADATA, or one with no Name header. The directory name still
+            # identifies the package well enough to scope-filter and group the
+            # entry; without it the torn dist-info behind the permanent
+            # uninstall-no-record-file abort could never be considered at all.
+            name = _infer_name(path)
+        if not name:
             print(
-                f"dedupe: skipping nameless distribution {_dist_path(dist)}",
+                f"dedupe: skipping nameless distribution {path}",
                 file=sys.stderr,
             )
             continue
         if targets is not None and name not in targets:
             continue
-        # ``_path`` is private; guard it so a future importlib change degrades to
-        # a no-op rather than deleting the wrong directory.
-        path = getattr(dist, "_path", None)
-        if (
-            not isinstance(path, Path)
-            or path.suffix != ".dist-info"
-            or not path.is_dir()
-        ):
-            continue
-        groups.setdefault(name, []).append((version, path))
+        groups.setdefault(name, []).append((version, path, (path / "RECORD").is_file()))
 
     removed = 0
-    for items in groups.values():
+    for entries in groups.values():
+        items: list[tuple[str | None, Path]] = []
+        for version, path, has_record in entries:
+            if vkey(version) == _UNRANKED and not has_record:
+                # Metadata-dead: no readable version and no RECORD. pip cannot
+                # uninstall this entry, so any install that tries aborts with
+                # uninstall-no-record-file ("Cannot uninstall <pkg> None"). A
+                # completed pip install always writes RECORD, so unlike the
+                # unrankable-but-managed case below this cannot be the real
+                # install, and removing the dist-info dir is the only way out
+                # of the abort loop.
+                print(f"dedupe: removing metadata-dead {path}", file=sys.stderr)
+                try:
+                    shutil.rmtree(path)
+                    removed += 1
+                except OSError as err:
+                    print(f"skip {path}: {err}", file=sys.stderr)
+                continue
+            items.append((version, path))
         if len(items) < 2:
             continue  # a single healthy install is left untouched
         items.sort(key=lambda item: vkey(item[0]))
@@ -187,7 +232,8 @@ def dedupe_dist_info(
             continue
         for version, path in items[:-1]:
             if vkey(version) == _UNRANKED:
-                # An unparseable version might itself be the real install, so
+                # An unparseable version with a RECORD (metadata-dead entries
+                # never reach this loop) might itself be the real install, so
                 # never delete it on the strength of the lowest-sort sentinel.
                 print(f"dedupe: keeping unrankable {path}", file=sys.stderr)
                 continue
