@@ -34,10 +34,12 @@ iterable instead of always reading the live environment.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import stat
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
@@ -95,6 +97,24 @@ def _norm(name: str | None) -> str:
 def _dist_path(dist: Distribution) -> object:
     """``dist``'s private ``_path`` for log messages, or ``"?"`` if absent."""
     return getattr(dist, "_path", "?")
+
+
+def _rmtree(path: Path) -> None:
+    """``shutil.rmtree`` that clears Windows' read-only flag and retries.
+
+    Files inside a dist-info can carry the read-only attribute on Windows,
+    which fails the plain delete (same handling as ``esphome.helpers.rmtree``).
+    A path that is writable yet still failed re-raises: the flag is not the
+    problem there, and retrying would just fail again.
+    """
+
+    def _onexc(func: Callable[[str], object], failed: str, exc: BaseException) -> None:
+        if os.access(failed, os.W_OK):
+            raise exc
+        Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR)
+        func(failed)
+
+    shutil.rmtree(path, onexc=_onexc)
 
 
 def _infer_name(path: Path) -> str:
@@ -210,7 +230,7 @@ def dedupe_dist_info(
                 # of the abort loop.
                 print(f"dedupe: removing metadata-dead {path}", file=sys.stderr)
                 try:
-                    shutil.rmtree(path)
+                    _rmtree(path)
                     removed += 1
                 except OSError as err:
                     print(f"skip {path}: {err}", file=sys.stderr)
@@ -238,7 +258,7 @@ def dedupe_dist_info(
                 print(f"dedupe: keeping unrankable {path}", file=sys.stderr)
                 continue
             try:
-                shutil.rmtree(path)
+                _rmtree(path)
                 removed += 1
             except OSError as err:
                 print(f"skip {path}: {err}", file=sys.stderr)

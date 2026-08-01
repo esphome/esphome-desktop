@@ -305,6 +305,31 @@ def test_dedupe_removes_lone_metadata_dead_entry(tmp_path: Path) -> None:
     assert not dead.exists()
 
 
+def test_dedupe_removes_dist_info_with_read_only_contents(tmp_path: Path) -> None:
+    # On Windows a read-only file inside the dist-info fails a plain
+    # shutil.rmtree, which would leave the abort loop in place with only a
+    # "skip" line on stderr. The remover must clear the flag and retry (on
+    # POSIX the delete succeeds either way, so this bites on the Windows CI
+    # leg, where the original failure lived).
+    keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    stale = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
+    dead = _make_dist_info(
+        tmp_path,
+        "esphome-device-builder-frontend",
+        "0.1.150",
+        with_metadata=False,
+        with_record=False,
+    )
+    for dist_info in (stale, dead):
+        locked = dist_info / "locked.txt"
+        locked.write_text("")
+        locked.chmod(0o444)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == 2
+    assert keep.is_dir()
+    assert not stale.exists()
+    assert not dead.exists()
+
+
 def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
     # Torn the other way: METADATA gone but RECORD intact. pip can still
     # uninstall this one, so the next upgrade heals it without our help;
