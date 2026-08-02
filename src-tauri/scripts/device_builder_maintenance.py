@@ -217,9 +217,10 @@ def dedupe_dist_info(
     is gone. Returns ``(removed, failed)``: dist-info directories removed, and
     in-scope damage the prune could not resolve — a RECORD-less entry it could
     not remove (still aborts every install), a stale duplicate it could not
-    remove (still breaks version detection, #190), or a directory it could not
-    even list (may be any of those). The CLI turns ``failed`` into a non-zero
-    exit so a partial prune is never reported as a heal.
+    remove (still breaks version detection, #190), a directory it could not
+    even list (may be any of those), or, in all-scope mode, an entry with no
+    attributable name. The CLI turns ``failed`` into a non-zero exit so a
+    partial prune is never reported as a heal.
     """
     removed = 0
     failed = 0
@@ -258,8 +259,15 @@ def dedupe_dist_info(
             # uninstall-no-record-file abort could never be considered at all.
             name = _infer_name(path)
         if not name:
+            # No name from metadata or the directory: the entry cannot be
+            # attributed, ranked, or condemned. In all-scope mode that is
+            # unresolved (it may be install-blocking damage), so it counts; in
+            # target scope it cannot be tied to the packages this heal owns,
+            # so it is left for dedupe-all, uncounted.
+            if targets is None:
+                failed += 1
             print(
-                f"dedupe: skipping nameless distribution {path}",
+                f"dedupe: cannot attribute nameless {path}",
                 file=sys.stderr,
             )
             continue

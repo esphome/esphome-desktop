@@ -640,3 +640,22 @@ def test_main_rejects_an_unknown_mode(capsys: pytest.CaptureFixture[str]) -> Non
     assert maint.main(["bogus"]) == 2
     assert maint.main([]) == 2
     assert "unknown mode" in capsys.readouterr().err
+
+
+def test_dedupe_all_counts_an_unattributable_dist_info(tmp_path: Path) -> None:
+    # A directory name that yields no package name at all cannot be
+    # attributed, ranked, or condemned; in all-scope mode that is unresolved
+    # damage and must not read as a heal.
+    weird = tmp_path / "-1.0.dist-info"
+    weird.mkdir()
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (0, 1)
+    assert weird.is_dir()
+
+
+def test_dedupe_scoped_skips_an_unattributable_dist_info(tmp_path: Path) -> None:
+    # In target scope the nameless entry cannot be tied to the builder
+    # packages, so it is left for dedupe-all without failing the scoped heal.
+    weird = tmp_path / "-1.0.dist-info"
+    weird.mkdir()
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
+    assert weird.is_dir()

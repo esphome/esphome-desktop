@@ -103,18 +103,24 @@ fn pip_failure_report(stdout: &str, stderr: &str) -> String {
 /// into a terminal reaches their system pip, not the bundled interpreter. The
 /// error lines above the hint keep carrying the facts a bug report needs.
 ///
-/// Indented lines following a `hint:` line are dropped with it: pip does not
-/// wrap the hint when its output is captured, but if a renderer change ever
-/// does, the continuation is where the command itself would land. pip does
-/// indent some factual output (a nested subprocess build-error block), but
-/// those blocks precede any hint — hints are terminal in pip's diagnostics —
-/// so an indented line after a `hint:` can only belong to the hint.
+/// Only flush-left `hint:` lines start a dropped block: those are pip's own.
+/// An *indented* `hint:` is subprocess output pip relays inside its nested
+/// build-error block — git emits them, and the dev channel installs from
+/// `git+` — and swallowing from there would eat the rest of that factual
+/// block.
+///
+/// Indented lines following pip's own `hint:` are dropped with it: pip does
+/// not wrap the hint when its output is captured, but if a renderer change
+/// ever does, the continuation is where the command itself would land. pip's
+/// indented factual blocks precede any hint — hints are terminal in pip's
+/// diagnostics — so an indented line after a flush-left `hint:` can only
+/// belong to the hint.
 fn strip_pip_hint_lines(stderr: &str) -> String {
     let mut in_hint = false;
     stderr
         .lines()
         .filter(|line| {
-            if line.trim_start().starts_with("hint:") {
+            if line.starts_with("hint:") {
                 in_hint = true;
                 return false;
             }
@@ -442,6 +448,30 @@ mod tests {
         assert!(report.contains("ERROR: some closing line"), "{report}");
         assert!(!report.contains("pip install"), "{report}");
         assert!(!report.contains("--ignore-installed"), "{report}");
+    }
+
+    #[test]
+    fn pip_failure_report_keeps_an_indented_subprocess_hint_block() {
+        // An indented hint: is not pip talking — it is subprocess output
+        // (git emits hint: lines; the dev channel installs from git+) that
+        // pip relays inside its nested build-error block. Treating it as a
+        // hint start would swallow the rest of that factual block.
+        let report = pip_failure_report(
+            "",
+            "ERROR: command errored out\n\
+             \x20 hint: Using 'master' as the name for the initial branch\n\
+             \x20 fatal: repository not found\n\
+             hint: You might be able to recover from this via: pip install --ignore-installed x\n",
+        );
+        assert!(
+            report.contains("hint: Using 'master'"),
+            "relayed subprocess output was eaten: {report}"
+        );
+        assert!(
+            report.contains("fatal: repository not found"),
+            "the factual block after the relayed hint was eaten: {report}"
+        );
+        assert!(!report.contains("pip install"), "{report}");
     }
 
     #[test]
