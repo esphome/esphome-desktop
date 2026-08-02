@@ -1214,8 +1214,8 @@ mod tests {
                     "no usable CPython found for the reaper tests ({}). The Microsoft \
                      Store interpreter is rejected on purpose: its MSIX packaging creates \
                      child processes outside the parent's job hierarchy, which defeats the \
-                     job-based reaping these tests assert on (#418). Install a python.org \
-                     CPython to run them.",
+                     job-based reaping these tests assert on (#418). Install any \
+                     non-Store CPython (python.org, conda, MSYS2, ...) to run them.",
                     evidence.join("; ")
                 )
             })
