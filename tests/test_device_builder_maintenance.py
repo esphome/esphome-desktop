@@ -368,12 +368,26 @@ def test_dedupe_counts_a_record_less_entry_it_cannot_remove(
     assert dead.is_dir()
 
 
-def test_dedupe_skips_unlistable_dist_info(
+def _fail_iterdir_for(monkeypatch: pytest.MonkeyPatch, broken: Path) -> None:
+    """Make ``Path.iterdir`` raise for ``broken`` and pass through otherwise."""
+    real_iterdir = Path.iterdir
+
+    def failing_iterdir(self: Path) -> object:
+        if self == broken:
+            raise OSError("transient read failure")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", failing_iterdir)
+
+
+def test_dedupe_counts_an_unlistable_dist_info(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A directory that cannot be listed decides nothing: a transient read
     # failure must not turn "RECORD not seen" into "RECORD absent" and delete
-    # what might be a real install.
+    # what might be a real install. But it may be the RECORD-less blocker, so
+    # it counts as unresolved; "could not determine the tree is clean" must
+    # not read as clean.
     dead = _make_dist_info(
         tmp_path,
         "esphome-device-builder",
@@ -381,16 +395,41 @@ def test_dedupe_skips_unlistable_dist_info(
         with_metadata=False,
         with_record=False,
     )
-    real_iterdir = Path.iterdir
-
-    def failing_iterdir(self: Path) -> object:
-        if self == dead:
-            raise OSError("transient read failure")
-        return real_iterdir(self)
-
-    monkeypatch.setattr(Path, "iterdir", failing_iterdir)
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
+    _fail_iterdir_for(monkeypatch, dead)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert dead.is_dir()
+
+
+def test_dedupe_scoped_ignores_an_unlistable_non_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The unresolved count only covers in-scope entries: the scoped
+    # device-builder heal must not fail over an unlistable directory it was
+    # never going to touch.
+    broken = _make_dist_info(
+        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
+    )
+    _fail_iterdir_for(monkeypatch, broken)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
+    assert broken.is_dir()
+
+
+def test_dedupe_counts_a_stale_duplicate_it_cannot_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A surviving duplicate keeps the #190 pileup in place, so importlib still
+    # cannot resolve a single version; reporting that run as a success would
+    # let the lazy heal claim it fixed a tree it did not.
+    keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    stale = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
+
+    def refuse(_path: Path) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(maint, "_rmtree", refuse)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
+    assert keep.is_dir()
+    assert stale.is_dir()
 
 
 def test_dedupe_infers_name_from_a_version_less_directory(tmp_path: Path) -> None:

@@ -24,9 +24,10 @@ version when METADATA survived), and because the installer overlay can plant
 one in the bundled tree itself (#389), the repair re-copy restores it and the
 failure becomes permanent. A completed pip install always writes RECORD, so
 this shape is torn metadata rather than a real install; deleting the dist-info
-dir loses nothing pip could use, and the next install writes a fresh one. A
-RECORD-less entry the prune could not remove fails the run (exit 1): leaving
-it in place means that abort loop, which must not read as success.
+dir loses nothing pip could use, and the next install writes a fresh one.
+In-scope damage the prune could not resolve — a removal that failed, a
+directory it could not list — fails the run (exit 1): a partial prune must
+never read as a heal.
 
 Embedded into the Rust binary via ``include_str!`` and run with the bundled
 interpreter as ``python -c <this file> <mode>``; also imported directly by the
@@ -214,9 +215,14 @@ def dedupe_dist_info(
     regardless of group size or version readability: pip can never uninstall
     one, so it aborts every upgrade with ``uninstall-no-record-file`` until it
     is gone. Returns ``(removed, failed)``: dist-info directories removed, and
-    RECORD-less ones that could not be removed — those leave the abort loop in
-    place, so the CLI turns them into a non-zero exit.
+    in-scope damage the prune could not resolve — a RECORD-less entry it could
+    not remove (still aborts every install), a stale duplicate it could not
+    remove (still breaks version detection, #190), or a directory it could not
+    even list (may be any of those). The CLI turns ``failed`` into a non-zero
+    exit so a partial prune is never reported as a heal.
     """
+    removed = 0
+    failed = 0
     groups: dict[str, list[tuple[str | None, Path, bool, bool]]] = {}
     for dist in dists:
         # ``_path`` is private; guard it so a future importlib change degrades to
@@ -227,14 +233,6 @@ def dedupe_dist_info(
             or path.suffix != ".dist-info"
             or not path.is_dir()
         ):
-            continue
-        try:
-            children = {child.name for child in path.iterdir()}
-        except OSError as err:
-            # A directory that cannot even be listed decides nothing, least of
-            # all its own removal: a transient read failure must not turn
-            # "RECORD not seen" into "RECORD absent" and delete a real install.
-            print(f"dedupe: skipping unlistable {path}: {err}", file=sys.stderr)
             continue
         name = ""
         version = None
@@ -267,12 +265,23 @@ def dedupe_dist_info(
             continue
         if targets is not None and name not in targets:
             continue
+        try:
+            children = {child.name for child in path.iterdir()}
+        except OSError as err:
+            # A directory that cannot even be listed decides nothing, least of
+            # all its own removal: a transient read failure must not turn
+            # "RECORD not seen" into "RECORD absent" and delete a real install.
+            # But it is counted: this entry may be the RECORD-less blocker,
+            # and "could not determine the tree is clean" must not read as
+            # clean. After the scope filter so an unlistable non-target dir
+            # cannot fail the scoped heal.
+            failed += 1
+            print(f"dedupe: could not list {path}: {err}", file=sys.stderr)
+            continue
         groups.setdefault(name, []).append(
             (version, path, "RECORD" in children, inferred)
         )
 
-    removed = 0
-    failed = 0
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
         for version, path, has_record, inferred in entries:
@@ -335,7 +344,16 @@ def dedupe_dist_info(
                 _rmtree(path)
                 removed += 1
             except OSError as err:
-                print(f"skip {path}: {err}", file=sys.stderr)
+                # Also counted: a surviving duplicate keeps the #190 pileup in
+                # place, so importlib still cannot resolve a single version
+                # and the updater loops on "version None". Worded apart from
+                # the RECORD-less and unlistable lines so a bounded stderr
+                # tail says which failure drove the exit 1.
+                failed += 1
+                print(
+                    f"dedupe: could not remove stale duplicate {path}: {err}",
+                    file=sys.stderr,
+                )
     return removed, failed
 
 
@@ -351,10 +369,11 @@ def main(argv: list[str]) -> int:
             distributions(), targets=TARGETS if mode == "dedupe" else None
         )
         print(removed)
-        # A RECORD-less dir that survived the prune still aborts every
-        # install; exit 1 so a partial prune is never reported as a heal. The
-        # callers are best-effort and continue either way, so the exit code
-        # buys a distinguishable log line, not a control-flow guard.
+        # Damage the prune could not resolve still blocks the updater (a
+        # RECORD-less dir aborts every install, a surviving duplicate breaks
+        # version detection); exit 1 so a partial prune is never reported as
+        # a heal. The callers are best-effort and continue either way, so the
+        # exit code buys a distinguishable log line, not a control-flow guard.
         return 1 if failed else 0
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2

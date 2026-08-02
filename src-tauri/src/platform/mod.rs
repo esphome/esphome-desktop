@@ -621,6 +621,11 @@ mod tests {
             "Metadata-Version: 2.1\nName: esphome\nVersion: 0.0.1\n",
         )
         .unwrap();
+        // With a RECORD, so the stale entry stays pip-manageable and this leg
+        // keeps proving the version-ranking dedupe: without one the
+        // RECORD-less rule would condemn it before ranking ever ran, and the
+        // ranking path would silently stop being tested against a real tree.
+        std::fs::write(stale_dist_info.join("RECORD"), "").unwrap();
         // And the RECORD-less shape from the same overlay: a dist-info with
         // no METADATA and no RECORD, which pip reports as "Cannot uninstall
         // esphome-device-builder-frontend None" and aborts every upgrade on.
