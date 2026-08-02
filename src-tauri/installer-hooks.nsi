@@ -99,6 +99,16 @@
 ; user-writable directory into that elevation.
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
+    ; The uninstaller only deletes manifest-listed files and uses plain
+    ; RMDir, so any file the overlay stranded (a previous release's module
+    ; that this release's manifest no longer names) keeps its whole tree —
+    ; and $INSTDIR itself — behind after a real uninstall. Finish the job
+    ; here. Safe by construction: the uninstaller runs from our own install
+    ; dir. Update-mode uninstalls keep the trees; the preinstall wipe owns
+    ; that path.
+    RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\git"
+    RMDir /r "$INSTDIR\ccache"
     Delete "$LOCALAPPDATA\io.esphome.builder\${FIREWALL_PROMPT_MARKER}"
     nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
     Pop $0

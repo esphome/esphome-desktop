@@ -284,9 +284,16 @@ mod tests {
             "bundle.resources is empty; the wipe drift test has nothing to pin"
         );
         for dir in &resources {
-            assert!(
-                hooks.contains(&format!("RMDir /r \"$INSTDIR\\{dir}\"")),
-                "installer-hooks.nsi must wipe the previous bundled {dir} tree before the overlay"
+            // Twice: the preinstall wipe (before the overlay) and the
+            // post-uninstall wipe (the manifest-only uninstall strands
+            // orphaned files, keeping the tree and $INSTDIR behind).
+            assert_eq!(
+                hooks
+                    .matches(&format!("RMDir /r \"$INSTDIR\\{dir}\""))
+                    .count(),
+                2,
+                "installer-hooks.nsi must wipe the bundled {dir} tree both before the overlay \
+                 and after a real uninstall"
             );
         }
         // The wipe must only fire on a directory that provably holds a
