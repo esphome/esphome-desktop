@@ -19,6 +19,13 @@ use tracing::{debug, info, warn};
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
 pub(super) const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
+/// Hard bound on one dist-info dedupe run. Local filesystem work only —
+/// enumerate site-packages, remove a few directories — so a minute is
+/// generous even under a slow disk or an antivirus scan; see the call site
+/// for why the bound is load-bearing (the lazy heal holds the `UpdateGuard`
+/// across this child).
+const DIST_INFO_DEDUPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Filename of the counter tracking consecutive launches that deferred the
 /// bundled-Python refresh because the version probe failed on a still-usable
 /// interpreter. Lives inside the user Python tree, so it is reset for free the
@@ -440,8 +447,18 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so this destructive prune can only ever touch the managed bundled
     // install, never a user-site or externally-injected tree.
-    let output = run_python_capture(python_bin, ["-I", "-c", DEVICE_BUILDER_MAINT_PY, mode])
-        .context("Failed to run dist-info dedup")?;
+    //
+    // Bounded: the lazy heal holds the UpdateGuard across this child, so a
+    // wedged prune (an rmtree stuck on a handle-held path) would otherwise pin
+    // `update_in_flight` for the session and silently no-op every later
+    // update/switch arm. The work is local filesystem only — enumerate
+    // site-packages, remove a few directories — so the bound is generous.
+    let output = run_python_capture_bounded(
+        python_bin,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, mode],
+        DIST_INFO_DEDUPE_TIMEOUT,
+    )
+    .context("Failed to run dist-info dedup")?;
     if !output.status.success() {
         anyhow::bail!(
             "dist-info dedup ({mode}) exited non-zero: {}",

@@ -27,7 +27,7 @@ use install::{
     detect_device_builder_version_with_heal_async, install_with_record_recovery,
     installed_esphome_version_async, interpreter_usable, notify_repair_incomplete,
     notify_repair_needed, probe_esphome, repair_hint, run_dev_install, run_device_builder_install,
-    run_esphome_install, HealPolicy,
+    run_esphome_install, HealOutcome, HealPolicy,
 };
 use notify::{notify_if_newer, prompt_if_newer};
 use version::{find_latest_any, select_beta_target};
@@ -597,15 +597,26 @@ impl UpdateChecker {
         tray_available: bool,
     ) {
         // The daily background check runs without the UpdateGuard; the heal
-        // takes the guard itself for its duration, or stands down if a
-        // sequence is in flight (see HealPolicy).
+        // takes the guard itself for its duration, or defers if a sequence
+        // is in flight (see HealPolicy).
         let installed =
             match detect_device_builder_version_with_heal_async(app_handle, HealPolicy::WhenIdle)
                 .await
             {
-                Ok(Some(v)) => v,
-                Ok(None) => {
+                Ok(HealOutcome::Determined(Some(v))) => v,
+                Ok(HealOutcome::Determined(None)) => {
                     debug!("esphome-device-builder is not installed; skipping update check");
+                    return;
+                }
+                Ok(HealOutcome::Deferred) => {
+                    // Says nothing about the package — the version was
+                    // undeterminable while a sequence held the guard, which
+                    // is most likely pip mid-install. The next daily check
+                    // heals a real pileup.
+                    debug!(
+                        "device-builder version undeterminable while an update sequence \
+                         is in flight; skipping update check"
+                    );
                     return;
                 }
                 Err(e) => {
@@ -652,9 +663,15 @@ impl UpdateChecker {
         )
         .await
         {
-            Ok(Some(v)) => v,
-            Ok(None) => {
+            Ok(HealOutcome::Determined(Some(v))) => v,
+            Ok(HealOutcome::Determined(None)) => {
                 warn!("esphome-device-builder is not installed");
+                return None;
+            }
+            Ok(HealOutcome::Deferred) => {
+                // Unreachable under GuardHeld — a held guard is never denied
+                // a permit — but if it ever fires, silence is the safe UX.
+                warn!("device-builder heal deferred under a held guard; treating as undetermined");
                 return None;
             }
             Err(e) => {

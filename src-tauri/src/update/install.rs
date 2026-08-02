@@ -110,21 +110,37 @@ fn acquire_heal_permit(
     }
 }
 
+/// What a healed detection concluded — kept three-armed so a deferred heal
+/// never masquerades as "not installed".
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum HealOutcome {
+    /// The detection ran to completion: `Some(version)` when installed,
+    /// `None` when genuinely absent or still undeterminable after the heal.
+    Determined(Option<String>),
+    /// The pre-heal lookup was undeterminable and the heal stood down
+    /// (another sequence holds the guard). Says nothing about the package;
+    /// only the `WhenIdle` policy can produce it.
+    Deferred,
+}
+
 /// Orchestrate detect → permit → heal → re-detect.
 ///
 /// A `None` detection is the exact symptom of the pileup (#190), so prune the
 /// duplicates and re-query before giving up. A genuinely-absent package stays
 /// `None` (dedup finds nothing to remove), at the cost of one extra Python
 /// spawn only on the already-unusual not-determinable path. A denied permit
-/// skips the heal: an undeterminable version then is far more likely a
+/// defers the heal: an undeterminable version then is far more likely a
 /// concurrent install's transient state than the #190 pileup, and a real
 /// pileup is still healed by the next check once the guard frees. A failed
 /// heal still re-queries — best-effort, but not invisible.
 ///
+/// The permit is scoped to the heal alone: the re-detect is read-only, so
+/// there is no reason to keep the guard across a second Python spawn.
+///
 /// The steps are injected, exactly like [`install_with_record_recovery`]'s,
 /// so this policy stays testable without an `AppHandle` or a live
 /// interpreter.
-fn heal_and_redetect<D, H, P>(detect: D, heal: H, permit: P) -> Result<Option<String>>
+fn heal_and_redetect<D, H, P>(detect: D, heal: H, permit: P) -> Result<HealOutcome>
 where
     D: Fn() -> Result<Option<String>>,
     H: FnOnce() -> Result<()>,
@@ -132,18 +148,21 @@ where
 {
     let installed = detect()?;
     if installed.is_some() {
-        return Ok(installed);
+        return Ok(HealOutcome::Determined(installed));
     }
-    let Some(_permit) = permit() else {
-        info!("skipping the dist-info heal: another update sequence is in flight");
-        return Ok(installed);
-    };
-    if let Err(e) = heal() {
-        // The heal is best-effort, but a failed attempt shouldn't be invisible:
-        // the re-query below will just return the same undeterminable result.
-        warn!("device-builder dist-info heal failed: {e}");
+    {
+        let Some(_permit) = permit() else {
+            info!("deferring the dist-info heal: another update sequence is in flight");
+            return Ok(HealOutcome::Deferred);
+        };
+        if let Err(e) = heal() {
+            // The heal is best-effort, but a failed attempt shouldn't be
+            // invisible: the re-query below will just return the same
+            // undeterminable result.
+            warn!("device-builder dist-info heal failed: {e}");
+        }
     }
-    detect()
+    detect().map(HealOutcome::Determined)
 }
 
 /// Detect the installed device-builder version, healing a duplicate dist-info
@@ -155,7 +174,7 @@ where
 fn detect_device_builder_version_with_heal(
     app_handle: &AppHandle,
     caller_holds_guard: bool,
-) -> Result<Option<String>> {
+) -> Result<HealOutcome> {
     heal_and_redetect(
         || get_installed_device_builder_version(app_handle),
         || dedupe_device_builder_dist_info(app_handle),
@@ -172,7 +191,7 @@ fn detect_device_builder_version_with_heal(
 pub(super) async fn detect_device_builder_version_with_heal_async(
     app_handle: &AppHandle,
     policy: HealPolicy<'_>,
-) -> Result<Option<String>> {
+) -> Result<HealOutcome> {
     // The guard reference proves possession at the call site but cannot cross
     // spawn_blocking's 'static boundary; reduce it to the fact the blocking
     // side acts on.
@@ -597,7 +616,7 @@ mod tests {
         detections: Vec<Result<Option<String>>>,
         permit_granted: bool,
         heal: Result<()>,
-    ) -> (Result<Option<String>>, (usize, usize)) {
+    ) -> (Result<HealOutcome>, (usize, usize)) {
         use std::cell::{Cell, RefCell};
 
         let queue = RefCell::new(detections.into_iter());
@@ -627,7 +646,10 @@ mod tests {
         // A version the first lookup resolves needs no heal: the destructive
         // prune must not run on a healthy tree.
         let (result, counts) = drive_heal(vec![Ok(Some("1.8.2".into()))], true, Ok(()));
-        assert_eq!(result.unwrap().as_deref(), Some("1.8.2"));
+        assert_eq!(
+            result.unwrap(),
+            HealOutcome::Determined(Some("1.8.2".into()))
+        );
         assert_eq!(counts, (1, 0));
     }
 
@@ -636,17 +658,21 @@ mod tests {
         // The #190 shape: undeterminable, then the prune clears the pileup
         // and the re-query resolves.
         let (result, counts) = drive_heal(vec![Ok(None), Ok(Some("1.8.2".into()))], true, Ok(()));
-        assert_eq!(result.unwrap().as_deref(), Some("1.8.2"));
+        assert_eq!(
+            result.unwrap(),
+            HealOutcome::Determined(Some("1.8.2".into()))
+        );
         assert_eq!(counts, (2, 1));
     }
 
     #[test]
-    fn heal_and_redetect_stands_down_without_a_permit() {
+    fn heal_and_redetect_defers_without_a_permit() {
         // A denied permit means an update sequence is in flight, and an
         // undeterminable version is then more likely pip mid-install than
-        // the pileup: no heal, no second spawn, the None is reported as is.
+        // the pileup: no heal, no second spawn, and the outcome says
+        // "deferred" rather than masquerading as "not installed".
         let (result, counts) = drive_heal(vec![Ok(None)], false, Ok(()));
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.unwrap(), HealOutcome::Deferred);
         assert_eq!(counts, (1, 0));
     }
 
@@ -659,7 +685,7 @@ mod tests {
             true,
             Err(anyhow::anyhow!("interpreter is broken")),
         );
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(result.unwrap(), HealOutcome::Determined(None));
         assert_eq!(counts, (2, 1));
     }
 
