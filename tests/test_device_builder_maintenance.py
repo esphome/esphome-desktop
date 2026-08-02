@@ -690,3 +690,22 @@ def test_dedupe_counts_an_unreadable_metadata_entry(
     monkeypatch.setattr(PathDistribution, "metadata", property(unreadable_metadata))
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert entry.is_dir()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="chmod 000 does not block reads on Windows, and root reads anything",
+)
+def test_dedupe_counts_a_permission_denied_metadata(tmp_path: Path) -> None:
+    # importlib suppresses PermissionError into an empty answer, so no
+    # exception marks this entry; only the direct probe can tell a file that
+    # denies reads from a file that is absent. It must count as unresolved,
+    # and it must be kept: deleting on a read failure is the one wrong the
+    # prune must never commit.
+    entry = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
+    (entry / "METADATA").chmod(0)
+    try:
+        assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
+        assert entry.is_dir()
+    finally:
+        (entry / "METADATA").chmod(0o644)

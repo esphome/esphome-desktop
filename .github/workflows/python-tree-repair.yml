@@ -34,6 +34,7 @@ on:
     branches: [main]
     paths:
       - "build-scripts/**"
+      - "src-tauri/scripts/**"
       - "src-tauri/src/platform/**"
       - "src-tauri/src/update/**"
       - ".github/workflows/python-tree-repair.yml"

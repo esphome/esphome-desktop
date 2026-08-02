@@ -317,14 +317,23 @@ def dedupe_dist_info(
             failed += 1
             print(f"dedupe: could not list {path}: {err}", file=sys.stderr)
             continue
+        unreadable = metadata_unreadable and "METADATA" in children
+        if not unreadable and inferred and "METADATA" in children:
+            # importlib suppresses read failures (PermissionError and
+            # friends) into an empty answer, indistinguishable from a
+            # Name-less file, so no exception reached the handler above.
+            # Probe the file directly: present but unreadable is a transient
+            # failure hiding the pileup, not a torn shape.
+            try:
+                (path / "METADATA").read_bytes()
+            except OSError as err:
+                unreadable = True
+                print(
+                    f"dedupe: unreadable metadata in {path}: {err}",
+                    file=sys.stderr,
+                )
         groups.setdefault(name, []).append(
-            (
-                version,
-                path,
-                "RECORD" in children,
-                inferred,
-                metadata_unreadable and "METADATA" in children,
-            )
+            (version, path, "RECORD" in children, inferred, unreadable)
         )
 
     for entries in groups.values():
