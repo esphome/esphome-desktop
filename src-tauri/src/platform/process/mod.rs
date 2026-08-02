@@ -1178,7 +1178,9 @@ mod tests {
                         std::path::Path::new(program),
                         version_args.iter().copied().chain([
                             "-c",
-                            "import sys; sys.stdout.buffer.write(sys.executable.encode('utf-8'))",
+                            "import sys; sys.stdout.buffer.write('\\n'.join([sys.executable, \
+                             getattr(sys, '_base_executable', '') or '', sys.base_prefix])\
+                             .encode('utf-8'))",
                         ]),
                         std::time::Duration::from_secs(30),
                     ) {
@@ -1196,28 +1198,40 @@ mod tests {
                         ));
                         continue;
                     }
-                    let Ok(path) = std::str::from_utf8(&out.stdout) else {
+                    let Ok(report) = std::str::from_utf8(&out.stdout) else {
                         evidence.push(format!("`{program}` printed a non-UTF-8 sys.executable"));
                         continue;
                     };
-                    let path = std::path::PathBuf::from(path.trim());
-                    if path.as_os_str().is_empty() {
+                    let mut paths = report.lines().map(str::trim);
+                    let exe = paths.next().unwrap_or("");
+                    if exe.is_empty() {
                         evidence.push(format!("`{program}` printed an empty sys.executable"));
                         continue;
                     }
                     // A component check, not a substring one: a user dir
                     // that merely contains the word must not be rejected.
-                    if path
-                        .components()
-                        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+                    let in_windows_apps = |p: &str| {
+                        std::path::Path::new(p)
+                            .components()
+                            .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+                    };
+                    // The base paths matter too: inside a venv,
+                    // sys.executable is the venv's own exe, so a venv
+                    // created from the packaged interpreter would slip a
+                    // WindowsApps-free path past a sys.executable-only
+                    // check while its base still carries the packaged
+                    // identity.
+                    if let Some(packaged) = std::iter::once(exe)
+                        .chain(paths)
+                        .find(|p| !p.is_empty() && in_windows_apps(p))
                     {
                         evidence.push(format!(
-                            "`{program}` is the Microsoft Store interpreter at {}",
-                            path.display()
+                            "`{program}` is (or wraps) the Microsoft Store interpreter at \
+                             {packaged}"
                         ));
                         continue;
                     }
-                    return path;
+                    return std::path::PathBuf::from(exe);
                 }
                 panic!(
                     "no usable CPython found for the reaper tests ({}). The Microsoft \
