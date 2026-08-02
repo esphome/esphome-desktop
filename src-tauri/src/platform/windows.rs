@@ -253,14 +253,6 @@ mod tests {
         );
     }
 
-    /// Each install must lay down pristine resource trees. The generated
-    /// installer overlays `$INSTDIR` without deleting the previous release's
-    /// files, and a polluted bundled site-packages breaks esphome outright:
-    /// the stranded `components/rp2040/` package shadowed the `rp2` alias
-    /// after the rename, failed every config read, and made the
-    /// wipe-and-recopy repair loop forever because the copy source itself
-    /// carried the orphan. The wipe lives in `installer-hooks.nsi`; this
-    /// pins it there for every bundled tree the app ships.
     /// `installer-hooks.nsi` with its comment lines removed. Every drift
     /// assertion matches against this: the prose around the hooks quotes the
     /// same statements, and matching raw text would keep a test green with a
@@ -273,6 +265,14 @@ mod tests {
             .join("\n")
     }
 
+    /// Each install must lay down pristine resource trees. The generated
+    /// installer overlays `$INSTDIR` without deleting the previous release's
+    /// files, and a polluted bundled site-packages breaks esphome outright:
+    /// the stranded `components/rp2040/` package shadowed the `rp2` alias
+    /// after the rename, failed every config read, and made the
+    /// wipe-and-recopy repair loop forever because the copy source itself
+    /// carried the orphan. The wipe lives in `installer-hooks.nsi`; this
+    /// pins it there for every bundled tree the app ships.
     #[test]
     fn installer_hook_wipes_the_previous_bundled_trees() {
         let code = installer_hook_code();

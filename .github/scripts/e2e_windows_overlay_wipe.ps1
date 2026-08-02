@@ -114,9 +114,14 @@ finally {
     # that key when the uninstall page's delete-app-data checkbox is
     # ticked, which a silent /S uninstall never shows). Left behind, the
     # next plain Install-Bundle would restore $INSTDIR to the deleted
-    # scratch path. The manufacturer is the identifier's domain segment,
-    # the same derivation the bundler uses when no publisher is set.
-    $manufacturer = $conf.identifier.Split('.')[1]
-    Remove-Item -Path "HKCU:\Software\$manufacturer\$($conf.productName)" `
-        -Recurse -Force -ErrorAction SilentlyContinue
+    # scratch path. Found by scanning for the product name rather than
+    # composing the manufacturer (the bundler derives it from the
+    # identifier when no publisher is set): a derivation that drifted
+    # would turn a composed path into exactly the silent no-op this
+    # cleanup exists to prevent.
+    foreach ($vendor in Get-ChildItem 'HKCU:\Software' -ErrorAction SilentlyContinue) {
+        if ($vendor.GetSubKeyNames() -contains $conf.productName) {
+            Remove-Item -Path (Join-Path $vendor.PSPath $conf.productName) -Recurse -Force
+        }
+    }
 }
