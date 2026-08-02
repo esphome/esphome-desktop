@@ -105,9 +105,10 @@ fn pip_failure_report(stdout: &str, stderr: &str) -> String {
 ///
 /// Indented lines following a `hint:` line are dropped with it: pip does not
 /// wrap the hint when its output is captured, but if a renderer change ever
-/// does, the continuation is where the command itself would land. pip's own
-/// diagnostic lines (`ERROR:`, `×`, `╰─>`) all start flush left, so nothing
-/// factual is indented in real stderr.
+/// does, the continuation is where the command itself would land. pip does
+/// indent some factual output (a nested subprocess build-error block), but
+/// those blocks precede any hint — hints are terminal in pip's diagnostics —
+/// so an indented line after a `hint:` can only belong to the hint.
 fn strip_pip_hint_lines(stderr: &str) -> String {
     let mut in_hint = false;
     stderr

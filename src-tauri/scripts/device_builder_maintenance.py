@@ -130,25 +130,46 @@ def _rmtree(path: Path) -> None:
     plus the execute bit so a chmod'd directory stays traversable for the
     retry).
     """
-    shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+        return
+
+    # The bundled interpreter is far newer, but dev builds without a bundle
+    # fall back to the system Python, which can predate ``onexc`` (3.12); the
+    # resulting TypeError would escape the callers' ``except OSError`` and
+    # kill the whole prune. ``onerror`` passes an exc_info triple instead of
+    # the exception, so adapt.
+    def _onerror(
+        func: Callable[[str], object],
+        failed: str,
+        exc_info: tuple[type[BaseException], BaseException, object],
+    ) -> None:
+        _clear_readonly_and_retry(func, failed, exc_info[1])
+
+    shutil.rmtree(path, onerror=_onerror)
 
 
 def _infer_name(path: Path) -> str:
     """Normalized package name from a ``*.dist-info`` directory name.
 
-    ``pkg_name-1.2.3.dist-info`` -> ``pkg-name``; with no version separator the
-    whole stem is taken as the name. The wheel spec underscore-normalizes the
-    name part, so the last ``-`` always cuts at the version for anything pip
-    wrote, and pip resolves identity from the directory name the same way when
-    METADATA is gone ("Cannot uninstall esphome-device-builder-frontend None").
+    ``pkg_name-1.2.3.dist-info`` -> ``pkg-name``; when the tail after the last
+    ``-`` does not look like a version, the whole stem is taken as the name.
+    The wheel spec underscore-normalizes the name part, so the last ``-``
+    always cuts at the version for anything pip wrote, and pip resolves
+    identity from the directory name the same way when METADATA is gone
+    ("Cannot uninstall esphome-device-builder-frontend None"). The digit check
+    only matters for hand-damaged names like ``foo-bar.dist-info``, which must
+    not shed their last segment on the way into the scope filter.
 
     Only used when METADATA is missing or has no Name header, and only to
-    scope-filter the entry and attribute the metadata-dead removal; an
-    inferred name never ranks its entry against properly named siblings.
+    scope-filter the entry and attribute the RECORD-less removal; an inferred
+    name never ranks its entry against properly named siblings.
     """
     stem = path.name[: -len(".dist-info")]
-    name, sep, _version = stem.rpartition("-")
-    return _norm(name if sep else stem)
+    name, sep, version = stem.rpartition("-")
+    if sep and version[:1].isdigit():
+        return _norm(name)
+    return _norm(stem)
 
 
 def detect_version(dists: Iterable[Distribution]) -> str | None:

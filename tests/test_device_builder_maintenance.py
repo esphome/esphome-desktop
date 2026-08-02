@@ -393,6 +393,17 @@ def test_dedupe_skips_unlistable_dist_info(
     assert dead.is_dir()
 
 
+def test_dedupe_infers_name_from_a_version_less_directory(tmp_path: Path) -> None:
+    # A hand-damaged dir name with dashes and no version tail: the segment
+    # after the last dash is not a version, so the whole stem is the name and
+    # the scoped heal still condemns the RECORD-less entry instead of
+    # mis-attributing it to "esphome-device" and skipping it.
+    dead = tmp_path / "esphome-device-builder.dist-info"
+    dead.mkdir()
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
+    assert not dead.exists()
+
+
 def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
     # Torn the other way: METADATA gone but RECORD intact. pip can still
     # uninstall this one, so the next upgrade heals it without our help;
@@ -468,6 +479,14 @@ def test_retry_handler_reraises_when_the_path_is_writable(tmp_path: Path) -> Non
     assert target.exists()
 
 
+_ROOT_SEES_EVERYTHING_WRITABLE = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="os.access(W_OK) is always true for root, so the handler re-raises "
+    "instead of retrying; the test's premise needs an unprivileged user",
+)
+
+
+@_ROOT_SEES_EVERYTHING_WRITABLE
 def test_retry_handler_clears_the_flag_and_retries(tmp_path: Path) -> None:
     target = tmp_path / "file.txt"
     target.write_text("")
@@ -476,6 +495,7 @@ def test_retry_handler_clears_the_flag_and_retries(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+@_ROOT_SEES_EVERYTHING_WRITABLE
 def test_retry_handler_chains_a_failed_retry(tmp_path: Path) -> None:
     # The retry failing anew must not silently replace the original cause; the
     # chain keeps both in the traceback the "could not remove" line reports.
