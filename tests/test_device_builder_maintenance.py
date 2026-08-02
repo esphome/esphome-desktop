@@ -18,8 +18,9 @@ pytest suite (maintainer-requested framework, fully typed, no classes).
 from __future__ import annotations
 
 import os
-from importlib.metadata import Distribution, distributions
+from importlib.metadata import Distribution, PathDistribution, distributions
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from script_loader import load_script_module
@@ -661,3 +662,31 @@ def test_dedupe_scoped_skips_an_unattributable_dist_info(tmp_path: Path) -> None
     weird.mkdir()
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert weird.is_dir()
+
+
+def test_dedupe_all_counts_a_distribution_without_a_usable_path() -> None:
+    # The private _path guard: if importlib ever changes shape, every entry
+    # lands here and the prune can do nothing at all; a total no-op must not
+    # read as a heal in all-scope mode. Target scope skips it uncounted,
+    # since without a path there is no name to scope-filter on.
+    pathless = SimpleNamespace(_path="not-a-path")
+    assert maint.dedupe_dist_info([pathless], targets=None) == (0, 1)
+    assert maint.dedupe_dist_info([pathless]) == (0, 0)
+
+
+def test_dedupe_counts_an_unreadable_metadata_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # METADATA exists but cannot be read: unlike the absent-METADATA torn
+    # shape (a deliberate keep), a transient read failure hides whether this
+    # entry drives the version-None pileup, so the run must not report a
+    # heal around it. The entry itself is kept; deleting on a read failure
+    # is the one wrong the prune must never commit.
+    entry = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
+
+    def unreadable_metadata(self: PathDistribution) -> object:
+        raise OSError("transient read failure")
+
+    monkeypatch.setattr(PathDistribution, "metadata", property(unreadable_metadata))
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
+    assert entry.is_dir()

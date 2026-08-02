@@ -88,6 +88,16 @@ pub(super) enum HealPolicy<'g> {
     WhenIdle,
 }
 
+/// Permission to run the destructive heal, alive for the heal's duration.
+enum HealPermit {
+    /// Allowed without holding anything: the caller already holds the
+    /// `UpdateGuard`, or no state is managed (unit tests).
+    Unguarded,
+    /// Allowed, holding the guard until dropped. Never read — the RAII
+    /// release on drop is its whole job.
+    Held(#[allow(dead_code)] UpdateGuard),
+}
+
 /// Secure permission to run the destructive heal. `None` means denied.
 ///
 /// On the guardless path this *takes* the `UpdateGuard` (returned inside the
@@ -95,18 +105,24 @@ pub(super) enum HealPolicy<'g> {
 /// the flag: a read alone is check-then-act, and a sequence acquiring between
 /// the read and the Python spawn would race the rmtree into a live pip
 /// install. `try_acquire` keeps it non-blocking. A caller that already holds
-/// the guard must not re-acquire (it would deny against itself), and with no
-/// managed state (unit tests) there is no guard to take.
+/// the guard must not re-acquire (it would deny against itself).
 fn acquire_heal_permit(
     caller_holds_guard: bool,
     guard_flag: Option<Arc<AtomicBool>>,
-) -> Option<Option<UpdateGuard>> {
+) -> Option<HealPermit> {
     if caller_holds_guard {
-        return Some(None);
+        return Some(HealPermit::Unguarded);
     }
     match guard_flag {
-        None => Some(None),
-        Some(flag) => UpdateGuard::try_acquire(flag).map(Some),
+        None => {
+            // Only unit tests run unmanaged; in production the state is
+            // managed before any check can reach here, so a miss would be a
+            // bug — say so rather than silently waiving the serialization
+            // guarantee.
+            warn!("update guard state not managed; running the dist-info heal unguarded");
+            Some(HealPermit::Unguarded)
+        }
+        Some(flag) => UpdateGuard::try_acquire(flag).map(HealPermit::Held),
     }
 }
 
@@ -144,7 +160,7 @@ fn heal_and_redetect<D, H, P>(detect: D, heal: H, permit: P) -> Result<HealOutco
 where
     D: Fn() -> Result<Option<String>>,
     H: FnOnce() -> Result<()>,
-    P: FnOnce() -> Option<Option<UpdateGuard>>,
+    P: FnOnce() -> Option<HealPermit>,
 {
     let installed = detect()?;
     if installed.is_some() {
@@ -577,10 +593,13 @@ mod tests {
         // racing, and re-acquiring would deny against itself: permitted
         // without touching the flag.
         let flag = Arc::new(AtomicBool::new(false));
-        assert!(matches!(acquire_heal_permit(true, None), Some(None)));
+        assert!(matches!(
+            acquire_heal_permit(true, None),
+            Some(HealPermit::Unguarded)
+        ));
         assert!(matches!(
             acquire_heal_permit(true, Some(flag.clone())),
-            Some(None)
+            Some(HealPermit::Unguarded)
         ));
         assert!(
             !flag.load(Ordering::Acquire),
@@ -593,6 +612,7 @@ mod tests {
         // releases it on drop.
         let permit =
             acquire_heal_permit(false, Some(flag.clone())).expect("a free flag permits the heal");
+        assert!(matches!(permit, HealPermit::Held(_)));
         assert!(
             flag.load(Ordering::Acquire),
             "the permit must hold the flag, not sample it"
@@ -606,7 +626,10 @@ mod tests {
         drop(held);
 
         // No managed state (unit tests): no guard exists to take.
-        assert!(matches!(acquire_heal_permit(false, None), Some(None)));
+        assert!(matches!(
+            acquire_heal_permit(false, None),
+            Some(HealPermit::Unguarded)
+        ));
     }
 
     /// Drive [`heal_and_redetect`] against canned detections. `detections` is
@@ -636,7 +659,7 @@ mod tests {
                 heals.set(heals.get() + 1);
                 heal.borrow_mut().take().expect("healed twice")
             },
-            || permit_granted.then_some(None),
+            || permit_granted.then_some(HealPermit::Unguarded),
         );
         (result, (detects.get(), heals.get()))
     }

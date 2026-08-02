@@ -224,29 +224,45 @@ def dedupe_dist_info(
     in-scope damage the prune could not resolve — a RECORD-less entry it could
     not remove (still aborts every install), a stale duplicate it could not
     remove (still breaks version detection, #190), a directory it could not
-    even list (may be any of those), or, in all-scope mode, an entry with no
-    attributable name. The CLI turns ``failed`` into a non-zero exit so a
-    partial prune is never reported as a heal. Deliberate conservative keeps
+    even list, a METADATA it could not read (either may be any of those), or,
+    in all-scope mode, an entry with no attributable name or usable path. The
+    CLI turns ``failed`` into a non-zero exit so a partial prune is never
+    reported as a heal. Deliberate conservative keeps
     (unrankable or dir-name-only entries that still have a RECORD, ambiguous
     groups) are not failures: pip can still manage those, and deleting on a
     guess is the one wrong this prune must never commit.
     """
     removed = 0
     failed = 0
-    groups: dict[str, list[tuple[str | None, Path, bool, bool]]] = {}
+    groups: dict[str, list[tuple[str | None, Path, bool, bool, bool]]] = {}
     for dist in dists:
         # ``_path`` is private; guard it so a future importlib change degrades
-        # to a no-op rather than deleting the wrong directory. Non-dist-info
-        # entries (egg-info) are out of this prune's contract and skip
-        # silently by design. Deliberately no ``is_dir()`` here: it folds a
-        # stat error into False, which would vanish a possibly-blocking entry
-        # uncounted — a non-directory or unstatable path flows through to the
-        # scope-aware, counted listing probe below instead.
+        # to a logged, counted no-op rather than deleting the wrong directory
+        # or silently reading as a clean tree. Deliberately no ``is_dir()``
+        # here: it folds a stat error into False, which would vanish a
+        # possibly-blocking entry uncounted — a non-directory or unstatable
+        # path flows through to the scope-aware, counted listing probe below
+        # instead.
         path = getattr(dist, "_path", None)
-        if not isinstance(path, Path) or path.suffix != ".dist-info":
+        if not isinstance(path, Path):
+            # If importlib ever changes the private attribute, every entry
+            # lands here and the prune can do nothing at all; a total no-op
+            # must not read as a heal. Counted in all-scope mode only:
+            # without a path there is no name to scope-filter on.
+            if targets is None:
+                failed += 1
+            print(
+                f"dedupe: no usable path for distribution {_dist_path(dist)}",
+                file=sys.stderr,
+            )
+            continue
+        if path.suffix != ".dist-info":
+            # egg-info and friends are out of this prune's contract: a quiet
+            # skip by design.
             continue
         name = ""
         version = None
+        metadata_unreadable = False
         try:
             # .get() avoids the implicit-None DeprecationWarning (future
             # KeyError) on missing headers, and reading Version here keeps a
@@ -257,6 +273,11 @@ def dedupe_dist_info(
         except Exception as err:
             # Log rather than silently skip: an unreadable target dist-info that
             # is never considered for dedup leaves the pileup in place (#190).
+            # Whether it also counts as unresolved is decided below, once the
+            # listing says if METADATA is even there: an absent file is the
+            # torn shape (a deliberate keep), a present-but-unreadable one is
+            # a transient failure hiding the pileup.
+            metadata_unreadable = True
             print(
                 f"dedupe: unreadable metadata in {path}: {err}",
                 file=sys.stderr,
@@ -297,12 +318,18 @@ def dedupe_dist_info(
             print(f"dedupe: could not list {path}: {err}", file=sys.stderr)
             continue
         groups.setdefault(name, []).append(
-            (version, path, "RECORD" in children, inferred)
+            (
+                version,
+                path,
+                "RECORD" in children,
+                inferred,
+                metadata_unreadable and "METADATA" in children,
+            )
         )
 
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
-        for version, path, has_record, inferred in entries:
+        for version, path, has_record, inferred, unreadable in entries:
             if not has_record:
                 # No RECORD: pip can never uninstall this entry, so any
                 # install that tries aborts with uninstall-no-record-file,
@@ -328,8 +355,20 @@ def dedupe_dist_info(
                     )
                 continue
             if inferred:
+                if unreadable:
+                    # METADATA exists but could not be read. pip can still
+                    # manage the entry (a RECORD got it past the branch
+                    # above), but its version is unknowable right now, so any
+                    # pileup it belongs to is unresolved: counted, not folded
+                    # into the deliberate keeps below.
+                    failed += 1
+                    print(
+                        f"dedupe: could not read METADATA in {path}",
+                        file=sys.stderr,
+                    )
+                    continue
                 # A directory name is identity enough to condemn a
-                # metadata-dead entry above (pip trusts it the same way when
+                # RECORD-less entry above (pip trusts it the same way when
                 # it aborts), but not to rank the entry against properly named
                 # siblings: a corrupted name landing in another package's
                 # group could evict that package's real dist-info. Keep it
