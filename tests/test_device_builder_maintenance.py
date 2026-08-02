@@ -664,14 +664,15 @@ def test_dedupe_scoped_skips_an_unattributable_dist_info(tmp_path: Path) -> None
     assert weird.is_dir()
 
 
-def test_dedupe_all_counts_a_distribution_without_a_usable_path() -> None:
+def test_dedupe_counts_a_distribution_without_a_usable_path() -> None:
     # The private _path guard: if importlib ever changes shape, every entry
     # lands here and the prune can do nothing at all; a total no-op must not
-    # read as a heal in all-scope mode. Target scope skips it uncounted,
-    # since without a path there is no name to scope-filter on.
+    # read as a heal in either mode. Unlike a single nameless directory, a
+    # pathless entry is a systemic contract break that hits the target
+    # packages by definition, so the scoped heal counts it too.
     pathless = SimpleNamespace(_path="not-a-path")
     assert maint.dedupe_dist_info([pathless], targets=None) == (0, 1)
-    assert maint.dedupe_dist_info([pathless]) == (0, 0)
+    assert maint.dedupe_dist_info([pathless]) == (0, 1)
 
 
 def test_dedupe_counts_an_unreadable_metadata_entry(

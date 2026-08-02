@@ -247,10 +247,11 @@ def dedupe_dist_info(
         if not isinstance(path, Path):
             # If importlib ever changes the private attribute, every entry
             # lands here and the prune can do nothing at all; a total no-op
-            # must not read as a heal. Counted in all-scope mode only:
-            # without a path there is no name to scope-filter on.
-            if targets is None:
-                failed += 1
+            # must not read as a heal. Counted in both modes: unlike a single
+            # nameless directory (which may genuinely be foreign to the
+            # scoped heal), a pathless entry is a systemic contract break
+            # that hits the target packages by definition.
+            failed += 1
             print(
                 f"dedupe: no usable path for distribution {_dist_path(dist)}",
                 file=sys.stderr,
