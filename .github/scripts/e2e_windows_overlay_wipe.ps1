@@ -119,6 +119,7 @@ finally {
     # identifier when no publisher is set): a derivation that drifted
     # would turn a composed path into exactly the silent no-op this
     # cleanup exists to prevent.
+    $cleared = $false
     foreach ($vendor in Get-ChildItem 'HKCU:\Software' -ErrorAction SilentlyContinue) {
         # try/catch per vendor: GetSubKeyNames() is a .NET call that throws
         # terminatingly on an ACL-restricted subkey regardless of preference,
@@ -129,10 +130,17 @@ finally {
                 $key = Join-Path $vendor.PSPath $conf.productName
                 Write-Host "Clearing recorded install location $key"
                 Remove-Item -LiteralPath $key -Recurse -Force
+                $cleared = $true
             }
         }
         catch {
             Write-Host "Skipping unreadable registry key $($vendor.PSPath): $_"
         }
+    }
+    if (-not $cleared) {
+        # Loud on purpose: a scan that finds nothing means the template moved
+        # the key (or writes it to HKLM), and the stale record this cleanup
+        # exists to remove is back to surviving silently.
+        Write-Warning "no recorded install location found under HKCU:\Software\*\$($conf.productName); the cleanup may no longer match where the installer writes it"
     }
 }
