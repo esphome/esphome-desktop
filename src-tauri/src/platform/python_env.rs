@@ -22,9 +22,10 @@ pub(super) const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 /// Hard bound on one dist-info dedupe run. Local filesystem work only —
 /// enumerate site-packages, remove a few directories of metadata text — so a
 /// minute is generous even under a slow disk or an antivirus scan. Both
-/// callers get the bound; it is load-bearing for the lazy heal, which holds
-/// the `UpdateGuard` across this child, and merely tidy for the post-copy
-/// self-clean, which nothing waits behind.
+/// callers get the bound. It is load-bearing for the lazy heal, which holds
+/// the `UpdateGuard` across this child; for the post-copy self-clean it caps
+/// how long a wedged child can stall the launch and repair paths, which
+/// block on the refresh.
 const DIST_INFO_DEDUPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Filename of the counter tracking consecutive launches that deferred the
@@ -252,9 +253,12 @@ pub(super) fn refresh_python_tree(
     // RECORD-less dir survived (the shape that aborts installs): the tree
     // still works for everything except that install, whose retry surfaces
     // pip's own report to the user, while failing the refresh here would
-    // trade a degraded tree for none. Runs before the marker write so a
-    // crash mid-prune leaves no marker and the next launch re-copies and
-    // re-prunes.
+    // trade a degraded tree for none. A graceful failure does reach the
+    // marker write below, so later launches will not re-prune on their own;
+    // the damage is still retried by the lazy heal (on a None version) and
+    // by the repair re-copy, which forces this whole path again. Runs before
+    // the marker write so a crash mid-prune leaves no marker and the next
+    // launch re-copies and re-prunes.
     if let Err(e) = dedupe_dist_info(&python_check, DistInfoDedupeScope::All) {
         warn!(
             "dist-info dedup after the bundle copy failed ({e:#}); continuing with the copied tree"
