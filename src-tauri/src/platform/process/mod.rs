@@ -1153,18 +1153,36 @@ mod tests {
             .get_or_init(|| {
                 for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
                     let mut cmd = std::process::Command::new(program);
-                    cmd.args(version_args)
-                        .args(["-c", "import sys; print(sys.executable)"]);
+                    // UTF-8 bytes straight to the pipe: `print()` would
+                    // encode with the console codepage when stdout is a
+                    // pipe, and can even raise UnicodeEncodeError for an
+                    // install path under a non-ASCII user profile — either
+                    // way a valid interpreter would be skipped or garbled.
+                    cmd.args(version_args).args([
+                        "-c",
+                        "import sys; sys.stdout.buffer.write(sys.executable.encode('utf-8'))",
+                    ]);
                     configure_no_window_command(&mut cmd);
                     let Ok(out) = cmd.output() else { continue };
                     if !out.status.success() {
                         continue;
                     }
-                    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if path.is_empty() || path.to_ascii_lowercase().contains("windowsapps") {
+                    let Ok(path) = std::str::from_utf8(&out.stdout) else {
+                        continue;
+                    };
+                    let path = std::path::PathBuf::from(path.trim());
+                    if path.as_os_str().is_empty() {
                         continue;
                     }
-                    return std::path::PathBuf::from(path);
+                    // A component check, not a substring one: a user dir
+                    // that merely contains the word must not be rejected.
+                    if path
+                        .components()
+                        .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+                    {
+                        continue;
+                    }
+                    return path;
                 }
                 panic!(
                     "no real CPython found: `python` resolves to the Microsoft Store alias \
