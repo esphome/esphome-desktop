@@ -406,8 +406,10 @@ pub(super) fn notify_repair_needed(app_handle: &AppHandle, body: String) {
 ///
 /// This is the signal that the tree is corrupt rather than the install being
 /// wrong, so it is what selects the repair path in
-/// [`install_with_record_recovery`].
-fn is_missing_record_error(stderr: &str) -> bool {
+/// [`install_with_record_recovery`]. `pub(crate)` so the repair e2e can
+/// assert the abort it plants is the one this predicate keys on, rather than
+/// re-hardcoding pip's wording and drifting from it.
+pub(crate) fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 

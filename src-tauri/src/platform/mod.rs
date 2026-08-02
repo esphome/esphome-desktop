@@ -454,6 +454,31 @@ mod tests {
         PathBuf::from(out.trim())
     }
 
+    /// Dist-info dirs in `purelib` whose name starts with `prefix`.
+    fn e2e_dist_infos(purelib: &Path, prefix: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(purelib)
+            .expect("could not list purelib")
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                let name = entry.file_name().into_string().unwrap();
+                (name.starts_with(prefix) && name.ends_with(".dist-info")).then(|| entry.path())
+            })
+            .collect()
+    }
+
+    /// The exact pip invocation the updater runs for the device builder
+    /// (unpinned stable). One spelling shared by e2e steps 8b and 12: their
+    /// whole point is that the *identical* command aborts before the repair
+    /// and succeeds after it, so identity must be structural, not by
+    /// inspection of two literals.
+    const E2E_BUILDER_UPGRADE: &[&str] = &[
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "esphome-device-builder",
+    ];
+
     /// The whole repair lifecycle against a real bundled Python tree: the
     /// first-run copy, detect the orphan, wipe and re-copy from the pristine
     /// bundle, prove it is fixed, then prove a refresh from an older bundle
@@ -640,30 +665,20 @@ mod tests {
         //     uninstall-no-record-file; this is the premise the whole fix
         //     rests on, so assert it rather than assume it. (Reaches PyPI:
         //     pip resolves the frontend wheel before the uninstall aborts.)
-        for entry in std::fs::read_dir(&purelib).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().into_string().unwrap();
-            if name.starts_with("esphome_device_builder_frontend") && name.ends_with(".dist-info") {
-                std::fs::remove_dir_all(entry.path()).unwrap();
-            }
+        for dist_info in e2e_dist_infos(&purelib, "esphome_device_builder_frontend") {
+            std::fs::remove_dir_all(dist_info).unwrap();
         }
         std::fs::create_dir_all(purelib.join(dead_dist_info_name)).unwrap();
-        let (ok, out) = e2e_pip(
-            &python,
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "esphome-device-builder",
-            ],
-        );
+        let (ok, out) = e2e_pip(&python, E2E_BUILDER_UPGRADE);
         assert!(
             !ok,
             "pip must abort on the RECORD-less frontend dist-info: {out}"
         );
+        // The production predicate, not a re-hardcoded pip phrase: what this
+        // step must prove is that the planted state produces the abort
+        // `install_with_record_recovery` keys its repair on.
         assert!(
-            out.contains("no RECORD file was found"),
+            crate::update::is_missing_record_error(&out),
             "pip failed, but not with the missing-RECORD abort this state must produce: {out}"
         );
 
@@ -710,12 +725,9 @@ mod tests {
         //     direct negation of the #389 symptom. The step-2 `purelib` path
         //     is still the right place to look: the refresh recreated the
         //     directory, but at the same location.
-        let esphome_dist_infos: Vec<_> = std::fs::read_dir(&purelib)
-            .expect("could not list the refreshed purelib")
-            .filter_map(|entry| {
-                let name = entry.unwrap().file_name().into_string().unwrap();
-                (name.starts_with("esphome-") && name.ends_with(".dist-info")).then_some(name)
-            })
+        let esphome_dist_infos: Vec<_> = e2e_dist_infos(&purelib, "esphome-")
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             esphome_dist_infos,
@@ -733,16 +745,7 @@ mod tests {
         //     it repaired from carried the same corruption, exactly the
         //     reported situation. The command that aborted in step 8b must
         //     now succeed. (Reaches PyPI.)
-        let (ok, out) = e2e_pip(
-            &python,
-            &[
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "esphome-device-builder",
-            ],
-        );
+        let (ok, out) = e2e_pip(&python, E2E_BUILDER_UPGRADE);
         assert!(
             ok,
             "the update retry still fails after the repair from a dirty source: {out}"

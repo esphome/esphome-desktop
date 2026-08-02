@@ -253,7 +253,42 @@ def dedupe_dist_info(
     at all, or no parseable version anywhere in it: its keeps count as
     unresolved even though they stay.
     """
+    groups, failed = _collect_entries(dists, targets)
     removed = 0
+    for entries in groups.values():
+        group_removed, group_failed = _prune_group(entries)
+        removed += group_removed
+        failed += group_failed
+    return removed, failed
+
+
+def _remove_counted(path: Path, kind: str) -> bool:
+    """Remove ``path``, returning whether it worked.
+
+    On failure prints the could-not-remove line for ``kind``: the two kinds
+    are worded apart so a bounded stderr tail says which failure drove the
+    exit 1.
+    """
+    try:
+        _rmtree(path)
+        return True
+    except OSError as err:
+        print(
+            f"dedupe: could not remove {kind} {path}: {err}",
+            file=sys.stderr,
+        )
+        return False
+
+
+def _collect_entries(
+    dists: Iterable[Distribution], targets: set[str] | None
+) -> tuple[dict[str, list[_Entry]], int]:
+    """Classify ``dists`` into per-package [`_Entry`] groups.
+
+    Returns the groups plus the count of entries that could not even be
+    classified (pathless, nameless in all-scope mode, unlistable) — the
+    collection-phase share of ``dedupe_dist_info``'s ``failed``.
+    """
     failed = 0
     groups: dict[str, list[_Entry]] = {}
     for dist in dists:
@@ -363,106 +398,96 @@ def dedupe_dist_info(
                 unreadable=unreadable,
             )
         )
+    return groups, failed
 
-    for entries in groups.values():
-        items: list[tuple[str | None, Path]] = []
-        kept_dir_name_only = 0
-        for entry in entries:
-            version, path = entry.version, entry.path
-            if not entry.has_record:
-                # No RECORD: pip can never uninstall this entry, so any
-                # install that tries aborts with uninstall-no-record-file,
-                # whether or not the version is still readable ("Cannot
-                # uninstall <pkg> None", or with the version when METADATA
-                # survived). A completed pip install always writes RECORD, so
-                # unlike the unrankable-but-managed case below this cannot be
-                # the real install, and removing the dist-info dir is the only
-                # way out of the abort loop.
-                print(f"dedupe: removing RECORD-less {path}", file=sys.stderr)
-                try:
-                    _rmtree(path)
-                    removed += 1
-                except OSError as err:
-                    # Counted, not just logged: this entry still blocks every
-                    # install, so the run must not report success around it.
-                    # Worded apart from the best-effort "skip" below so a
-                    # bounded stderr tail says which failure drove the exit 1.
-                    failed += 1
-                    print(
-                        f"dedupe: could not remove RECORD-less {path}: {err}",
-                        file=sys.stderr,
-                    )
-                continue
-            if entry.inferred:
-                if entry.unreadable:
-                    # METADATA exists but could not be read. pip can still
-                    # manage the entry (a RECORD got it past the branch
-                    # above), but its version is unknowable right now, so any
-                    # pileup it belongs to is unresolved: counted, not folded
-                    # into the deliberate keeps below.
-                    failed += 1
-                    print(
-                        f"dedupe: could not read METADATA in {path}",
-                        file=sys.stderr,
-                    )
-                    continue
-                # A directory name is identity enough to condemn a
-                # RECORD-less entry above (pip trusts it the same way when
-                # it aborts), but not to rank the entry against properly named
-                # siblings: a corrupted name landing in another package's
-                # group could evict that package's real dist-info. Keep it
-                # and keep it out of the ranking.
-                kept_dir_name_only += 1
-                print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
-                continue
-            items.append((version, path))
-        if not items and kept_dir_name_only:
-            # The group ended up with nothing rankable: detect_version filters
-            # on the METADATA Name, so this package still resolves to no
-            # version — the same #190 consequence as a duplicate the prune
-            # could not remove, and on the builder path no install is ever
-            # offered that would let pip heal these keeps. They stand (deleting
-            # on a guess is still the one forbidden wrong), but the run must
-            # not call this resolved.
-            failed += kept_dir_name_only
-        if len(items) < 2:
-            continue  # a single healthy install is left untouched
-        items.sort(key=lambda item: vkey(item[0]))
-        keep_version, keep_path = items[-1]
-        if vkey(keep_version) == _UNRANKED:
-            # No entry in the group has a parseable version, so we can't tell
-            # which is the real install. Leave the whole group rather than
-            # risk a wrong rmtree — but count it, like the nothing-rankable
-            # case above: a version that still cannot be resolved afterwards
-            # is not a heal, whichever shape left it unresolvable.
-            failed += len(items)
-            print(
-                f"dedupe: keeping ambiguous group, no parseable version "
-                f"near {keep_path}",
-                file=sys.stderr,
-            )
-            continue
-        for version, path in items[:-1]:
-            if vkey(version) == _UNRANKED:
-                # An unparseable version with a RECORD (RECORD-less entries
-                # never reach this loop) might itself be the real install, so
-                # never delete it on the strength of the lowest-sort sentinel.
-                print(f"dedupe: keeping unrankable {path}", file=sys.stderr)
-                continue
-            try:
-                _rmtree(path)
+
+def _prune_group(entries: list[_Entry]) -> tuple[int, int]:
+    """Prune one package's entries; returns its ``(removed, failed)`` share."""
+    removed = 0
+    failed = 0
+    items: list[_Entry] = []
+    kept_dir_name_only = 0
+    for entry in entries:
+        path = entry.path
+        if not entry.has_record:
+            # No RECORD: pip can never uninstall this entry, so any install
+            # that tries aborts with uninstall-no-record-file, whether or not
+            # the version is still readable ("Cannot uninstall <pkg> None",
+            # or with the version when METADATA survived). A completed pip
+            # install always writes RECORD, so unlike the
+            # unrankable-but-managed case below this cannot be the real
+            # install, and removing the dist-info dir is the only way out of
+            # the abort loop. A failed removal is counted, not just logged:
+            # the entry still blocks every install, so the run must not
+            # report success around it.
+            print(f"dedupe: removing RECORD-less {path}", file=sys.stderr)
+            if _remove_counted(path, "RECORD-less"):
                 removed += 1
-            except OSError as err:
-                # Also counted: a surviving duplicate keeps the #190 pileup in
-                # place, so importlib still cannot resolve a single version
-                # and the updater loops on "version None". Worded apart from
-                # the RECORD-less and unlistable lines so a bounded stderr
-                # tail says which failure drove the exit 1.
+            else:
+                failed += 1
+            continue
+        if entry.inferred:
+            if entry.unreadable:
+                # METADATA exists but could not be read. pip can still
+                # manage the entry (a RECORD got it past the branch
+                # above), but its version is unknowable right now, so any
+                # pileup it belongs to is unresolved: counted, not folded
+                # into the deliberate keeps below.
                 failed += 1
                 print(
-                    f"dedupe: could not remove stale duplicate {path}: {err}",
+                    f"dedupe: could not read METADATA in {path}",
                     file=sys.stderr,
                 )
+                continue
+            # A directory name is identity enough to condemn a
+            # RECORD-less entry above (pip trusts it the same way when
+            # it aborts), but not to rank the entry against properly named
+            # siblings: a corrupted name landing in another package's
+            # group could evict that package's real dist-info. Keep it
+            # and keep it out of the ranking.
+            kept_dir_name_only += 1
+            print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
+            continue
+        items.append(entry)
+    if not items and kept_dir_name_only:
+        # The group ended up with nothing rankable: detect_version filters
+        # on the METADATA Name, so this package still resolves to no
+        # version — the same #190 consequence as a duplicate the prune
+        # could not remove, and on the builder path no install is ever
+        # offered that would let pip heal these keeps. They stand (deleting
+        # on a guess is still the one forbidden wrong), but the run must
+        # not call this resolved.
+        failed += kept_dir_name_only
+    if len(items) < 2:
+        return removed, failed  # a single healthy install is left untouched
+    items.sort(key=lambda entry: vkey(entry.version))
+    keep = items[-1]
+    if vkey(keep.version) == _UNRANKED:
+        # No entry in the group has a parseable version, so we can't tell
+        # which is the real install. Leave the whole group rather than
+        # risk a wrong rmtree — but count it, like the nothing-rankable
+        # case above: a version that still cannot be resolved afterwards
+        # is not a heal, whichever shape left it unresolvable.
+        failed += len(items)
+        print(
+            f"dedupe: keeping ambiguous group, no parseable version near {keep.path}",
+            file=sys.stderr,
+        )
+        return removed, failed
+    for entry in items[:-1]:
+        if vkey(entry.version) == _UNRANKED:
+            # An unparseable version with a RECORD (RECORD-less entries
+            # never reach this loop) might itself be the real install, so
+            # never delete it on the strength of the lowest-sort sentinel.
+            print(f"dedupe: keeping unrankable {entry.path}", file=sys.stderr)
+            continue
+        # A failed removal is counted: a surviving duplicate keeps the #190
+        # pileup in place, so importlib still cannot resolve a single
+        # version and the updater loops on "version None".
+        if _remove_counted(entry.path, "stale duplicate"):
+            removed += 1
+        else:
+            failed += 1
     return removed, failed
 
 

@@ -19,6 +19,10 @@ mod install;
 mod notify;
 mod version;
 
+// Test-only: the repair e2e asserts the abort it plants is the one this
+// predicate keys the recovery on, rather than re-hardcoding pip's wording.
+#[cfg(test)]
+pub(crate) use install::is_missing_record_error;
 pub use install::{get_installed_device_builder_version, installed_esphome_version};
 pub(crate) use notify::notify_update_available;
 pub(crate) use version::is_newer_version;

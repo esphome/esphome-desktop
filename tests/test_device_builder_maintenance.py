@@ -66,6 +66,22 @@ def _dists(site: Path) -> list[Distribution]:
     return list(distributions(path=[str(site)]))
 
 
+def _make_torn(site: Path, package: str, version: str) -> Path:
+    """The reported overlay shape: a dist-info with no METADATA and no RECORD."""
+    return _make_dist_info(
+        site, package, version, with_metadata=False, with_record=False
+    )
+
+
+def _refuse_rmtree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the prune's removal fail, the way a locked directory does."""
+
+    def refuse(_path: Path) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(maint, "_rmtree", refuse)
+
+
 # --------------------------------------------------------------------------- #
 # vkey: self-contained version ranking (no packaging dependency).
 # --------------------------------------------------------------------------- #
@@ -286,13 +302,7 @@ def test_dedupe_removes_record_less_frontend_beside_healthy(tmp_path: Path) -> N
     # prune must still attribute and remove it while keeping the healthy
     # install.
     keep = _make_dist_info(tmp_path, "esphome-device-builder-frontend", "0.1.172")
-    dead = _make_dist_info(
-        tmp_path,
-        "esphome-device-builder-frontend",
-        "0.1.150",
-        with_metadata=False,
-        with_record=False,
-    )
+    dead = _make_torn(tmp_path, "esphome-device-builder-frontend", "0.1.150")
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
     assert keep.is_dir()
     assert not dead.exists()
@@ -303,13 +313,7 @@ def test_dedupe_removes_lone_record_less_entry(tmp_path: Path) -> None:
     # No healthy sibling to compare against: the entry is condemned on its own
     # evidence. A completed pip install always writes RECORD, so this cannot
     # be the real install, and pip aborts the upgrade as long as it exists.
-    dead = _make_dist_info(
-        tmp_path,
-        "esphome-device-builder-frontend",
-        "0.1.150",
-        with_metadata=False,
-        with_record=False,
-    )
+    dead = _make_torn(tmp_path, "esphome-device-builder-frontend", "0.1.150")
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (1, 0)
     assert not dead.exists()
 
@@ -322,13 +326,7 @@ def test_dedupe_removes_dist_info_with_read_only_contents(tmp_path: Path) -> Non
     # leg, where the original failure lived).
     keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
     stale = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
-    dead = _make_dist_info(
-        tmp_path,
-        "esphome-device-builder-frontend",
-        "0.1.150",
-        with_metadata=False,
-        with_record=False,
-    )
+    dead = _make_torn(tmp_path, "esphome-device-builder-frontend", "0.1.150")
     for dist_info in (stale, dead):
         locked = dist_info / "locked.txt"
         locked.write_text("")
@@ -359,18 +357,9 @@ def test_dedupe_counts_a_record_less_entry_it_cannot_remove(
     # A RECORD-less dir that survives the prune still aborts every install, so
     # it must be reported as a failure (the CLI exits non-zero on it), never
     # folded into "nothing to remove".
-    dead = _make_dist_info(
-        tmp_path,
-        "esphome-device-builder-frontend",
-        "0.1.150",
-        with_metadata=False,
-        with_record=False,
-    )
+    dead = _make_torn(tmp_path, "esphome-device-builder-frontend", "0.1.150")
 
-    def refuse(_path: Path) -> None:
-        raise OSError("locked")
-
-    monkeypatch.setattr(maint, "_rmtree", refuse)
+    _refuse_rmtree(monkeypatch)
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert dead.is_dir()
 
@@ -395,13 +384,7 @@ def test_dedupe_counts_an_unlistable_dist_info(
     # what might be a real install. But it may be the RECORD-less blocker, so
     # it counts as unresolved; "could not determine the tree is clean" must
     # not read as clean.
-    dead = _make_dist_info(
-        tmp_path,
-        "esphome-device-builder",
-        "1.0.9",
-        with_metadata=False,
-        with_record=False,
-    )
+    dead = _make_torn(tmp_path, "esphome-device-builder", "1.0.9")
     _fail_iterdir_for(monkeypatch, dead)
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert dead.is_dir()
@@ -413,9 +396,7 @@ def test_dedupe_scoped_ignores_an_unlistable_non_target(
     # The unresolved count only covers in-scope entries: the scoped
     # device-builder heal must not fail over an unlistable directory it was
     # never going to touch.
-    broken = _make_dist_info(
-        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
-    )
+    broken = _make_torn(tmp_path, "zeroconf", "0.147.0")
     _fail_iterdir_for(monkeypatch, broken)
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert broken.is_dir()
@@ -430,10 +411,7 @@ def test_dedupe_counts_a_stale_duplicate_it_cannot_remove(
     keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
     stale = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
 
-    def refuse(_path: Path) -> None:
-        raise OSError("locked")
-
-    monkeypatch.setattr(maint, "_rmtree", refuse)
+    _refuse_rmtree(monkeypatch)
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert keep.is_dir()
     assert stale.is_dir()
@@ -495,9 +473,7 @@ def test_dedupe_inferred_name_never_ranks(tmp_path: Path) -> None:
 def test_dedupe_default_scope_leaves_non_target_record_less(tmp_path: Path) -> None:
     # The lazy update-check heal stays scoped to the builder packages even for
     # RECORD-less entries; the post-copy dedupe-all owns the whole tree.
-    dead = _make_dist_info(
-        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
-    )
+    dead = _make_torn(tmp_path, "zeroconf", "0.147.0")
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert dead.is_dir()
 
@@ -505,12 +481,8 @@ def test_dedupe_default_scope_leaves_non_target_record_less(tmp_path: Path) -> N
 def test_dedupe_all_removes_any_record_less(tmp_path: Path) -> None:
     # The #183 dev-channel shape was a torn zeroconf; dedupe-all must clear a
     # RECORD-less entry for any package, healthy sibling or not.
-    dead = _make_dist_info(
-        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
-    )
-    lone_dead = _make_dist_info(
-        tmp_path, "bleak", "2.1.0", with_metadata=False, with_record=False
-    )
+    dead = _make_torn(tmp_path, "zeroconf", "0.147.0")
+    lone_dead = _make_torn(tmp_path, "bleak", "2.1.0")
     keep = _make_dist_info(tmp_path, "zeroconf", "0.148.0")
     assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (2, 0)
     assert keep.is_dir()
@@ -622,9 +594,7 @@ def test_main_dedupe_scopes_to_targets(
     # dedupe must leave a non-target RECORD-less entry to dedupe-all: a swap
     # of the scope selection would turn the scoped heal into a whole-tree
     # prune on a live user tree.
-    dead = _make_dist_info(
-        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
-    )
+    dead = _make_torn(tmp_path, "zeroconf", "0.147.0")
     monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
     assert maint.main(["dedupe"]) == 0
     assert capsys.readouterr().out.strip() == "0"
@@ -639,19 +609,10 @@ def test_main_exits_non_zero_when_a_record_less_entry_survives(
 ) -> None:
     # The Rust caller only looks at the exit status; a surviving RECORD-less
     # entry reported through exit 0 would read as a heal.
-    _make_dist_info(
-        tmp_path,
-        "esphome-device-builder-frontend",
-        "0.1.150",
-        with_metadata=False,
-        with_record=False,
-    )
+    _make_torn(tmp_path, "esphome-device-builder-frontend", "0.1.150")
     monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
 
-    def refuse(_path: Path) -> None:
-        raise OSError("locked")
-
-    monkeypatch.setattr(maint, "_rmtree", refuse)
+    _refuse_rmtree(monkeypatch)
     assert maint.main(["dedupe"]) == 1
     captured = capsys.readouterr()
     assert captured.out.strip() == "0"
