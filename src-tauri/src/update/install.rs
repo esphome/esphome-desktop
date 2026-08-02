@@ -67,6 +67,38 @@ fn update_sequence_in_flight(app_handle: &AppHandle) -> bool {
         })
 }
 
+/// What the caller of [`detect_device_builder_version_with_heal_async`] knows
+/// about the `UpdateGuard`, which decides whether the destructive dist-info
+/// heal may run.
+///
+/// A global flag read alone cannot make this decision: it cannot tell
+/// "someone else's sequence is running" from "my own caller holds the guard",
+/// and the two mean opposite things for the heal (a guard the caller holds is
+/// proof that no pip install can be racing).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HealPolicy {
+    /// The caller holds the `UpdateGuard` (the tray's Check for Updates arm),
+    /// so its sequence is the only one running and the steps are sequential:
+    /// no pip install can be concurrently in flight when the heal runs. This
+    /// is also the main user-facing recovery for the #190 pileup, so the heal
+    /// must not stand down here.
+    GuardHeld,
+    /// The caller runs without the guard (the daily background check). Heal
+    /// only while no update/switch sequence is in flight: pip writes `RECORD`
+    /// last, so a package mid-install passes through exactly the RECORD-less
+    /// shape the prune condemns.
+    WhenIdle,
+}
+
+/// Whether the heal may run under `policy`, given the observed guard flag.
+/// Split out so the policy is testable without an `AppHandle`.
+fn heal_allowed(policy: HealPolicy, sequence_in_flight: bool) -> bool {
+    match policy {
+        HealPolicy::GuardHeld => true,
+        HealPolicy::WhenIdle => !sequence_in_flight,
+    }
+}
+
 /// Detect the installed device-builder version, healing a duplicate dist-info
 /// pileup once if the first lookup cannot determine a version.
 ///
@@ -75,21 +107,20 @@ fn update_sequence_in_flight(app_handle: &AppHandle) -> bool {
 /// `None` (dedup finds nothing to remove), at the cost of one extra Python spawn
 /// only on the already-unusual not-determinable path.
 ///
-/// The heal stands down while an update/switch sequence is in flight. The
-/// prune deletes dist-info dirs, and pip writes `RECORD` last, so a package
-/// mid-install passes through exactly the RECORD-less shape the prune
-/// condemns; the update checks run without the `UpdateGuard` (they are
-/// otherwise read-only), so this is the one destructive step they could race
-/// into a live install. An undeterminable version during a sequence is far
-/// more likely that transient state than the #190 pileup, and a real pileup
-/// is still healed by the next check once the guard is free.
-fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Option<String>> {
+/// Whether the heal may run is the caller's knowledge, not this function's:
+/// see [`HealPolicy`]. When it stands down, an undeterminable version is far
+/// more likely a concurrent install's transient state than the #190 pileup,
+/// and a real pileup is still healed by the next check once the guard frees.
+fn detect_device_builder_version_with_heal(
+    app_handle: &AppHandle,
+    policy: HealPolicy,
+) -> Result<Option<String>> {
     let installed = get_installed_device_builder_version(app_handle)?;
     if installed.is_some() {
         return Ok(installed);
     }
-    if update_sequence_in_flight(app_handle) {
-        info!("skipping the dist-info heal: an update sequence is in flight");
+    if !heal_allowed(policy, update_sequence_in_flight(app_handle)) {
+        info!("skipping the dist-info heal: another update sequence is in flight");
         return Ok(installed);
     }
     if let Err(e) = dedupe_device_builder_dist_info(app_handle) {
@@ -108,9 +139,10 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
 /// `spawn_blocking` instead.
 pub(super) async fn detect_device_builder_version_with_heal_async(
     app_handle: &AppHandle,
+    policy: HealPolicy,
 ) -> Result<Option<String>> {
     let app = app_handle.clone();
-    tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app))
+    tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app, policy))
         .await
         .context("device-builder version detection task panicked or was cancelled")?
 }
@@ -478,6 +510,21 @@ mod tests {
             args.last().map(String::as_str),
             Some("esphome-device-builder==1.2.3")
         );
+    }
+
+    #[test]
+    fn the_heal_yields_only_to_sequences_the_caller_does_not_own() {
+        // A caller holding the UpdateGuard is proof no pip install can be
+        // racing, and the tray's Check for Updates arm is the main
+        // user-facing recovery for the #190 pileup: the global flag it set
+        // itself must not stand its own heal down. The guardless background
+        // check is the opposite: while any sequence is in flight, pip may be
+        // mid-install and RECORD is written last, so the destructive prune
+        // must wait.
+        assert!(heal_allowed(HealPolicy::GuardHeld, true));
+        assert!(heal_allowed(HealPolicy::GuardHeld, false));
+        assert!(!heal_allowed(HealPolicy::WhenIdle, true));
+        assert!(heal_allowed(HealPolicy::WhenIdle, false));
     }
 
     #[test]

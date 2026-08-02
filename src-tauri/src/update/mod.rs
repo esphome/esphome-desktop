@@ -27,7 +27,7 @@ use install::{
     detect_device_builder_version_with_heal_async, install_with_record_recovery,
     installed_esphome_version_async, interpreter_usable, notify_repair_incomplete,
     notify_repair_needed, probe_esphome, repair_hint, run_dev_install, run_device_builder_install,
-    run_esphome_install,
+    run_esphome_install, HealPolicy,
 };
 use notify::{notify_if_newer, prompt_if_newer};
 use version::{find_latest_any, select_beta_target};
@@ -596,17 +596,22 @@ impl UpdateChecker {
         backend: Backend,
         tray_available: bool,
     ) {
-        let installed = match detect_device_builder_version_with_heal_async(app_handle).await {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                debug!("esphome-device-builder is not installed; skipping update check");
-                return;
-            }
-            Err(e) => {
-                warn!("esphome-device-builder version detection failed: {}", e);
-                return;
-            }
-        };
+        // The daily background check runs without the UpdateGuard, so the
+        // heal must yield to any sequence that holds it (see HealPolicy).
+        let installed =
+            match detect_device_builder_version_with_heal_async(app_handle, HealPolicy::WhenIdle)
+                .await
+            {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    debug!("esphome-device-builder is not installed; skipping update check");
+                    return;
+                }
+                Err(e) => {
+                    warn!("esphome-device-builder version detection failed: {}", e);
+                    return;
+                }
+            };
 
         let latest = match self.check_device_builder(backend).await {
             Ok(v) => v,
@@ -634,20 +639,27 @@ impl UpdateChecker {
         app_handle: &AppHandle,
         backend: Backend,
     ) -> Option<String> {
-        let installed = match detect_device_builder_version_with_heal_async(app_handle).await {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                warn!("esphome-device-builder is not installed");
-                return None;
-            }
-            Err(e) => {
-                warn!(
-                    "Could not detect installed esphome-device-builder version: {}",
-                    e
-                );
-                return None;
-            }
-        };
+        // The tray's Check for Updates arm holds the UpdateGuard for its
+        // whole sequence, which is proof no pip install can be racing; this
+        // is also the main user-facing recovery for the #190 pileup, so the
+        // heal must run here (see HealPolicy).
+        let installed =
+            match detect_device_builder_version_with_heal_async(app_handle, HealPolicy::GuardHeld)
+                .await
+            {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    warn!("esphome-device-builder is not installed");
+                    return None;
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not detect installed esphome-device-builder version: {}",
+                        e
+                    );
+                    return None;
+                }
+            };
 
         let latest = match self.check_device_builder(backend).await {
             Ok(v) => v,
