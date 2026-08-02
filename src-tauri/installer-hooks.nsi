@@ -42,10 +42,16 @@
   ; leftover lock is unexpected; if one survives anyway, RMDir /r is
   ; best-effort, which is no worse than today's overlay.
   ;
-  ; Gated on the previous install's uninstaller, not just the trees: a user
+  ; Gated on evidence the directory is ours, not just on the trees: a user
   ; pointing an interactive install at some unrelated non-empty directory
   ; must not lose a python/, git/ or ccache/ folder that was never ours.
+  ; This RMDir /r is the only recursive delete this installer performs (the
+  ; stock template's uninstall deletes per manifest entry), so it must be
+  ; impossible to fire on a directory we did not create. Either sentinel
+  ; proves a previous install: uninstall.exe is written by every install,
+  ; and the main exe covers a tree whose uninstaller was manually removed.
   ${If} ${FileExists} "$INSTDIR\uninstall.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     ${If} ${FileExists} "$INSTDIR\python\*.*"
     ${OrIf} ${FileExists} "$INSTDIR\git\*.*"
     ${OrIf} ${FileExists} "$INSTDIR\ccache\*.*"
@@ -62,11 +68,15 @@
   ; and only clears it once a probe passes — so on a machine whose budget was
   ; spent against the polluted bundle, reinstalling the *same* app version
   ; (no version-marker mismatch, so no refresh copy) would leave the broken
-  ; user tree in place with every repair refused. Must match
-  ; REPAIR_COUNT_MARKER in src/platform/health.rs (drift-tested in
-  ; src/platform/windows.rs).
-  Delete "$LOCALAPPDATA\io.esphome.builder\.repair-count"
+  ; user tree in place with every repair refused.
+  Delete "$LOCALAPPDATA\io.esphome.builder\${REPAIR_COUNT_MARKER}"
 !macroend
+
+; The app's counter bounding probe-triggered repairs; must match
+; REPAIR_COUNT_MARKER in src/platform/health.rs (drift-tested in
+; src/platform/windows.rs). Deleted on every install so a reinstall starts
+; with a fresh budget; a real uninstall removes the whole data dir anyway.
+!define REPAIR_COUNT_MARKER ".repair-count"
 
 ; On first run the app offers to add an inbound firewall rule for the managed
 ; Python interpreter so other dashboards can pair with this machine (issue

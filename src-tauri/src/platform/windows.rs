@@ -264,7 +264,26 @@ mod tests {
     #[test]
     fn installer_hook_wipes_the_previous_bundled_trees() {
         let hooks = include_str!("../../installer-hooks.nsi");
-        for dir in ["python", "git", "ccache"] {
+        // The authoritative list of overlaid trees is `bundle.resources`: a
+        // resource dir added there without a matching wipe would quietly
+        // start accumulating the previous release's files again — the exact
+        // class of rot the wipe exists to stop.
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+            .expect("tauri.conf.json must parse");
+        let resources: Vec<&str> = conf["bundle"]["resources"]
+            .as_array()
+            .expect("bundle.resources must be an array")
+            .iter()
+            .map(|r| {
+                r.as_str()
+                    .expect("bundle.resources entries must be plain dir names")
+            })
+            .collect();
+        assert!(
+            !resources.is_empty(),
+            "bundle.resources is empty; the wipe drift test has nothing to pin"
+        );
+        for dir in &resources {
             assert!(
                 hooks.contains(&format!("RMDir /r \"$INSTDIR\\{dir}\"")),
                 "installer-hooks.nsi must wipe the previous bundled {dir} tree before the overlay"
@@ -274,10 +293,15 @@ mod tests {
         // previous install: an interactive install pointed at an unrelated
         // non-empty directory must not delete a python/, git/ or ccache/
         // folder that was never ours.
-        assert!(
-            hooks.contains("${If} ${FileExists} \"$INSTDIR\\uninstall.exe\""),
-            "installer-hooks.nsi must gate the wipe on the previous install's uninstaller"
-        );
+        for sentinel in [
+            "${If} ${FileExists} \"$INSTDIR\\uninstall.exe\"",
+            "${OrIf} ${FileExists} \"$INSTDIR\\${MAINBINARYNAME}.exe\"",
+        ] {
+            assert!(
+                hooks.contains(sentinel),
+                "installer-hooks.nsi must gate the wipe on a previous-install sentinel: {sentinel}"
+            );
+        }
     }
 
     /// A fresh install lays down a pristine bundle, so the installer grants a
@@ -290,9 +314,15 @@ mod tests {
         let hooks = include_str!("../../installer-hooks.nsi");
         assert!(
             hooks.contains(&format!(
-                "Delete \"$LOCALAPPDATA\\{}\\{}\"",
-                super::super::BUNDLE_IDENTIFIER,
+                "!define REPAIR_COUNT_MARKER \"{}\"",
                 super::super::health::REPAIR_COUNT_MARKER
+            )),
+            "installer-hooks.nsi must define the same repair-count marker name"
+        );
+        assert!(
+            hooks.contains(&format!(
+                "Delete \"$LOCALAPPDATA\\{}\\${{REPAIR_COUNT_MARKER}}\"",
+                super::super::BUNDLE_IDENTIFIER
             )),
             "installer-hooks.nsi must delete the repair counter so a reinstall gets a fresh budget"
         );
