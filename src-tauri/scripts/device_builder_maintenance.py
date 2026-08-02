@@ -101,27 +101,36 @@ def _dist_path(dist: Distribution) -> object:
     return getattr(dist, "_path", "?")
 
 
+def _clear_readonly_and_retry(
+    func: Callable[[str], object], failed: str, exc: BaseException
+) -> None:
+    """``shutil.rmtree`` error handler: clear a read-only flag, retry once.
+
+    A path that is writable yet still failed re-raises the original error:
+    the flag is not the problem there, and retrying would just fail again. A
+    retry that fails anew chains the original error so the log names both
+    causes. Module-level rather than nested in [`_rmtree`] so the early-out
+    and the chain are unit-testable on every platform; the flag-clearing leg
+    only ever fires on Windows.
+    """
+    if os.access(failed, os.W_OK):
+        raise exc
+    try:
+        Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+        func(failed)
+    except OSError as retry_err:
+        raise retry_err from exc
+
+
 def _rmtree(path: Path) -> None:
     """``shutil.rmtree`` that clears Windows' read-only flag and retries.
 
     Files inside a dist-info can carry the read-only attribute on Windows,
     which fails the plain delete (same handling as ``esphome.helpers.rmtree``,
     plus the execute bit so a chmod'd directory stays traversable for the
-    retry). A path that is writable yet still failed re-raises: the flag is
-    not the problem there, and retrying would just fail again. A retry that
-    fails anew chains the original error so the log names both causes.
+    retry).
     """
-
-    def _onexc(func: Callable[[str], object], failed: str, exc: BaseException) -> None:
-        if os.access(failed, os.W_OK):
-            raise exc
-        try:
-            Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
-            func(failed)
-        except OSError as retry_err:
-            raise retry_err from exc
-
-    shutil.rmtree(path, onexc=_onexc)
+    shutil.rmtree(path, onexc=_clear_readonly_and_retry)
 
 
 def _infer_name(path: Path) -> str:
@@ -262,8 +271,13 @@ def dedupe_dist_info(
                 except OSError as err:
                     # Counted, not just logged: this entry still blocks every
                     # install, so the run must not report success around it.
+                    # Worded apart from the best-effort "skip" below so a
+                    # bounded stderr tail says which failure drove the exit 1.
                     failed += 1
-                    print(f"skip {path}: {err}", file=sys.stderr)
+                    print(
+                        f"dedupe: could not remove RECORD-less {path}: {err}",
+                        file=sys.stderr,
+                    )
                 continue
             if inferred:
                 # A directory name is identity enough to condemn a
@@ -317,8 +331,9 @@ def main(argv: list[str]) -> int:
         )
         print(removed)
         # A RECORD-less dir that survived the prune still aborts every
-        # install; exit 1 so the caller logs "still corrupt" instead of
-        # retrying into the same wall as if the tree were healed.
+        # install; exit 1 so a partial prune is never reported as a heal. The
+        # callers are best-effort and continue either way, so the exit code
+        # buys a distinguishable log line, not a control-flow guard.
         return 1 if failed else 0
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2

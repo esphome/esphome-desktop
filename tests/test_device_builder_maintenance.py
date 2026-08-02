@@ -17,6 +17,7 @@ pytest suite (maintainer-requested framework, fully typed, no classes).
 
 from __future__ import annotations
 
+import os
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
 
@@ -445,3 +446,110 @@ def test_dedupe_all_removes_any_record_less(tmp_path: Path) -> None:
     assert keep.is_dir()
     assert not dead.exists()
     assert not lone_dead.exists()
+
+
+# --------------------------------------------------------------------------- #
+# _clear_readonly_and_retry: the rmtree error handler. The flag-clearing leg
+# only ever fires on Windows, so its contract is pinned directly here where it
+# runs on every platform.
+# --------------------------------------------------------------------------- #
+
+
+def test_retry_handler_reraises_when_the_path_is_writable(tmp_path: Path) -> None:
+    # A writable path that still failed means the read-only flag was not the
+    # problem; the original error must surface unchanged and nothing may be
+    # retried against the same wall.
+    target = tmp_path / "file.txt"
+    target.write_text("")
+    original = OSError("boom")
+    with pytest.raises(OSError) as caught:
+        maint._clear_readonly_and_retry(os.unlink, str(target), original)
+    assert caught.value is original
+    assert target.exists()
+
+
+def test_retry_handler_clears_the_flag_and_retries(tmp_path: Path) -> None:
+    target = tmp_path / "file.txt"
+    target.write_text("")
+    target.chmod(0o444)
+    maint._clear_readonly_and_retry(os.unlink, str(target), OSError("original"))
+    assert not target.exists()
+
+
+def test_retry_handler_chains_a_failed_retry(tmp_path: Path) -> None:
+    # The retry failing anew must not silently replace the original cause; the
+    # chain keeps both in the traceback the "could not remove" line reports.
+    target = tmp_path / "file.txt"
+    target.write_text("")
+    target.chmod(0o444)
+    original = OSError("original")
+
+    def refuse(_path: str) -> None:
+        raise OSError("still locked")
+
+    with pytest.raises(OSError) as caught:
+        maint._clear_readonly_and_retry(refuse, str(target), original)
+    assert caught.value.__cause__ is original
+
+
+# --------------------------------------------------------------------------- #
+# main(): the argv contract the Rust runners invoke, including the exit code
+# that is the only channel by which "still corrupt" reaches the caller.
+# --------------------------------------------------------------------------- #
+
+
+def test_main_detect_prints_the_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
+    assert maint.main(["detect"]) == 0
+    assert capsys.readouterr().out.strip() == "1.0.10"
+
+
+def test_main_dedupe_scopes_to_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # dedupe must leave a non-target RECORD-less entry to dedupe-all: a swap
+    # of the scope selection would turn the scoped heal into a whole-tree
+    # prune on a live user tree.
+    dead = _make_dist_info(
+        tmp_path, "zeroconf", "0.147.0", with_metadata=False, with_record=False
+    )
+    monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
+    assert maint.main(["dedupe"]) == 0
+    assert capsys.readouterr().out.strip() == "0"
+    assert dead.is_dir()
+    assert maint.main(["dedupe-all"]) == 0
+    assert capsys.readouterr().out.strip() == "1"
+    assert not dead.exists()
+
+
+def test_main_exits_non_zero_when_a_record_less_entry_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Rust caller only looks at the exit status; a surviving RECORD-less
+    # entry reported through exit 0 would read as a heal.
+    _make_dist_info(
+        tmp_path,
+        "esphome-device-builder-frontend",
+        "0.1.150",
+        with_metadata=False,
+        with_record=False,
+    )
+    monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
+
+    def refuse(_path: Path) -> None:
+        raise OSError("locked")
+
+    monkeypatch.setattr(maint, "_rmtree", refuse)
+    assert maint.main(["dedupe"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "0"
+    assert "could not remove RECORD-less" in captured.err
+
+
+def test_main_rejects_an_unknown_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    assert maint.main(["bogus"]) == 2
+    assert maint.main([]) == 2
+    assert "unknown mode" in capsys.readouterr().err
