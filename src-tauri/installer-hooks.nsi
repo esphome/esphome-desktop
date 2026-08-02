@@ -45,9 +45,10 @@
   ; Gated on evidence the directory is ours, not just on the trees: a user
   ; pointing an interactive install at some unrelated non-empty directory
   ; must not lose a python/, git/ or ccache/ folder that was never ours.
-  ; The stock template performs no recursive deletes of its own (its
-  ; uninstall is manifest-entry Deletes plus plain RMDir), so these hooks
-  ; own every recursive delete in the installer — and this one must be
+  ; The stock template never recurses under $INSTDIR (its uninstall is
+  ; manifest-entry Deletes plus plain RMDir there; its only recursive
+  ; deletes target the app-data dirs on a real uninstall), so these hooks
+  ; own every recursive delete under the install dir — and this one must be
   ; impossible to fire on a directory we did not create. Either sentinel
   ; proves a previous install: uninstall.exe is written by every install,
   ; and the main exe covers a tree whose uninstaller was manually removed.

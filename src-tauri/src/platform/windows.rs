@@ -298,9 +298,15 @@ mod tests {
         }
         // The template's own RMDir "$INSTDIR" runs before the post-uninstall
         // hook, so the hook must retry it after emptying the trees or a real
-        // uninstall strands an empty install dir forever.
+        // uninstall strands an empty install dir forever. Comment lines are
+        // filtered first: the prose explaining the retry spells the same
+        // statement, and a contains() over the whole file would stay green
+        // with the statement itself deleted.
         assert!(
-            hooks.contains("RMDir \"$INSTDIR\""),
+            hooks
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(';'))
+                .any(|line| line.trim() == "RMDir \"$INSTDIR\""),
             "installer-hooks.nsi must retry removing $INSTDIR after the post-uninstall wipe"
         );
         // The wipe must only fire on a directory that provably holds a
