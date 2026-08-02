@@ -296,6 +296,13 @@ mod tests {
                  and after a real uninstall"
             );
         }
+        // The template's own RMDir "$INSTDIR" runs before the post-uninstall
+        // hook, so the hook must retry it after emptying the trees or a real
+        // uninstall strands an empty install dir forever.
+        assert!(
+            hooks.contains("RMDir \"$INSTDIR\""),
+            "installer-hooks.nsi must retry removing $INSTDIR after the post-uninstall wipe"
+        );
         // The wipe must only fire on a directory that provably holds a
         // previous install: an interactive install pointed at an unrelated
         // non-empty directory must not delete a python/, git/ or ccache/

@@ -72,7 +72,9 @@ Write-Host 'PASS: the overlay install wiped the planted orphans and reset the re
 Add-Orphans
 Uninstall-Bundle
 if (-not (Wait-Until { -not (Test-Path $InstallDir) } 30)) {
-    $leftover = (Get-ChildItem $InstallDir -Recurse -File |
+    # Dirs too, not -File: a stranded-but-emptied tree (the exact regression
+    # the post-uninstall RMDir "$INSTDIR" retry exists for) has no files.
+    $leftover = (Get-ChildItem $InstallDir -Recurse |
         Select-Object -First 5 -ExpandProperty FullName) -join ', '
     throw "a real uninstall stranded $InstallDir (leftovers: $leftover)"
 }

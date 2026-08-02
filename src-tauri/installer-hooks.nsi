@@ -45,8 +45,9 @@
   ; Gated on evidence the directory is ours, not just on the trees: a user
   ; pointing an interactive install at some unrelated non-empty directory
   ; must not lose a python/, git/ or ccache/ folder that was never ours.
-  ; This RMDir /r is the only recursive delete this installer performs (the
-  ; stock template's uninstall deletes per manifest entry), so it must be
+  ; The stock template performs no recursive deletes of its own (its
+  ; uninstall is manifest-entry Deletes plus plain RMDir), so these hooks
+  ; own every recursive delete in the installer — and this one must be
   ; impossible to fire on a directory we did not create. Either sentinel
   ; proves a previous install: uninstall.exe is written by every install,
   ; and the main exe covers a tree whose uninstaller was manually removed.
@@ -109,6 +110,12 @@
     RMDir /r "$INSTDIR\python"
     RMDir /r "$INSTDIR\git"
     RMDir /r "$INSTDIR\ccache"
+    ; The template's own RMDir "$INSTDIR" runs before this hook is inserted
+    ; and fails while the orphaned trees are still non-empty; retry now that
+    ; they are gone. Non-recursive on purpose — anything still in here is
+    ; not ours to delete — and a no-op in the _?= in-place mode, which
+    ; deliberately leaves uninstall.exe behind.
+    RMDir "$INSTDIR"
     Delete "$LOCALAPPDATA\io.esphome.builder\${FIREWALL_PROMPT_MARKER}"
     nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
     Pop $0
