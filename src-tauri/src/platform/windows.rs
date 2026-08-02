@@ -261,17 +261,21 @@ mod tests {
     /// wipe-and-recopy repair loop forever because the copy source itself
     /// carried the orphan. The wipe lives in `installer-hooks.nsi`; this
     /// pins it there for every bundled tree the app ships.
-    #[test]
-    fn installer_hook_wipes_the_previous_bundled_trees() {
-        // Comment lines are filtered before every match below: the prose
-        // around the hooks quotes the same statements, and matching raw text
-        // would keep the test green with a statement deleted (or redden it
-        // over a comment edit).
-        let code: String = include_str!("../../installer-hooks.nsi")
+    /// `installer-hooks.nsi` with its comment lines removed. Every drift
+    /// assertion matches against this: the prose around the hooks quotes the
+    /// same statements, and matching raw text would keep a test green with a
+    /// statement deleted (or redden it over a comment edit).
+    fn installer_hook_code() -> String {
+        include_str!("../../installer-hooks.nsi")
             .lines()
             .filter(|line| !line.trim_start().starts_with(';'))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    #[test]
+    fn installer_hook_wipes_the_previous_bundled_trees() {
+        let code = installer_hook_code();
         let hooks = code.as_str();
         // The authoritative list of overlaid trees is `bundle.resources`: a
         // resource dir added there without a matching wipe would quietly
@@ -343,7 +347,8 @@ mod tests {
     /// triggers no refresh copy that would let one pass).
     #[test]
     fn installer_hook_resets_the_repair_budget() {
-        let hooks = include_str!("../../installer-hooks.nsi");
+        let code = installer_hook_code();
+        let hooks = code.as_str();
         assert!(
             hooks.contains(&format!(
                 "!define REPAIR_COUNT_MARKER \"{}\"",

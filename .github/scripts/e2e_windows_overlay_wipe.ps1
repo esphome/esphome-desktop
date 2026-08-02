@@ -109,4 +109,14 @@ try {
 }
 finally {
     Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    # The scratch install recorded its location under
+    # HKCU\Software\<manufacturer>\<productName> (the template only clears
+    # that key when the uninstall page's delete-app-data checkbox is
+    # ticked, which a silent /S uninstall never shows). Left behind, the
+    # next plain Install-Bundle would restore $INSTDIR to the deleted
+    # scratch path. The manufacturer is the identifier's domain segment,
+    # the same derivation the bundler uses when no publisher is set.
+    $manufacturer = $conf.identifier.Split('.')[1]
+    Remove-Item -Path "HKCU:\Software\$manufacturer\$($conf.productName)" `
+        -Recurse -Force -ErrorAction SilentlyContinue
 }
