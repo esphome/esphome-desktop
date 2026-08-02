@@ -51,6 +51,22 @@ pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     platform::dedupe_dist_info(&python_path, platform::DistInfoDedupeScope::DeviceBuilder)
 }
 
+/// Whether an update/switch sequence currently holds the `UpdateGuard`.
+///
+/// Read-only observation of the flag, not an acquisition: the update checks
+/// must stay non-blocking. `false` when the state is not managed (unit
+/// tests), matching the pre-guard behavior there.
+fn update_sequence_in_flight(app_handle: &AppHandle) -> bool {
+    use tauri::Manager;
+    app_handle
+        .try_state::<std::sync::Arc<crate::AppState>>()
+        .is_some_and(|state| {
+            state
+                .update_in_flight
+                .load(std::sync::atomic::Ordering::Acquire)
+        })
+}
+
 /// Detect the installed device-builder version, healing a duplicate dist-info
 /// pileup once if the first lookup cannot determine a version.
 ///
@@ -58,9 +74,22 @@ pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
 /// duplicates and re-query before giving up. A genuinely-absent package stays
 /// `None` (dedup finds nothing to remove), at the cost of one extra Python spawn
 /// only on the already-unusual not-determinable path.
+///
+/// The heal stands down while an update/switch sequence is in flight. The
+/// prune deletes dist-info dirs, and pip writes `RECORD` last, so a package
+/// mid-install passes through exactly the RECORD-less shape the prune
+/// condemns; the update checks run without the `UpdateGuard` (they are
+/// otherwise read-only), so this is the one destructive step they could race
+/// into a live install. An undeterminable version during a sequence is far
+/// more likely that transient state than the #190 pileup, and a real pileup
+/// is still healed by the next check once the guard is free.
 fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Option<String>> {
     let installed = get_installed_device_builder_version(app_handle)?;
     if installed.is_some() {
+        return Ok(installed);
+    }
+    if update_sequence_in_flight(app_handle) {
+        info!("skipping the dist-info heal: an update sequence is in flight");
         return Ok(installed);
     }
     if let Err(e) = dedupe_device_builder_dist_info(app_handle) {

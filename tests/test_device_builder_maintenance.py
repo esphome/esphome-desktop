@@ -534,6 +534,34 @@ def test_retry_handler_clears_the_flag_and_retries(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_rmtree_wires_the_onerror_adapter_below_312(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The onerror fallback only ever runs on a dev system Python older than
+    # 3.12, where CI never executes, so pin the adapter's exc_info indexing
+    # here: a wrong index would otherwise surface only on the machine the
+    # branch was written to protect, as a TypeError inside the rmtree walk.
+    captured: dict[str, object] = {}
+
+    def fake_rmtree(path: Path, onerror: object = None) -> None:
+        captured["onerror"] = onerror
+
+    monkeypatch.setattr(maint.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setattr(maint.sys, "version_info", (3, 11, 0))
+    maint._rmtree(tmp_path)
+    onerror = captured["onerror"]
+    assert callable(onerror)
+    # The writable early-out must re-raise the exception *instance* out of
+    # the (type, value, traceback) triple, which is what proves the [1].
+    target = tmp_path / "file.txt"
+    target.write_text("")
+    original = OSError("boom")
+    with pytest.raises(OSError) as caught:
+        onerror(os.unlink, str(target), (OSError, original, None))
+    assert caught.value is original
+    assert target.exists()
+
+
 @_ROOT_SEES_EVERYTHING_WRITABLE
 def test_retry_handler_chains_a_failed_retry(tmp_path: Path) -> None:
     # The retry failing anew must not silently replace the original cause; the

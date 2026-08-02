@@ -820,13 +820,14 @@ mod tests {
 
     #[test]
     fn maint_script_pins_the_argv_mode_contract() {
-        // Behavior is covered in depth by tests/test_device_builder_maintenance.py;
-        // here we only pin the argv modes the two runners above invoke, so a
-        // rename of the modes (not the internal functions) can't pass silently.
-        // The bare `dedupe` mode is matched by its dispatch line because any
-        // string containing "dedupe-all" trivially contains "dedupe".
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("if mode in (\"dedupe\", \"dedupe-all\"):"));
+        // Behavior, including main()'s dispatch and exit codes, is covered by
+        // tests/test_device_builder_maintenance.py; here we only pin the mode
+        // *names* the two runners above pass on argv, so a rename can't pass
+        // silently. Quoted, so the bare "dedupe" can't be satisfied by the
+        // "dedupe-all" literal, and no statement shape is pinned.
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"detect\""));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"dedupe\""));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"dedupe-all\""));
         assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 
