@@ -332,6 +332,10 @@ mod tests {
         for sentinel in [
             "${If} ${FileExists} \"$INSTDIR\\uninstall.exe\"",
             "${OrIf} ${FileExists} \"$INSTDIR\\${MAINBINARYNAME}.exe\"",
+            // The default location counts as ours even with both files gone:
+            // uninstall-then-reinstall (the remedy a stuck user tries first)
+            // deletes them while an old uninstaller strands the orphans.
+            "${OrIf} $INSTDIR == \"$LOCALAPPDATA\\${PRODUCTNAME}\"",
         ] {
             assert!(
                 hooks.contains(sentinel),

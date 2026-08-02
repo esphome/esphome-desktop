@@ -120,8 +120,19 @@ finally {
     # would turn a composed path into exactly the silent no-op this
     # cleanup exists to prevent.
     foreach ($vendor in Get-ChildItem 'HKCU:\Software' -ErrorAction SilentlyContinue) {
-        if ($vendor.GetSubKeyNames() -contains $conf.productName) {
-            Remove-Item -Path (Join-Path $vendor.PSPath $conf.productName) -Recurse -Force
+        # try/catch per vendor: GetSubKeyNames() is a .NET call that throws
+        # terminatingly on an ACL-restricted subkey regardless of preference,
+        # and a throw from inside finally would replace the try body's real
+        # failure. -LiteralPath so a name containing [] is not a wildcard.
+        try {
+            if ($vendor.GetSubKeyNames() -contains $conf.productName) {
+                $key = Join-Path $vendor.PSPath $conf.productName
+                Write-Host "Clearing recorded install location $key"
+                Remove-Item -LiteralPath $key -Recurse -Force
+            }
+        }
+        catch {
+            Write-Host "Skipping unreadable registry key $($vendor.PSPath): $_"
         }
     }
 }

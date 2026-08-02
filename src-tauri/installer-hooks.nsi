@@ -52,8 +52,15 @@
   ; impossible to fire on a directory we did not create. Either sentinel
   ; proves a previous install: uninstall.exe is written by every install,
   ; and the main exe covers a tree whose uninstaller was manually removed.
+  ; The default install dir is a third sentinel: a real uninstall deletes
+  ; the other two while (before this PR's post-uninstall wipe, or from a
+  ; custom dir) stranding the orphaned trees — and uninstall-then-reinstall
+  ; is exactly the remedy a stuck user tries by hand. In our own default
+  ; location the trees are ours by the same argument the post-uninstall
+  ; gate stands on.
   ${If} ${FileExists} "$INSTDIR\uninstall.exe"
   ${OrIf} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${OrIf} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}"
     ${If} ${FileExists} "$INSTDIR\python\*.*"
     ${OrIf} ${FileExists} "$INSTDIR\git\*.*"
     ${OrIf} ${FileExists} "$INSTDIR\ccache\*.*"
