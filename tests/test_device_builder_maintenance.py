@@ -239,13 +239,15 @@ def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
     # Two unrelated dist-infos whose METADATA lost its Name header are
     # attributed by their directory names, so they land in separate groups
     # rather than being pruned as "duplicates" of one another. Both must
-    # survive (each is the only entry for its package and both still have a
-    # RECORD), and a healthy pair must still dedupe normally alongside them.
+    # survive (each still has a RECORD), and a healthy pair must still dedupe
+    # normally alongside them. Each survivor is its package's only entry, so
+    # its group has nothing rankable and both count as unresolved: their
+    # versions still cannot be read through the Name filter.
     orphan_a = _make_dist_info(tmp_path, "pkg-a", "1.0.0", with_name=False)
     orphan_b = _make_dist_info(tmp_path, "pkg-b", "2.0.0", with_name=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
     stale = _make_dist_info(tmp_path, "esphome", "2026.7.0")
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (1, 0)
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (1, 2)
     assert orphan_a.is_dir()
     assert orphan_b.is_dir()
     assert keep.is_dir()
@@ -448,13 +450,26 @@ def test_dedupe_keeps_metadata_less_entry_with_record(tmp_path: Path) -> None:
     # Torn the other way: METADATA gone but RECORD intact. pip can still
     # uninstall this one, so the next upgrade heals it without our help;
     # deleting it here would discard the file list pip needs for that
-    # uninstall.
+    # uninstall. Uncounted because the healthy sibling keeps the group
+    # resolvable; without one it would count (see the lone-entry test below).
     keep = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
     torn = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.9", with_metadata=False
     )
     assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
     assert keep.is_dir()
+    assert torn.is_dir()
+
+
+def test_dedupe_counts_a_group_with_no_rankable_entry(tmp_path: Path) -> None:
+    # A lone METADATA-less-with-RECORD entry is kept (pip can manage it), but
+    # its group has nothing rankable, so detect_version still resolves no
+    # version and the updater never offers the install that would let pip
+    # heal it. The run must not call that resolved.
+    torn = _make_dist_info(
+        tmp_path, "esphome-device-builder", "1.0.9", with_metadata=False
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
     assert torn.is_dir()
 
 

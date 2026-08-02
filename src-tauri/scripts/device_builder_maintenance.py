@@ -230,7 +230,9 @@ def dedupe_dist_info(
     reported as a heal. Deliberate conservative keeps
     (unrankable or dir-name-only entries that still have a RECORD, ambiguous
     groups) are not failures: pip can still manage those, and deleting on a
-    guess is the one wrong this prune must never commit.
+    guess is the one wrong this prune must never commit. The exception is a
+    group left with nothing rankable at all — its version still cannot be
+    resolved, so its keeps count as unresolved even though they stay.
     """
     removed = 0
     failed = 0
@@ -339,6 +341,7 @@ def dedupe_dist_info(
 
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
+        kept_dir_name_only = 0
         for version, path, has_record, inferred, unreadable in entries:
             if not has_record:
                 # No RECORD: pip can never uninstall this entry, so any
@@ -383,9 +386,19 @@ def dedupe_dist_info(
                 # siblings: a corrupted name landing in another package's
                 # group could evict that package's real dist-info. Keep it
                 # and keep it out of the ranking.
+                kept_dir_name_only += 1
                 print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
                 continue
             items.append((version, path))
+        if not items and kept_dir_name_only:
+            # The group ended up with nothing rankable: detect_version filters
+            # on the METADATA Name, so this package still resolves to no
+            # version — the same #190 consequence as a duplicate the prune
+            # could not remove, and on the builder path no install is ever
+            # offered that would let pip heal these keeps. They stand (deleting
+            # on a guess is still the one forbidden wrong), but the run must
+            # not call this resolved.
+            failed += kept_dir_name_only
         if len(items) < 2:
             continue  # a single healthy install is left untouched
         items.sort(key=lambda item: vkey(item[0]))

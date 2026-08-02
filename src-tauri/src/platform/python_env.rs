@@ -255,10 +255,12 @@ pub(super) fn refresh_python_tree(
     // pip's own report to the user, while failing the refresh here would
     // trade a degraded tree for none. A graceful failure does reach the
     // marker write below, so later launches will not re-prune on their own;
-    // the damage is still retried by the lazy heal (on a None version) and
-    // by the repair re-copy, which forces this whole path again. Runs before
-    // the marker write so a crash mid-prune leaves no marker and the next
-    // launch re-copies and re-prunes.
+    // the route out is the install that hits the surviving damage, whose
+    // missing-RECORD recovery forces this whole path again for any package
+    // (the builder-scoped lazy heal also retries its two). Skipping the
+    // marker instead would re-copy the full tree on every launch for as long
+    // as the prune kept failing. Runs before the marker write so a crash
+    // mid-prune leaves no marker and the next launch re-copies and re-prunes.
     if let Err(e) = dedupe_dist_info(&python_check, DistInfoDedupeScope::All) {
         warn!(
             "dist-info dedup after the bundle copy failed ({e:#}); continuing with the copied tree"

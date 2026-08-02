@@ -84,7 +84,10 @@ pub(super) enum HealPolicy<'g> {
     /// The caller runs without the guard (the daily background check). The
     /// heal takes the guard itself for its duration, or stands down if one is
     /// in flight: pip writes `RECORD` last, so a package mid-install passes
-    /// through exactly the RECORD-less shape the prune condemns.
+    /// through exactly the RECORD-less shape the prune condemns. While held,
+    /// a coincident click on any guard-taking tray arm (update, switch,
+    /// Quit) is refused with a log line; the prune's 60s bound is what caps
+    /// that window.
     WhenIdle,
 }
 
