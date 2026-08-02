@@ -270,6 +270,14 @@ mod tests {
                 "installer-hooks.nsi must wipe the previous bundled {dir} tree before the overlay"
             );
         }
+        // The wipe must only fire on a directory that provably holds a
+        // previous install: an interactive install pointed at an unrelated
+        // non-empty directory must not delete a python/, git/ or ccache/
+        // folder that was never ours.
+        assert!(
+            hooks.contains("${If} ${FileExists} \"$INSTDIR\\uninstall.exe\""),
+            "installer-hooks.nsi must gate the wipe on the previous install's uninstaller"
+        );
     }
 
     /// A fresh install lays down a pristine bundle, so the installer grants a

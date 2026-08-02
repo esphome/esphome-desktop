@@ -41,14 +41,20 @@
   ; updater stops the Python daemon before launching this installer, so a
   ; leftover lock is unexpected; if one survives anyway, RMDir /r is
   ; best-effort, which is no worse than today's overlay.
-  ${If} ${FileExists} "$INSTDIR\python\*.*"
-  ${OrIf} ${FileExists} "$INSTDIR\git\*.*"
-  ${OrIf} ${FileExists} "$INSTDIR\ccache\*.*"
-    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-    DetailPrint "Removing the previous release's bundled tools..."
-    RMDir /r "$INSTDIR\python"
-    RMDir /r "$INSTDIR\git"
-    RMDir /r "$INSTDIR\ccache"
+  ;
+  ; Gated on the previous install's uninstaller, not just the trees: a user
+  ; pointing an interactive install at some unrelated non-empty directory
+  ; must not lose a python/, git/ or ccache/ folder that was never ours.
+  ${If} ${FileExists} "$INSTDIR\uninstall.exe"
+    ${If} ${FileExists} "$INSTDIR\python\*.*"
+    ${OrIf} ${FileExists} "$INSTDIR\git\*.*"
+    ${OrIf} ${FileExists} "$INSTDIR\ccache\*.*"
+      !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+      DetailPrint "Removing the previous release's bundled tools..."
+      RMDir /r "$INSTDIR\python"
+      RMDir /r "$INSTDIR\git"
+      RMDir /r "$INSTDIR\ccache"
+    ${EndIf}
   ${EndIf}
 
   ; A fresh install lays down a pristine bundle, so it deserves a fresh
