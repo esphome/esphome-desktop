@@ -949,7 +949,8 @@ mod tests {
     fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
         // The probe runs in front of daemon.start(); an unbounded child there
         // means the backend never starts and nothing says why.
-        let python = Path::new(TEST_PYTHON);
+        let python = test_python();
+        let python = python.as_path();
         let started = std::time::Instant::now();
         let err = run_python_capture_bounded(
             python,
@@ -1035,7 +1036,7 @@ mod tests {
         // -- the point of #344 -- the grandchild must be dead afterwards.
         let started = std::time::Instant::now();
         let out = run_python_capture_bounded(
-            Path::new(TEST_PYTHON),
+            &test_python(),
             [
                 "-c",
                 "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
@@ -1085,7 +1086,7 @@ mod tests {
         let mut last_err = None;
         for secs in [5, 10, 20] {
             let out = run_python_capture_bounded(
-                Path::new(TEST_PYTHON),
+                &test_python(),
                 [
                     "-c",
                     "import subprocess,sys,time; \
@@ -1113,7 +1114,7 @@ mod tests {
     #[test]
     fn run_python_capture_bounded_returns_output_within_the_deadline() {
         let out = run_python_capture_bounded(
-            Path::new(TEST_PYTHON),
+            &test_python(),
             ["-c", "print('hi')"],
             std::time::Duration::from_secs(60),
         )
@@ -1122,17 +1123,59 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
     }
 
-    /// Any interpreter will do for the bounded-capture tests: they exercise the
-    /// process plumbing, not the bundled tree. Named rather than probed for, so a
-    /// host without it fails these tests loudly instead of skipping them — a
-    /// timeout test that quietly reports green is worse than no timeout test.
-    /// Every platform we build on has `python3` (the Python jobs install it, and
-    /// `prepare_bundle.sh` needs one regardless).
+    /// Any *real* interpreter will do for the bounded-capture tests: they
+    /// exercise the process plumbing, not the bundled tree. Named rather than
+    /// probed for, so a host without it fails these tests loudly instead of
+    /// skipping them — a timeout test that quietly reports green is worse than
+    /// no timeout test. Every platform we build on has `python3` (the Python
+    /// jobs install it, and `prepare_bundle.sh` needs one regardless).
     #[cfg(not(target_os = "windows"))]
-    const TEST_PYTHON: &str = "python3";
+    fn test_python() -> std::path::PathBuf {
+        std::path::PathBuf::from("python3")
+    }
 
+    /// On Windows, "any interpreter" has one exception: the first `python` on
+    /// PATH may be the Microsoft Store app-execution alias. That interpreter
+    /// is MSIX-packaged, and a packaged process's children are created
+    /// *outside* the parent's job hierarchy — so the grandchild silently
+    /// escapes the very job the reaper tests assert on, and they fail for a
+    /// reason that has nothing to do with the code under test (#418; the
+    /// direct child is still assigned fine, which is what made this
+    /// misleading). Ask each candidate for its `sys.executable` and reject
+    /// anything living under `WindowsApps`; the `py` launcher is the
+    /// fallback because it only ever resolves real CPython installs. A host
+    /// with only the Store Python still fails loudly — but now naming the
+    /// actual cause instead of blaming the reaper.
     #[cfg(target_os = "windows")]
-    const TEST_PYTHON: &str = "python";
+    fn test_python() -> std::path::PathBuf {
+        static PYTHON: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        PYTHON
+            .get_or_init(|| {
+                for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
+                    let mut cmd = std::process::Command::new(program);
+                    cmd.args(version_args)
+                        .args(["-c", "import sys; print(sys.executable)"]);
+                    configure_no_window_command(&mut cmd);
+                    let Ok(out) = cmd.output() else { continue };
+                    if !out.status.success() {
+                        continue;
+                    }
+                    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if path.is_empty() || path.to_ascii_lowercase().contains("windowsapps") {
+                        continue;
+                    }
+                    return std::path::PathBuf::from(path);
+                }
+                panic!(
+                    "no real CPython found: `python` resolves to the Microsoft Store alias \
+                     (or nothing) and the `py` launcher found no install. The Store Python's \
+                     MSIX packaging creates child processes outside the parent's job \
+                     hierarchy, which defeats the job-based reaping these tests assert on \
+                     (#418); install a python.org CPython to run them."
+                )
+            })
+            .clone()
+    }
 
     #[test]
     fn head_for_log_does_not_split_a_multibyte_char() {
