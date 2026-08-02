@@ -79,3 +79,34 @@ if (-not (Wait-Until { -not (Test-Path $InstallDir) } 30)) {
     throw "a real uninstall stranded $InstallDir (leftovers: $leftover)"
 }
 Write-Host 'PASS: the real uninstall removed the orphaned trees and the install dir'
+
+# --- the wipes must NOT fire on a directory that was never ours -------------
+# The negative half of the destructive contract. $INSTDIR is user-selectable
+# (/D=), so a merged directory can hold a python/ tree that predates the
+# install: the preinstall wipe must stand down (no previous-install
+# sentinel), and a custom-dir uninstall must strand rather than recurse
+# (the post-uninstall wipe is gated to the default location).
+$scratch = Join-Path ([IO.Path]::GetTempPath()) 'esphb-overlay-scratch'
+if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch }
+$keepme = Join-Path $scratch (Join-Path $BundledPythonDirName 'keepme.txt')
+New-Item -ItemType Directory -Force (Split-Path $keepme) | Out-Null
+Set-Content -Path $keepme -Value 'pre-existing user file' -Encoding ascii
+try {
+    Install-Bundle -TargetDir $scratch
+    if (-not (Test-Path $keepme)) {
+        throw "the preinstall wipe deleted $keepme from a directory that held no previous install"
+    }
+    Start-Process -FilePath (Join-Path $scratch 'uninstall.exe') -ArgumentList '/S' -Wait
+    $scratchPython = Join-Path $scratch (Join-Path $BundledPythonDirName 'python.exe')
+    if (-not (Wait-Until { -not (Test-Path $scratchPython) } 90)) {
+        throw 'the custom-dir uninstall did not remove the bundled interpreter'
+    }
+    [void](Wait-Until { -not (Get-Process -Name 'Un_*' -ErrorAction SilentlyContinue) } 60)
+    if (-not (Test-Path $keepme)) {
+        throw "the post-uninstall wipe deleted $keepme outside the default install location"
+    }
+    Write-Host 'PASS: the wipes left a directory that was never ours alone'
+}
+finally {
+    Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+}

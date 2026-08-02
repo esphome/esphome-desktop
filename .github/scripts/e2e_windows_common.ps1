@@ -49,13 +49,23 @@ function Wait-Until {
 }
 
 function Install-Bundle {
+    # $TargetDir installs somewhere other than the default location via /D=
+    # (which NSIS requires to be the last argument). Keep such paths free of
+    # spaces: /D= takes the rest of the line verbatim and unquoted.
+    param([string]$TargetDir)
     $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if (-not $installer) { throw 'no NSIS installer found; did the bundle step run?' }
+    $arguments = @('/S')
+    $expected = $BundledPython
+    if ($TargetDir) {
+        $arguments += "/D=$TargetDir"
+        $expected = Join-Path $TargetDir (Join-Path $BundledPythonDirName 'python.exe')
+    }
     Write-Host "Installing $($installer.Name)"
-    $proc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+    $proc = Start-Process -FilePath $installer.FullName -ArgumentList $arguments -Wait -PassThru
     if ($proc.ExitCode -ne 0) { throw "silent install failed with exit code $($proc.ExitCode)" }
-    if (-not (Test-Path $BundledPython)) { throw "installer reported success but $BundledPython does not exist" }
+    if (-not (Test-Path $expected)) { throw "installer reported success but $expected does not exist" }
 }
 
 # Discover the main binary rather than assuming the product name: it is

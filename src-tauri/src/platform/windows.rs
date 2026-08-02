@@ -263,7 +263,16 @@ mod tests {
     /// pins it there for every bundled tree the app ships.
     #[test]
     fn installer_hook_wipes_the_previous_bundled_trees() {
-        let hooks = include_str!("../../installer-hooks.nsi");
+        // Comment lines are filtered before every match below: the prose
+        // around the hooks quotes the same statements, and matching raw text
+        // would keep the test green with a statement deleted (or redden it
+        // over a comment edit).
+        let code: String = include_str!("../../installer-hooks.nsi")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hooks = code.as_str();
         // The authoritative list of overlaid trees is `bundle.resources`: a
         // resource dir added there without a matching wipe would quietly
         // start accumulating the previous release's files again — the exact
@@ -298,16 +307,19 @@ mod tests {
         }
         // The template's own RMDir "$INSTDIR" runs before the post-uninstall
         // hook, so the hook must retry it after emptying the trees or a real
-        // uninstall strands an empty install dir forever. Comment lines are
-        // filtered first: the prose explaining the retry spells the same
-        // statement, and a contains() over the whole file would stay green
-        // with the statement itself deleted.
+        // uninstall strands an empty install dir forever.
         assert!(
             hooks
                 .lines()
-                .filter(|line| !line.trim_start().starts_with(';'))
                 .any(|line| line.trim() == "RMDir \"$INSTDIR\""),
             "installer-hooks.nsi must retry removing $INSTDIR after the post-uninstall wipe"
+        );
+        // The post-uninstall wipe must stay confined to the default install
+        // location: $INSTDIR is user-selectable, and a merged directory can
+        // hold a python/ tree that predates us.
+        assert!(
+            hooks.contains(r#"${If} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}""#),
+            "installer-hooks.nsi must gate the post-uninstall wipe to the default install dir"
         );
         // The wipe must only fire on a directory that provably holds a
         // previous install: an interactive install pointed at an unrelated

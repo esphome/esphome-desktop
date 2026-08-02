@@ -105,18 +105,24 @@
     ; RMDir, so any file the overlay stranded (a previous release's module
     ; that this release's manifest no longer names) keeps its whole tree —
     ; and $INSTDIR itself — behind after a real uninstall. Finish the job
-    ; here. Safe by construction: the uninstaller runs from our own install
-    ; dir. Update-mode uninstalls keep the trees; the preinstall wipe owns
-    ; that path.
-    RMDir /r "$INSTDIR\python"
-    RMDir /r "$INSTDIR\git"
-    RMDir /r "$INSTDIR\ccache"
-    ; The template's own RMDir "$INSTDIR" runs before this hook is inserted
-    ; and fails while the orphaned trees are still non-empty; retry now that
-    ; they are gone. Non-recursive on purpose — anything still in here is
-    ; not ours to delete — and a no-op in the _?= in-place mode, which
-    ; deliberately leaves uninstall.exe behind.
-    RMDir "$INSTDIR"
+    ; here — but only in the default install location. $INSTDIR is
+    ; user-selectable, and "the uninstaller runs from our install dir"
+    ; proves $INSTDIR is ours, not that a python/ subtree in a merged
+    ; directory (an install pointed at C:\Tools that already had one) is;
+    ; there a custom-dir uninstall keeps today's stranded-tree behavior
+    ; rather than gaining a data-loss path. Update-mode uninstalls keep the
+    ; trees everywhere; the preinstall wipe owns that path.
+    ${If} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}"
+      RMDir /r "$INSTDIR\python"
+      RMDir /r "$INSTDIR\git"
+      RMDir /r "$INSTDIR\ccache"
+      ; The template's own RMDir "$INSTDIR" runs before this hook is
+      ; inserted and fails while the orphaned trees are still non-empty;
+      ; retry now that they are gone. Non-recursive on purpose — anything
+      ; still in here is not ours to delete — and a no-op in the _?=
+      ; in-place mode, which deliberately leaves uninstall.exe behind.
+      RMDir "$INSTDIR"
+    ${EndIf}
     Delete "$LOCALAPPDATA\io.esphome.builder\${FIREWALL_PROMPT_MARKER}"
     nsExec::ExecToStack '"$SYSDIR\netsh.exe" advfirewall firewall show rule name="${FIREWALL_RULE_NAME}"'
     Pop $0
