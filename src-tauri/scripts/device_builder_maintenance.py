@@ -45,6 +45,24 @@ import sys
 from collections.abc import Callable, Iterable
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
+from typing import NamedTuple
+
+
+class _Entry(NamedTuple):
+    """One dist-info dir under consideration by the dedupe prune.
+
+    Named rather than a bare tuple because three of the fields are adjacent
+    same-typed booleans feeding the destructive branch: a silent positional
+    transposition would flip "deliberate keep" into "counted failure" (or
+    worse) without any test noticing the shape change.
+    """
+
+    version: str | None
+    path: Path
+    has_record: bool
+    inferred: bool
+    unreadable: bool
+
 
 # Only the builder packages: the device-builder updater resolves its version via
 # importlib.metadata, which the duplicate dist-info pileup breaks (#190). Plain
@@ -231,12 +249,13 @@ def dedupe_dist_info(
     (unrankable or dir-name-only entries that still have a RECORD, ambiguous
     groups) are not failures: pip can still manage those, and deleting on a
     guess is the one wrong this prune must never commit. The exception is a
-    group left with nothing rankable at all — its version still cannot be
-    resolved, so its keeps count as unresolved even though they stay.
+    group whose version still cannot be resolved afterwards — nothing rankable
+    at all, or no parseable version anywhere in it: its keeps count as
+    unresolved even though they stay.
     """
     removed = 0
     failed = 0
-    groups: dict[str, list[tuple[str | None, Path, bool, bool, bool]]] = {}
+    groups: dict[str, list[_Entry]] = {}
     for dist in dists:
         # ``_path`` is private; guard it so a future importlib change degrades
         # to a logged, counted no-op rather than deleting the wrong directory
@@ -336,14 +355,21 @@ def dedupe_dist_info(
                     file=sys.stderr,
                 )
         groups.setdefault(name, []).append(
-            (version, path, "RECORD" in children, inferred, unreadable)
+            _Entry(
+                version=version,
+                path=path,
+                has_record="RECORD" in children,
+                inferred=inferred,
+                unreadable=unreadable,
+            )
         )
 
     for entries in groups.values():
         items: list[tuple[str | None, Path]] = []
         kept_dir_name_only = 0
-        for version, path, has_record, inferred, unreadable in entries:
-            if not has_record:
+        for entry in entries:
+            version, path = entry.version, entry.path
+            if not entry.has_record:
                 # No RECORD: pip can never uninstall this entry, so any
                 # install that tries aborts with uninstall-no-record-file,
                 # whether or not the version is still readable ("Cannot
@@ -367,8 +393,8 @@ def dedupe_dist_info(
                         file=sys.stderr,
                     )
                 continue
-            if inferred:
-                if unreadable:
+            if entry.inferred:
+                if entry.unreadable:
                     # METADATA exists but could not be read. pip can still
                     # manage the entry (a RECORD got it past the branch
                     # above), but its version is unknowable right now, so any
@@ -405,8 +431,11 @@ def dedupe_dist_info(
         keep_version, keep_path = items[-1]
         if vkey(keep_version) == _UNRANKED:
             # No entry in the group has a parseable version, so we can't tell
-            # which is the real install. Leave the whole group rather than risk
-            # a wrong rmtree; detect_version still tolerates the duplicates.
+            # which is the real install. Leave the whole group rather than
+            # risk a wrong rmtree — but count it, like the nothing-rankable
+            # case above: a version that still cannot be resolved afterwards
+            # is not a heal, whichever shape left it unresolvable.
+            failed += len(items)
             print(
                 f"dedupe: keeping ambiguous group, no parseable version "
                 f"near {keep_path}",

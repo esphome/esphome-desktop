@@ -454,9 +454,13 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
         DistInfoDedupeScope::DeviceBuilder => "dedupe",
         DistInfoDedupeScope::All => "dedupe-all",
     };
-    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
-    // sys.path so this destructive prune can only ever touch the managed bundled
-    // install, never a user-site or externally-injected tree.
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize
+    // off sys.path, so the prune sees only the interpreter's own
+    // site-packages. Which interpreter is the caller's choice: the post-copy
+    // self-clean passes the managed tree's own binary, while the lazy heal
+    // resolves through `get_python_path` — the managed tree in production,
+    // but the bare system fallback in a bundle-less dev build, where the
+    // TARGETS scope is what limits the prune's reach.
     //
     // Bounded: the lazy heal holds the UpdateGuard across this child, so a
     // wedged prune (an rmtree stuck on a handle-held path) would otherwise pin

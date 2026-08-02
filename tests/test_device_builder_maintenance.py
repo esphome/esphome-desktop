@@ -176,12 +176,14 @@ def test_dedupe_prunes_parseable_but_spares_unparseable_sibling(tmp_path: Path) 
 
 
 def test_dedupe_skips_group_with_no_parseable_version(tmp_path: Path) -> None:
-    # If nothing in the group parses, we can't pick a winner; leave it all alone.
+    # If nothing in the group parses, we can't pick a winner; leave it all
+    # alone — but counted, since the version still cannot be resolved and
+    # that must not read as a heal.
     a = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9", with_version=False)
     b = _make_dist_info(
         tmp_path, "esphome-device-builder", "1.0.10", with_version=False
     )
-    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 0)
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 2)
     assert a.is_dir()
     assert b.is_dir()
 
@@ -256,13 +258,15 @@ def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
 
 def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
     # The guard behavior must survive the scope widening: an all-unparseable
-    # group of managed entries is left whole, and an unparseable sibling with
-    # a RECORD is never deleted on the strength of the lowest-sort sentinel.
+    # group of managed entries is left whole (though counted, its version
+    # being still unresolvable), and an unparseable sibling with a RECORD is
+    # never deleted on the strength of the lowest-sort sentinel — nor counted,
+    # since its rankable sibling keeps that group resolvable.
     amb_a = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.0", with_version=False)
     amb_b = _make_dist_info(tmp_path, "aioesphomeapi", "45.6.2", with_version=False)
     keep = _make_dist_info(tmp_path, "esphome", "2026.7.1")
     broken = _make_dist_info(tmp_path, "esphome", "2026.7.0", with_version=False)
-    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (0, 0)
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (0, 2)
     for path in (amb_a, amb_b, keep, broken):
         assert path.is_dir()
 
