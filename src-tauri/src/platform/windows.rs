@@ -252,4 +252,41 @@ mod tests {
             "installer-hooks.nsi must delete the marker under the bundle identifier's local data dir"
         );
     }
+
+    /// Each install must lay down pristine resource trees. The generated
+    /// installer overlays `$INSTDIR` without deleting the previous release's
+    /// files, and a polluted bundled site-packages breaks esphome outright:
+    /// the stranded `components/rp2040/` package shadowed the `rp2` alias
+    /// after the rename, failed every config read, and made the
+    /// wipe-and-recopy repair loop forever because the copy source itself
+    /// carried the orphan. The wipe lives in `installer-hooks.nsi`; this
+    /// pins it there for every bundled tree the app ships.
+    #[test]
+    fn installer_hook_wipes_the_previous_bundled_trees() {
+        let hooks = include_str!("../../installer-hooks.nsi");
+        for dir in ["python", "git", "ccache"] {
+            assert!(
+                hooks.contains(&format!("RMDir /r \"$INSTDIR\\{dir}\"")),
+                "installer-hooks.nsi must wipe the previous bundled {dir} tree before the overlay"
+            );
+        }
+    }
+
+    /// A fresh install lays down a pristine bundle, so the installer grants a
+    /// fresh repair budget; without it, reinstalling the same app version on
+    /// a budget-spent machine leaves every repair refused (the app only
+    /// clears the counter once a probe passes, and a same-version reinstall
+    /// triggers no refresh copy that would let one pass).
+    #[test]
+    fn installer_hook_resets_the_repair_budget() {
+        let hooks = include_str!("../../installer-hooks.nsi");
+        assert!(
+            hooks.contains(&format!(
+                "Delete \"$LOCALAPPDATA\\{}\\{}\"",
+                super::super::BUNDLE_IDENTIFIER,
+                super::super::health::REPAIR_COUNT_MARKER
+            )),
+            "installer-hooks.nsi must delete the repair counter so a reinstall gets a fresh budget"
+        );
+    }
 }

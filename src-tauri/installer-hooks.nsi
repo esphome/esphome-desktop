@@ -19,6 +19,47 @@
   ${EndIf}
   Delete "$SMPROGRAMS\ESPHome Builder.lnk"
   Delete "$DESKTOP\ESPHome Builder.lnk"
+
+  ; The generated installer lays resources down file by file over $INSTDIR
+  ; without deleting the previous release's files, so the bundled Python's
+  ; site-packages accumulates every past release's dist-info dirs and any
+  ; module the new release no longer ships. Those orphans are not inert:
+  ; after esphome renamed the rp2040 component to rp2, the stranded
+  ; components/rp2040/ package made every config read fail ("Component alias
+  ; 'rp2040' ... shadows an existing component package"), and the app's
+  ; wipe-and-recopy repair could never converge because the copy source
+  ; itself carried the orphan. Wipe the previous resource trees so every
+  ; install lays down a pristine copy. git and ccache are overlaid the same
+  ; way; their leftovers are only inert bloat (self-contained tools, nothing
+  ; scans their trees), but the same wipe closes the whole class. The app
+  ; never writes into these trees, so nothing user-mutable is lost.
+  ;
+  ; CheckIfAppIsRunning is inserted before the wipe even though the template
+  ; repeats it right after this hook (the second pass is then a no-op): on an
+  ; interactive install the user can still cancel at that prompt, and a
+  ; cancel after the wipe would leave a gutted install behind. The in-app
+  ; updater stops the Python daemon before launching this installer, so a
+  ; leftover lock is unexpected; if one survives anyway, RMDir /r is
+  ; best-effort, which is no worse than today's overlay.
+  ${If} ${FileExists} "$INSTDIR\python\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\git\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\ccache\*.*"
+    !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+    DetailPrint "Removing the previous release's bundled tools..."
+    RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\git"
+    RMDir /r "$INSTDIR\ccache"
+  ${EndIf}
+
+  ; A fresh install lays down a pristine bundle, so it deserves a fresh
+  ; repair budget. The app bounds probe-triggered repairs with this counter
+  ; and only clears it once a probe passes — so on a machine whose budget was
+  ; spent against the polluted bundle, reinstalling the *same* app version
+  ; (no version-marker mismatch, so no refresh copy) would leave the broken
+  ; user tree in place with every repair refused. Must match
+  ; REPAIR_COUNT_MARKER in src/platform/health.rs (drift-tested in
+  ; src/platform/windows.rs).
+  Delete "$LOCALAPPDATA\io.esphome.builder\.repair-count"
 !macroend
 
 ; On first run the app offers to add an inbound firewall rule for the managed
