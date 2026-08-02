@@ -20,10 +20,11 @@ use tracing::{debug, info, warn};
 pub(super) const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
 /// Hard bound on one dist-info dedupe run. Local filesystem work only —
-/// enumerate site-packages, remove a few directories — so a minute is
-/// generous even under a slow disk or an antivirus scan; see the call site
-/// for why the bound is load-bearing (the lazy heal holds the `UpdateGuard`
-/// across this child).
+/// enumerate site-packages, remove a few directories of metadata text — so a
+/// minute is generous even under a slow disk or an antivirus scan. Both
+/// callers get the bound; it is load-bearing for the lazy heal, which holds
+/// the `UpdateGuard` across this child, and merely tidy for the post-copy
+/// self-clean, which nothing waits behind.
 const DIST_INFO_DEDUPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Filename of the counter tracking consecutive launches that deferred the
@@ -247,10 +248,13 @@ pub(super) fn refresh_python_tree(
     // them (#389). Prune to one dist-info per package before anything reads
     // the fresh tree — the version restore below and every later pip
     // uninstall rely on `importlib.metadata`, which duplicates make
-    // ambiguous. Best-effort: duplicate metadata does not fail the health
-    // probe, so failing the refresh over it would turn an ambiguity into a
-    // broken tree. Runs before the marker write so a crash mid-prune leaves
-    // no marker and the next launch re-copies and re-prunes.
+    // ambiguous. Best-effort even though an `Err` can now also mean a
+    // RECORD-less dir survived (the shape that aborts installs): the tree
+    // still works for everything except that install, whose retry surfaces
+    // pip's own report to the user, while failing the refresh here would
+    // trade a degraded tree for none. Runs before the marker write so a
+    // crash mid-prune leaves no marker and the next launch re-copies and
+    // re-prunes.
     if let Err(e) = dedupe_dist_info(&python_check, DistInfoDedupeScope::All) {
         warn!(
             "dist-info dedup after the bundle copy failed ({e:#}); continuing with the copied tree"

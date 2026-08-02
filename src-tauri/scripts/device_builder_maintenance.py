@@ -123,6 +123,12 @@ def _clear_readonly_and_retry(
         raise retry_err from exc
 
 
+# Whether shutil.rmtree accepts ``onexc`` (3.12+). Evaluated at import so the
+# test suite can force the fallback branch without patching the process-wide
+# ``sys.version_info``.
+_RMTREE_HAS_ONEXC = sys.version_info >= (3, 12)
+
+
 def _rmtree(path: Path) -> None:
     """``shutil.rmtree`` that clears Windows' read-only flag and retries.
 
@@ -131,7 +137,7 @@ def _rmtree(path: Path) -> None:
     plus the execute bit so a chmod'd directory stays traversable for the
     retry).
     """
-    if sys.version_info >= (3, 12):
+    if _RMTREE_HAS_ONEXC:
         shutil.rmtree(path, onexc=_clear_readonly_and_retry)
         return
 
@@ -229,14 +235,15 @@ def dedupe_dist_info(
     failed = 0
     groups: dict[str, list[tuple[str | None, Path, bool, bool]]] = {}
     for dist in dists:
-        # ``_path`` is private; guard it so a future importlib change degrades to
-        # a no-op rather than deleting the wrong directory.
+        # ``_path`` is private; guard it so a future importlib change degrades
+        # to a no-op rather than deleting the wrong directory. Non-dist-info
+        # entries (egg-info) are out of this prune's contract and skip
+        # silently by design. Deliberately no ``is_dir()`` here: it folds a
+        # stat error into False, which would vanish a possibly-blocking entry
+        # uncounted — a non-directory or unstatable path flows through to the
+        # scope-aware, counted listing probe below instead.
         path = getattr(dist, "_path", None)
-        if (
-            not isinstance(path, Path)
-            or path.suffix != ".dist-info"
-            or not path.is_dir()
-        ):
+        if not isinstance(path, Path) or path.suffix != ".dist-info":
             continue
         name = ""
         version = None

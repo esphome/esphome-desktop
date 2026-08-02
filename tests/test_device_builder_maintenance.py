@@ -547,7 +547,9 @@ def test_rmtree_wires_the_onerror_adapter_below_312(
         captured["onerror"] = onerror
 
     monkeypatch.setattr(maint.shutil, "rmtree", fake_rmtree)
-    monkeypatch.setattr(maint.sys, "version_info", (3, 11, 0))
+    # The import-time constant, not sys.version_info: patching the latter is
+    # process-wide and can confuse anything else that reads it mid-test.
+    monkeypatch.setattr(maint, "_RMTREE_HAS_ONEXC", False)
     maint._rmtree(tmp_path)
     onerror = captured["onerror"]
     assert callable(onerror)
