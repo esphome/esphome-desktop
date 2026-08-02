@@ -80,6 +80,24 @@ if (-not (Wait-Until { -not (Test-Path $InstallDir) } 30)) {
 }
 Write-Host 'PASS: the real uninstall removed the orphaned trees and the install dir'
 
+# --- the default-dir sentinel: the heal path for a stuck machine ------------
+# Uninstall-then-reinstall — the remedy a stuck user tries by hand — deletes
+# both file sentinels while an old uninstaller strands the orphaned trees.
+# Recreate only the orphan in the default location, with no uninstall.exe
+# and no main exe beside it: the third sentinel must fire the wipe anyway.
+# This gate fails closed and silently (a comparison typo just skips the
+# wipe and the installer still exits 0), so only this case evaluates it.
+$strandedOrphan = Join-Path $InstallDir `
+    "$BundledPythonDirName\Lib\site-packages\esphome\components\rp2040\overlay_orphan_probe.py"
+New-Item -ItemType Directory -Force (Split-Path $strandedOrphan) | Out-Null
+Set-Content -Path $strandedOrphan -Value 'stranded by an old uninstaller' -Encoding ascii
+Install-Bundle
+if (Test-Path $strandedOrphan) {
+    throw "the default-dir sentinel did not fire: $strandedOrphan survived a reinstall into an uninstalled default location"
+}
+Write-Host 'PASS: the default-location sentinel wiped orphans with no install files present'
+Uninstall-Bundle
+
 # --- the wipes must NOT fire on a directory that was never ours -------------
 # The negative half of the destructive contract. $INSTDIR is user-selectable
 # (/D=), so a merged directory can hold a python/ tree that predates the
