@@ -1152,18 +1152,25 @@ mod tests {
         PYTHON
             .get_or_init(|| {
                 for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
-                    let mut cmd = std::process::Command::new(program);
-                    // UTF-8 bytes straight to the pipe: `print()` would
-                    // encode with the console codepage when stdout is a
-                    // pipe, and can even raise UnicodeEncodeError for an
-                    // install path under a non-ASCII user profile — either
-                    // way a valid interpreter would be skipped or garbled.
-                    cmd.args(version_args).args([
-                        "-c",
-                        "import sys; sys.stdout.buffer.write(sys.executable.encode('utf-8'))",
-                    ]);
-                    configure_no_window_command(&mut cmd);
-                    let Ok(out) = cmd.output() else { continue };
+                    // Bounded with the module's own primitive: a hung
+                    // candidate (a misbehaving shim) must not stall the
+                    // whole suite before any bounded machinery is even
+                    // under test. UTF-8 bytes straight to the pipe:
+                    // `print()` would encode with the console codepage
+                    // when stdout is a pipe, and can even raise
+                    // UnicodeEncodeError for an install path under a
+                    // non-ASCII user profile — either way a valid
+                    // interpreter would be skipped or garbled.
+                    let Ok(out) = run_python_capture_bounded(
+                        std::path::Path::new(program),
+                        version_args.iter().copied().chain([
+                            "-c",
+                            "import sys; sys.stdout.buffer.write(sys.executable.encode('utf-8'))",
+                        ]),
+                        std::time::Duration::from_secs(30),
+                    ) else {
+                        continue;
+                    };
                     if !out.status.success() {
                         continue;
                     }
