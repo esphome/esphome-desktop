@@ -1088,10 +1088,12 @@ mod tests {
         // grandchild died with its job. Only the last attempt's missing pid is
         // a failure, so a slow runner gets headroom while the failure mode
         // stays loud.
+        // Resolved once, outside the retry loop, matching the timed sites.
+        let python = test_python();
         let mut last_err = None;
         for secs in [5, 10, 20] {
             let out = run_python_capture_bounded(
-                &test_python(),
+                &python,
                 [
                     "-c",
                     "import subprocess,sys,time; \
