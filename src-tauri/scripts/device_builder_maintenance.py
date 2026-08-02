@@ -249,9 +249,10 @@ def dedupe_dist_info(
     (unrankable or dir-name-only entries that still have a RECORD, ambiguous
     groups) are not failures: pip can still manage those, and deleting on a
     guess is the one wrong this prune must never commit. The exception is a
-    group whose version still cannot be resolved afterwards — nothing rankable
-    at all, or no parseable version anywhere in it: its keeps count as
-    unresolved even though they stay.
+    group whose best surviving entry still has no rankable version — nothing
+    rankable at all, a lone entry with an unparseable Version, or an
+    all-unparseable pileup: its keeps count as unresolved even though they
+    stay, since detect_version resolves them all to nothing alike.
     """
     groups, failed = _collect_entries(dists, targets)
     removed = 0
@@ -449,31 +450,26 @@ def _prune_group(entries: list[_Entry]) -> tuple[int, int]:
             print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
             continue
         items.append(entry)
-    if not items and kept_dir_name_only:
-        # The group ended up with nothing rankable: detect_version filters
-        # on the METADATA Name, so this package still resolves to no
-        # version — the same #190 consequence as a duplicate the prune
-        # could not remove, and on the builder path no install is ever
-        # offered that would let pip heal these keeps. They stand (deleting
-        # on a guess is still the one forbidden wrong), but the run must
-        # not call this resolved.
-        failed += kept_dir_name_only
+    items.sort(key=lambda entry: vkey(entry.version))
+    if not items or vkey(items[-1].version) == _UNRANKED:
+        # Resolvability is judged once, for every group size: if even the
+        # best surviving entry has no rankable version, detect_version still
+        # resolves this package to nothing — the same #190 consequence
+        # whichever shape produced it (nothing rankable at all, a lone entry
+        # with an unparseable Version, or an all-unparseable pileup) — and on
+        # the builder path no install is ever offered that would let pip heal
+        # the keeps. They stand (deleting on a guess is still the one
+        # forbidden wrong), but the run must not call any of these resolved.
+        failed += kept_dir_name_only + len(items)
+        if items:
+            print(
+                f"dedupe: keeping ambiguous group, no parseable version "
+                f"near {items[-1].path}",
+                file=sys.stderr,
+            )
+        return removed, failed
     if len(items) < 2:
         return removed, failed  # a single healthy install is left untouched
-    items.sort(key=lambda entry: vkey(entry.version))
-    keep = items[-1]
-    if vkey(keep.version) == _UNRANKED:
-        # No entry in the group has a parseable version, so we can't tell
-        # which is the real install. Leave the whole group rather than
-        # risk a wrong rmtree — but count it, like the nothing-rankable
-        # case above: a version that still cannot be resolved afterwards
-        # is not a heal, whichever shape left it unresolvable.
-        failed += len(items)
-        print(
-            f"dedupe: keeping ambiguous group, no parseable version near {keep.path}",
-            file=sys.stderr,
-        )
-        return removed, failed
     for entry in items[:-1]:
         if vkey(entry.version) == _UNRANKED:
             # An unparseable version with a RECORD (RECORD-less entries

@@ -728,3 +728,16 @@ def test_main_detect_prints_nothing_when_absent(
     monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
     assert maint.main(["detect"]) == 0
     assert capsys.readouterr().out.strip() == ""
+
+
+def test_dedupe_counts_a_lone_unparseable_entry(tmp_path: Path) -> None:
+    # A single in-scope entry whose METADATA kept its Name but lost a
+    # parseable Version: detect_version still resolves nothing, the same
+    # consequence as the counted group shapes, so the lone spelling must not
+    # be the one that slips through as a heal.
+    torn = _make_dist_info(
+        tmp_path, "esphome-device-builder", "1.0.9", with_version=False
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path)) == (0, 1)
+    assert torn.is_dir()
+    assert maint.detect_version(_dists(tmp_path)) is None
