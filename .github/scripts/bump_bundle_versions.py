@@ -59,6 +59,7 @@ _SCRIPT_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
+from _gha import emit_outputs as _emit_outputs  # noqa: E402
 from _gha import error as _error  # noqa: E402
 from _gha import warn as _warn  # noqa: E402
 
@@ -357,25 +358,6 @@ def resolve_latest_ccache() -> tuple[str, str, str]:
 # --------------------------------------------------------------------------- #
 # Output + CLI glue.
 # --------------------------------------------------------------------------- #
-
-
-def _emit_outputs(**outputs: str) -> None:
-    """Write step outputs to $GITHUB_OUTPUT (or stdout when run locally)."""
-    lines: list[str] = []
-    for key, value in outputs.items():
-        if "\n" in value:
-            delimiter = f"__BUMP_EOF_{key.upper()}__"
-            lines += [f"{key}<<{delimiter}", value, delimiter]
-        else:
-            lines.append(f"{key}={value}")
-    payload = "\n".join(lines) + "\n"
-
-    target = os.environ.get("GITHUB_OUTPUT")
-    if target:
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(payload)
-    else:
-        sys.stdout.write(payload)
 
 
 def _build_body(subject: str, var_changes: dict[str, tuple[str, str]]) -> str:

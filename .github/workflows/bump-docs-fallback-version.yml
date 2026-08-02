@@ -1,0 +1,128 @@
+name: Bump docs fallback version
+
+# The esphome.io install page (src/components/InstallSelector.astro) resolves the
+# current Device Builder version by fetching latest.json at build time, and only
+# falls back to a hardcoded FALLBACK_VERSION when that fetch fails. Because it is
+# only a fallback nothing forces it to stay current, and it drifted seven
+# releases behind before anyone noticed. Every published release now opens a pull
+# request against esphome.io's `current` branch bumping that one constant.
+#
+# workflow_dispatch is the manual escape hatch: re-run it with a version to
+# recover a bump that failed (see the loud-failure notes in the bump script) or
+# was never triggered.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to bump the docs fallback to, with or without the leading v (e.g. 1.0.2)."
+        required: true
+
+permissions: {}
+
+# One bump at a time: two releases published in quick succession would otherwise
+# race to push the same branch, and the loser's push would fail.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump esphome.io fallback version
+    runs-on: ubuntu-22.04
+    # Backstop well under the 6h default: the work is two checkouts, a regex
+    # rewrite and a PR open.
+    timeout-minutes: 15
+    # Prereleases are excluded. The install page reads /releases/latest, which
+    # never resolves to a prerelease, so bumping the fallback to one would aim
+    # the failure path at a version the success path cannot reach. The
+    # event_name check is load-bearing: on workflow_dispatch there is no release
+    # payload, and GitHub's `null == false` compares equal, which would let a
+    # manual run through on the wrong branch of the expression.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.release.prerelease == false
+    permissions:
+      contents: read # actions/checkout for this repo's bump script
+
+    steps:
+      - name: Get version
+        id: release
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${TAG_NAME#v}"
+          else
+            VERSION="${INPUT_VERSION#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # The implicit github.token cannot write to another repository, so mint an
+      # app token scoped to esphome/esphome.io - the same ESPHome GitHub App the
+      # rest of the org's automation authenticates as.
+      - name: Generate a token
+        id: generate-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
+          owner: esphome
+          repositories: esphome.io
+          permission-contents: write # push the bump branch to esphome/esphome.io
+          permission-pull-requests: write # open or update the bump pull request
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: desktop
+          persist-credentials: false
+
+      - name: Checkout esphome.io
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: esphome/esphome.io
+          ref: current
+          path: esphome.io
+          token: ${{ steps.generate-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+
+      # Fails the job when the FALLBACK_VERSION declaration is not found exactly
+      # once, rather than quietly opening no PR - a silent no-op is how the
+      # constant drifted in the first place. The pull request body is built from
+      # esphome.io's own template in the checkout below, not from a copy.
+      - name: Bump fallback version
+        id: bump
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 desktop/.github/scripts/bump_docs_fallback_version.py "$VERSION" \
+            --file esphome.io/src/components/InstallSelector.astro \
+            --template esphome.io/.github/PULL_REQUEST_TEMPLATE.md
+
+      # A fixed branch name makes this idempotent: a re-run, or a later release
+      # whose predecessor's bump has not been merged yet, updates the existing
+      # pull request instead of opening a second one.
+      - name: Create or update pull request
+        if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          path: esphome.io
+          branch: auto/bump-device-builder-fallback-version
+          base: current
+          delete-branch: true
+          committer: esphome[bot] <115708604+esphome[bot]@users.noreply.github.com>
+          author: esphome[bot] <115708604+esphome[bot]@users.noreply.github.com>
+          title: ${{ steps.bump.outputs.title }}
+          body: ${{ steps.bump.outputs.body }}
+          commit-message: ${{ steps.bump.outputs.title }}
