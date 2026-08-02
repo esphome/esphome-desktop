@@ -1131,11 +1131,12 @@ mod tests {
     }
 
     /// Any *real* interpreter will do for the bounded-capture tests: they
-    /// exercise the process plumbing, not the bundled tree. Named rather than
-    /// probed for, so a host without it fails these tests loudly instead of
-    /// skipping them — a timeout test that quietly reports green is worse than
-    /// no timeout test. Every platform we build on has `python3` (the Python
-    /// jobs install it, and `prepare_bundle.sh` needs one regardless).
+    /// exercise the process plumbing, not the bundled tree. On Unix it is
+    /// named rather than probed for, so a host without it fails these tests
+    /// loudly instead of skipping them — a timeout test that quietly reports
+    /// green is worse than no timeout test. Every platform we build on has
+    /// `python3` (the Python jobs install it, and `prepare_bundle.sh` needs
+    /// one regardless). Windows needs the probing resolver below instead.
     #[cfg(not(target_os = "windows"))]
     fn test_python() -> std::path::PathBuf {
         std::path::PathBuf::from("python3")
@@ -1234,11 +1235,11 @@ mod tests {
                     return std::path::PathBuf::from(exe);
                 }
                 panic!(
-                    "no usable CPython found for the reaper tests ({}). The Microsoft \
+                    "no usable Python found for the reaper tests ({}). The Microsoft \
                      Store interpreter is rejected on purpose: its MSIX packaging creates \
                      child processes outside the parent's job hierarchy, which defeats the \
                      job-based reaping these tests assert on (#418). Install any \
-                     non-Store CPython (python.org, conda, MSYS2, ...) to run them.",
+                     non-Store Python (python.org, conda, MSYS2, ...) to run them.",
                     evidence.join("; ")
                 )
             })
