@@ -596,8 +596,9 @@ impl UpdateChecker {
         backend: Backend,
         tray_available: bool,
     ) {
-        // The daily background check runs without the UpdateGuard, so the
-        // heal must yield to any sequence that holds it (see HealPolicy).
+        // The daily background check runs without the UpdateGuard; the heal
+        // takes the guard itself for its duration, or stands down if a
+        // sequence is in flight (see HealPolicy).
         let installed =
             match detect_device_builder_version_with_heal_async(app_handle, HealPolicy::WhenIdle)
                 .await
@@ -634,32 +635,36 @@ impl UpdateChecker {
     /// `Some(version)` if the user wants to update, `None` otherwise.
     /// Stays silent when there is no update — the caller is responsible
     /// for the "everything is up to date" UX.
-    pub async fn check_device_builder_for_user(
+    ///
+    /// `guard` is the caller's held `UpdateGuard`: proof that its sequence is
+    /// the only one running, which is what lets the dist-info heal run here
+    /// (see `HealPolicy`). This path is the main user-facing recovery for the
+    /// #190 pileup, so the heal must not stand down on it.
+    pub(crate) async fn check_device_builder_for_user(
         &self,
         app_handle: &AppHandle,
         backend: Backend,
+        guard: &crate::control::ops::UpdateGuard,
     ) -> Option<String> {
-        // The tray's Check for Updates arm holds the UpdateGuard for its
-        // whole sequence, which is proof no pip install can be racing; this
-        // is also the main user-facing recovery for the #190 pileup, so the
-        // heal must run here (see HealPolicy).
-        let installed =
-            match detect_device_builder_version_with_heal_async(app_handle, HealPolicy::GuardHeld)
-                .await
-            {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    warn!("esphome-device-builder is not installed");
-                    return None;
-                }
-                Err(e) => {
-                    warn!(
-                        "Could not detect installed esphome-device-builder version: {}",
-                        e
-                    );
-                    return None;
-                }
-            };
+        let installed = match detect_device_builder_version_with_heal_async(
+            app_handle,
+            HealPolicy::GuardHeld(guard),
+        )
+        .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                warn!("esphome-device-builder is not installed");
+                return None;
+            }
+            Err(e) => {
+                warn!(
+                    "Could not detect installed esphome-device-builder version: {}",
+                    e
+                );
+                return None;
+            }
+        };
 
         let latest = match self.check_device_builder(backend).await {
             Ok(v) => v,

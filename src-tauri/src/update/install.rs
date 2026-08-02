@@ -4,10 +4,13 @@
 //! the user that a managed Python tree could not be repaired.
 
 use anyhow::{Context, Result};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
+use crate::control::ops::UpdateGuard;
 use crate::i18n::{t, t_with};
 use crate::platform;
 use crate::settings::Backend;
@@ -51,20 +54,13 @@ pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     platform::dedupe_dist_info(&python_path, platform::DistInfoDedupeScope::DeviceBuilder)
 }
 
-/// Whether an update/switch sequence currently holds the `UpdateGuard`.
-///
-/// Read-only observation of the flag, not an acquisition: the update checks
-/// must stay non-blocking. `false` when the state is not managed (unit
-/// tests), matching the pre-guard behavior there.
-fn update_sequence_in_flight(app_handle: &AppHandle) -> bool {
+/// The `UpdateGuard` flag, when the app state is managed (it is not in unit
+/// tests).
+fn update_guard_flag(app_handle: &AppHandle) -> Option<Arc<AtomicBool>> {
     use tauri::Manager;
     app_handle
-        .try_state::<std::sync::Arc<crate::AppState>>()
-        .is_some_and(|state| {
-            state
-                .update_in_flight
-                .load(std::sync::atomic::Ordering::Acquire)
-        })
+        .try_state::<Arc<crate::AppState>>()
+        .map(|state| state.update_in_flight.clone())
 }
 
 /// What the caller of [`detect_device_builder_version_with_heal_async`] knows
@@ -75,27 +71,42 @@ fn update_sequence_in_flight(app_handle: &AppHandle) -> bool {
 /// "someone else's sequence is running" from "my own caller holds the guard",
 /// and the two mean opposite things for the heal (a guard the caller holds is
 /// proof that no pip install can be racing).
-#[derive(Clone, Copy, Debug)]
-pub(super) enum HealPolicy {
+#[derive(Clone, Copy)]
+pub(super) enum HealPolicy<'g> {
     /// The caller holds the `UpdateGuard` (the tray's Check for Updates arm),
     /// so its sequence is the only one running and the steps are sequential:
     /// no pip install can be concurrently in flight when the heal runs. This
     /// is also the main user-facing recovery for the #190 pileup, so the heal
-    /// must not stand down here.
-    GuardHeld,
-    /// The caller runs without the guard (the daily background check). Heal
-    /// only while no update/switch sequence is in flight: pip writes `RECORD`
-    /// last, so a package mid-install passes through exactly the RECORD-less
-    /// shape the prune condemns.
+    /// must not stand down here. The reference is the proof: a guardless
+    /// caller cannot claim this variant without acquiring a guard first. It
+    /// is never read — possession at construction is its whole job.
+    GuardHeld(#[allow(dead_code)] &'g UpdateGuard),
+    /// The caller runs without the guard (the daily background check). The
+    /// heal takes the guard itself for its duration, or stands down if one is
+    /// in flight: pip writes `RECORD` last, so a package mid-install passes
+    /// through exactly the RECORD-less shape the prune condemns.
     WhenIdle,
 }
 
-/// Whether the heal may run under `policy`, given the observed guard flag.
-/// Split out so the policy is testable without an `AppHandle`.
-fn heal_allowed(policy: HealPolicy, sequence_in_flight: bool) -> bool {
-    match policy {
-        HealPolicy::GuardHeld => true,
-        HealPolicy::WhenIdle => !sequence_in_flight,
+/// Secure permission to run the destructive heal. `None` means denied.
+///
+/// On the guardless path this *takes* the `UpdateGuard` (returned inside the
+/// permit so it is held, RAII, for the heal's duration) rather than sampling
+/// the flag: a read alone is check-then-act, and a sequence acquiring between
+/// the read and the Python spawn would race the rmtree into a live pip
+/// install. `try_acquire` keeps it non-blocking. A caller that already holds
+/// the guard must not re-acquire (it would deny against itself), and with no
+/// managed state (unit tests) there is no guard to take.
+fn acquire_heal_permit(
+    caller_holds_guard: bool,
+    guard_flag: Option<Arc<AtomicBool>>,
+) -> Option<Option<UpdateGuard>> {
+    if caller_holds_guard {
+        return Some(None);
+    }
+    match guard_flag {
+        None => Some(None),
+        Some(flag) => UpdateGuard::try_acquire(flag).map(Some),
     }
 }
 
@@ -108,21 +119,23 @@ fn heal_allowed(policy: HealPolicy, sequence_in_flight: bool) -> bool {
 /// only on the already-unusual not-determinable path.
 ///
 /// Whether the heal may run is the caller's knowledge, not this function's:
-/// see [`HealPolicy`]. When it stands down, an undeterminable version is far
-/// more likely a concurrent install's transient state than the #190 pileup,
-/// and a real pileup is still healed by the next check once the guard frees.
+/// see [`HealPolicy`] and [`acquire_heal_permit`]. When it stands down, an
+/// undeterminable version is far more likely a concurrent install's transient
+/// state than the #190 pileup, and a real pileup is still healed by the next
+/// check once the guard frees.
 fn detect_device_builder_version_with_heal(
     app_handle: &AppHandle,
-    policy: HealPolicy,
+    caller_holds_guard: bool,
 ) -> Result<Option<String>> {
     let installed = get_installed_device_builder_version(app_handle)?;
     if installed.is_some() {
         return Ok(installed);
     }
-    if !heal_allowed(policy, update_sequence_in_flight(app_handle)) {
+    let Some(_permit) = acquire_heal_permit(caller_holds_guard, update_guard_flag(app_handle))
+    else {
         info!("skipping the dist-info heal: another update sequence is in flight");
         return Ok(installed);
-    }
+    };
     if let Err(e) = dedupe_device_builder_dist_info(app_handle) {
         // The heal is best-effort, but a failed attempt shouldn't be invisible:
         // the re-query below will just return the same undeterminable result.
@@ -139,12 +152,18 @@ fn detect_device_builder_version_with_heal(
 /// `spawn_blocking` instead.
 pub(super) async fn detect_device_builder_version_with_heal_async(
     app_handle: &AppHandle,
-    policy: HealPolicy,
+    policy: HealPolicy<'_>,
 ) -> Result<Option<String>> {
+    // The guard reference proves possession at the call site but cannot cross
+    // spawn_blocking's 'static boundary; reduce it to the fact the blocking
+    // side acts on.
+    let caller_holds_guard = matches!(policy, HealPolicy::GuardHeld(_));
     let app = app_handle.clone();
-    tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app, policy))
-        .await
-        .context("device-builder version detection task panicked or was cancelled")?
+    tokio::task::spawn_blocking(move || {
+        detect_device_builder_version_with_heal(&app, caller_holds_guard)
+    })
+    .await
+    .context("device-builder version detection task panicked or was cancelled")?
 }
 
 /// Build the `pip install` argument list (appended after the `-m pip install`
@@ -513,18 +532,43 @@ mod tests {
     }
 
     #[test]
-    fn the_heal_yields_only_to_sequences_the_caller_does_not_own() {
+    fn the_heal_permit_takes_the_guard_rather_than_sampling_it() {
+        use std::sync::atomic::Ordering;
+
         // A caller holding the UpdateGuard is proof no pip install can be
-        // racing, and the tray's Check for Updates arm is the main
-        // user-facing recovery for the #190 pileup: the global flag it set
-        // itself must not stand its own heal down. The guardless background
-        // check is the opposite: while any sequence is in flight, pip may be
-        // mid-install and RECORD is written last, so the destructive prune
-        // must wait.
-        assert!(heal_allowed(HealPolicy::GuardHeld, true));
-        assert!(heal_allowed(HealPolicy::GuardHeld, false));
-        assert!(!heal_allowed(HealPolicy::WhenIdle, true));
-        assert!(heal_allowed(HealPolicy::WhenIdle, false));
+        // racing, and re-acquiring would deny against itself: permitted
+        // without touching the flag.
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(matches!(acquire_heal_permit(true, None), Some(None)));
+        assert!(matches!(
+            acquire_heal_permit(true, Some(flag.clone())),
+            Some(None)
+        ));
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "GuardHeld must not acquire: its caller owns the flag"
+        );
+
+        // The guardless path with the flag free: the permit HOLDS the guard
+        // for the heal's duration — sampling alone would be check-then-act,
+        // letting a sequence start between the read and the rmtree — and
+        // releases it on drop.
+        let permit =
+            acquire_heal_permit(false, Some(flag.clone())).expect("a free flag permits the heal");
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the permit must hold the flag, not sample it"
+        );
+        drop(permit);
+        assert!(!flag.load(Ordering::Acquire), "released on drop");
+
+        // The guardless path while a sequence is in flight: denied.
+        let held = UpdateGuard::try_acquire(flag.clone()).expect("flag is free");
+        assert!(acquire_heal_permit(false, Some(flag.clone())).is_none());
+        drop(held);
+
+        // No managed state (unit tests): no guard exists to take.
+        assert!(matches!(acquire_heal_permit(false, None), Some(None)));
     }
 
     #[test]

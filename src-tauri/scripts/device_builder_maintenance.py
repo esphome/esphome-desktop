@@ -220,7 +220,10 @@ def dedupe_dist_info(
     remove (still breaks version detection, #190), a directory it could not
     even list (may be any of those), or, in all-scope mode, an entry with no
     attributable name. The CLI turns ``failed`` into a non-zero exit so a
-    partial prune is never reported as a heal.
+    partial prune is never reported as a heal. Deliberate conservative keeps
+    (unrankable or dir-name-only entries that still have a RECORD, ambiguous
+    groups) are not failures: pip can still manage those, and deleting on a
+    guess is the one wrong this prune must never commit.
     """
     removed = 0
     failed = 0
