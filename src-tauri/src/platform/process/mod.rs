@@ -949,10 +949,14 @@ mod tests {
     fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
         // The probe runs in front of daemon.start(); an unbounded child there
         // means the backend never starts and nothing says why.
-        let python = Path::new(TEST_PYTHON);
+        // Resolved before the stopwatch: on Windows the first resolution can
+        // pay a candidate probe's full timeout, and that cost landing inside
+        // the elapsed assertion would blame the reaper for an interpreter
+        // problem — the misattribution class this resolver exists to remove.
+        let python = test_python();
         let started = std::time::Instant::now();
         let err = run_python_capture_bounded(
-            python,
+            &python,
             ["-c", "import time; time.sleep(600)"],
             std::time::Duration::from_millis(300),
         )
@@ -1033,9 +1037,11 @@ mod tests {
         // 0. The deadline must not stall (a grandchild on the pipe is why the
         // reader wait is bounded), the child's partial stderr must survive, and
         // -- the point of #344 -- the grandchild must be dead afterwards.
+        // Resolved before the stopwatch; see the sibling deadline test.
+        let python = test_python();
         let started = std::time::Instant::now();
         let out = run_python_capture_bounded(
-            Path::new(TEST_PYTHON),
+            &python,
             [
                 "-c",
                 "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
@@ -1082,10 +1088,12 @@ mod tests {
         // grandchild died with its job. Only the last attempt's missing pid is
         // a failure, so a slow runner gets headroom while the failure mode
         // stays loud.
+        // Resolved once, outside the retry loop, matching the timed sites.
+        let python = test_python();
         let mut last_err = None;
         for secs in [5, 10, 20] {
             let out = run_python_capture_bounded(
-                Path::new(TEST_PYTHON),
+                &python,
                 [
                     "-c",
                     "import subprocess,sys,time; \
@@ -1113,7 +1121,7 @@ mod tests {
     #[test]
     fn run_python_capture_bounded_returns_output_within_the_deadline() {
         let out = run_python_capture_bounded(
-            Path::new(TEST_PYTHON),
+            &test_python(),
             ["-c", "print('hi')"],
             std::time::Duration::from_secs(60),
         )
@@ -1122,17 +1130,121 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
     }
 
-    /// Any interpreter will do for the bounded-capture tests: they exercise the
-    /// process plumbing, not the bundled tree. Named rather than probed for, so a
-    /// host without it fails these tests loudly instead of skipping them — a
-    /// timeout test that quietly reports green is worse than no timeout test.
-    /// Every platform we build on has `python3` (the Python jobs install it, and
-    /// `prepare_bundle.sh` needs one regardless).
+    /// Any *real* interpreter will do for the bounded-capture tests: they
+    /// exercise the process plumbing, not the bundled tree. On Unix it is
+    /// named rather than probed for, so a host without it fails these tests
+    /// loudly instead of skipping them — a timeout test that quietly reports
+    /// green is worse than no timeout test. Every platform we build on has
+    /// `python3` (the Python jobs install it, and `prepare_bundle.sh` needs
+    /// one regardless). Windows needs the probing resolver below instead.
     #[cfg(not(target_os = "windows"))]
-    const TEST_PYTHON: &str = "python3";
+    fn test_python() -> std::path::PathBuf {
+        std::path::PathBuf::from("python3")
+    }
 
+    /// On Windows, "any interpreter" has one exception: the first `python` on
+    /// PATH may be the Microsoft Store app-execution alias. That interpreter
+    /// is MSIX-packaged, and a packaged process's children are created
+    /// *outside* the parent's job hierarchy — so the grandchild silently
+    /// escapes the very job the reaper tests assert on, and they fail for a
+    /// reason that has nothing to do with the code under test (#418; the
+    /// direct child is still assigned fine, which is what made this
+    /// misleading). Ask each candidate for its `sys.executable` and reject
+    /// anything living under `WindowsApps`; the `py` launcher is the
+    /// fallback because it only ever resolves real CPython installs. A host
+    /// with only the Store Python still fails loudly — but now naming the
+    /// actual cause instead of blaming the reaper.
     #[cfg(target_os = "windows")]
-    const TEST_PYTHON: &str = "python";
+    fn test_python() -> std::path::PathBuf {
+        static PYTHON: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        PYTHON
+            .get_or_init(|| {
+                // Each candidate's fate is recorded so the panic reports what
+                // was actually observed: an absent `python` and a Store-alias
+                // `python` are different problems, and a message asserting a
+                // cause it never saw would misdirect exactly the way the
+                // original failure did.
+                let mut evidence: Vec<String> = Vec::new();
+                for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
+                    // Bounded with the module's own primitive: a hung
+                    // candidate (a misbehaving shim) must not stall the
+                    // whole suite before any bounded machinery is even
+                    // under test. UTF-8 bytes straight to the pipe:
+                    // `print()` would encode with the console codepage
+                    // when stdout is a pipe, and can even raise
+                    // UnicodeEncodeError for an install path under a
+                    // non-ASCII user profile — either way a valid
+                    // interpreter would be skipped or garbled.
+                    let out = match run_python_capture_bounded(
+                        std::path::Path::new(program),
+                        version_args.iter().copied().chain([
+                            "-c",
+                            "import sys; sys.stdout.buffer.write('\\n'.join([sys.executable, \
+                             getattr(sys, '_base_executable', '') or '', sys.base_prefix])\
+                             .encode('utf-8'))",
+                        ]),
+                        std::time::Duration::from_secs(30),
+                    ) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            evidence.push(format!("`{program}` did not run: {e}"));
+                            continue;
+                        }
+                    };
+                    if !out.status.success() {
+                        evidence.push(format!(
+                            "`{program}` exited with {}: {}",
+                            out.status,
+                            tail_for_log(&String::from_utf8_lossy(&out.stderr))
+                        ));
+                        continue;
+                    }
+                    let Ok(report) = std::str::from_utf8(&out.stdout) else {
+                        evidence.push(format!("`{program}` printed a non-UTF-8 sys.executable"));
+                        continue;
+                    };
+                    let mut paths = report.lines().map(str::trim);
+                    let exe = paths.next().unwrap_or("");
+                    if exe.is_empty() {
+                        evidence.push(format!("`{program}` printed an empty sys.executable"));
+                        continue;
+                    }
+                    // A component check, not a substring one: a user dir
+                    // that merely contains the word must not be rejected.
+                    let in_windows_apps = |p: &str| {
+                        std::path::Path::new(p)
+                            .components()
+                            .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+                    };
+                    // The base paths matter too: inside a venv,
+                    // sys.executable is the venv's own exe, so a venv
+                    // created from the packaged interpreter would slip a
+                    // WindowsApps-free path past a sys.executable-only
+                    // check while its base still carries the packaged
+                    // identity.
+                    if let Some(packaged) = std::iter::once(exe)
+                        .chain(paths)
+                        .find(|p| !p.is_empty() && in_windows_apps(p))
+                    {
+                        evidence.push(format!(
+                            "`{program}` is (or wraps) the Microsoft Store interpreter at \
+                             {packaged}"
+                        ));
+                        continue;
+                    }
+                    return std::path::PathBuf::from(exe);
+                }
+                panic!(
+                    "no usable Python found for the reaper tests ({}). The Microsoft \
+                     Store interpreter is rejected on purpose: its MSIX packaging creates \
+                     child processes outside the parent's job hierarchy, which defeats the \
+                     job-based reaping these tests assert on (#418). Install any \
+                     non-Store Python (python.org, conda, MSYS2, ...) to run them.",
+                    evidence.join("; ")
+                )
+            })
+            .clone()
+    }
 
     #[test]
     fn head_for_log_does_not_split_a_multibyte_char() {
