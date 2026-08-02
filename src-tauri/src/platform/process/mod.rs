@@ -949,9 +949,14 @@ mod tests {
     fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
         // The probe runs in front of daemon.start(); an unbounded child there
         // means the backend never starts and nothing says why.
+        // Resolved before the stopwatch: on Windows the first resolution can
+        // pay a candidate probe's full timeout, and that cost landing inside
+        // the elapsed assertion would blame the reaper for an interpreter
+        // problem — the misattribution class this resolver exists to remove.
+        let python = test_python();
         let started = std::time::Instant::now();
         let err = run_python_capture_bounded(
-            &test_python(),
+            &python,
             ["-c", "import time; time.sleep(600)"],
             std::time::Duration::from_millis(300),
         )
@@ -1032,9 +1037,11 @@ mod tests {
         // 0. The deadline must not stall (a grandchild on the pipe is why the
         // reader wait is bounded), the child's partial stderr must survive, and
         // -- the point of #344 -- the grandchild must be dead afterwards.
+        // Resolved before the stopwatch; see the sibling deadline test.
+        let python = test_python();
         let started = std::time::Instant::now();
         let out = run_python_capture_bounded(
-            &test_python(),
+            &python,
             [
                 "-c",
                 "import subprocess,sys; sys.stderr.write('before\\n'); sys.stderr.flush(); \
