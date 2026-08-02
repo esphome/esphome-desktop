@@ -690,3 +690,41 @@ def test_dedupe_counts_a_permission_denied_metadata(tmp_path: Path) -> None:
         assert entry.is_dir()
     finally:
         (entry / "METADATA").chmod(0o644)
+
+
+def test_detect_version_survives_an_unreadable_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One unreadable distribution must not abort detection: silently dropping
+    # the real target would reintroduce the #190 loop with no trace, so the
+    # broken sibling is logged and skipped while the healthy one answers.
+    _make_dist_info(tmp_path, "esphome-device-builder", "1.0.10")
+    broken = _make_dist_info(tmp_path, "esphome-device-builder", "1.0.9")
+    real_metadata = PathDistribution.metadata
+
+    def selective(self: PathDistribution) -> object:
+        if getattr(self, "_path", None) == broken:
+            raise OSError("transient read failure")
+        return real_metadata.fget(self)  # type: ignore[union-attr]
+
+    monkeypatch.setattr(PathDistribution, "metadata", property(selective))
+    assert maint.detect_version(_dists(tmp_path)) == "1.0.10"
+
+
+def test_dedupe_quietly_skips_non_dist_info_entries() -> None:
+    # egg-info metadata is out of the prune's contract: skipped without a log
+    # line or a count, by design, in both scopes.
+    egg = SimpleNamespace(_path=Path("site-packages/legacy_pkg-1.0.egg-info"))
+    assert maint.dedupe_dist_info([egg], targets=None) == (0, 0)
+    assert maint.dedupe_dist_info([egg]) == (0, 0)
+
+
+def test_main_detect_prints_nothing_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Rust caller's contract: detect exits 0 with empty stdout when the
+    # package is absent, so a non-zero exit always means the check itself
+    # could not run.
+    monkeypatch.setattr(maint, "distributions", lambda: _dists(tmp_path))
+    assert maint.main(["detect"]) == 0
+    assert capsys.readouterr().out.strip() == ""
