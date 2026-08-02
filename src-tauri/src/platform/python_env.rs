@@ -19,6 +19,15 @@ use tracing::{debug, info, warn};
 /// user Python tree. Lives at `<user_python>/.esphome-desktop-version`.
 pub(super) const PYTHON_VERSION_MARKER: &str = ".esphome-desktop-version";
 
+/// Hard bound on one dist-info dedupe run. Local filesystem work only —
+/// enumerate site-packages, remove a few directories of metadata text — so a
+/// minute is generous even under a slow disk or an antivirus scan. Both
+/// callers get the bound. It is load-bearing for the lazy heal, which holds
+/// the `UpdateGuard` across this child; for the post-copy self-clean it caps
+/// how long a wedged child can stall the launch and repair paths, which
+/// block on the refresh.
+const DIST_INFO_DEDUPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Filename of the counter tracking consecutive launches that deferred the
 /// bundled-Python refresh because the version probe failed on a still-usable
 /// interpreter. Lives inside the user Python tree, so it is reset for free the
@@ -240,10 +249,18 @@ pub(super) fn refresh_python_tree(
     // them (#389). Prune to one dist-info per package before anything reads
     // the fresh tree — the version restore below and every later pip
     // uninstall rely on `importlib.metadata`, which duplicates make
-    // ambiguous. Best-effort: duplicate metadata does not fail the health
-    // probe, so failing the refresh over it would turn an ambiguity into a
-    // broken tree. Runs before the marker write so a crash mid-prune leaves
-    // no marker and the next launch re-copies and re-prunes.
+    // ambiguous. Best-effort even though an `Err` can now also mean a
+    // RECORD-less dir survived (the shape that aborts installs): the tree
+    // still works for everything except that install, whose retry surfaces
+    // pip's own report to the user, while failing the refresh here would
+    // trade a degraded tree for none. A graceful failure does reach the
+    // marker write below, so later launches will not re-prune on their own;
+    // the route out is the install that hits the surviving damage, whose
+    // missing-RECORD recovery forces this whole path again for any package
+    // (the builder-scoped lazy heal also retries its two). Skipping the
+    // marker instead would re-copy the full tree on every launch for as long
+    // as the prune kept failing. Runs before the marker write so a crash
+    // mid-prune leaves no marker and the next launch re-copies and re-prunes.
     if let Err(e) = dedupe_dist_info(&python_check, DistInfoDedupeScope::All) {
         warn!(
             "dist-info dedup after the bundle copy failed ({e:#}); continuing with the copied tree"
@@ -423,8 +440,11 @@ pub(crate) enum DistInfoDedupeScope {
 /// device-builder update check loops on "version None" (#190), and the
 /// pinned-version snapshot/restore around a tree refresh compares against a
 /// stale version (#389). The prune itself lives in
-/// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry it cannot rank —
-/// see its pytest suite for the guard behavior.
+/// [`DEVICE_BUILDER_MAINT_PY`], which never deletes an entry pip can still
+/// manage but cannot be ranked; a RECORD-less entry is removed, because pip
+/// aborts every upgrade with `uninstall-no-record-file` while one exists and
+/// the bundled tree itself can carry one (#389). See the pytest suite for the
+/// guard behavior.
 ///
 /// `Err` covers both a failed spawn and a non-zero exit; callers on paths that
 /// must not fail (the copy in [`refresh_python_tree`], the best-effort heal in
@@ -434,11 +454,25 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
         DistInfoDedupeScope::DeviceBuilder => "dedupe",
         DistInfoDedupeScope::All => "dedupe-all",
     };
-    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
-    // sys.path so this destructive prune can only ever touch the managed bundled
-    // install, never a user-site or externally-injected tree.
-    let output = run_python_capture(python_bin, ["-I", "-c", DEVICE_BUILDER_MAINT_PY, mode])
-        .context("Failed to run dist-info dedup")?;
+    // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize
+    // off sys.path, so the prune sees only the interpreter's own
+    // site-packages. Which interpreter is the caller's choice: the post-copy
+    // self-clean passes the managed tree's own binary, while the lazy heal
+    // resolves through `get_python_path` — the managed tree in production,
+    // but the bare system fallback in a bundle-less dev build, where the
+    // TARGETS scope is what limits the prune's reach.
+    //
+    // Bounded: the lazy heal holds the UpdateGuard across this child, so a
+    // wedged prune (an rmtree stuck on a handle-held path) would otherwise pin
+    // `update_in_flight` for the session and silently no-op every later
+    // update/switch arm. The work is local filesystem only — enumerate
+    // site-packages, remove a few directories — so the bound is generous.
+    let output = run_python_capture_bounded(
+        python_bin,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, mode],
+        DIST_INFO_DEDUPE_TIMEOUT,
+    )
+    .context("Failed to run dist-info dedup")?;
     if !output.status.success() {
         anyhow::bail!(
             "dist-info dedup ({mode}) exited non-zero: {}",
@@ -817,14 +851,14 @@ mod tests {
 
     #[test]
     fn maint_script_pins_the_argv_mode_contract() {
-        // Behavior is covered in depth by tests/test_device_builder_maintenance.py;
-        // here we only pin the argv modes the two runners above invoke, so a
-        // rename of the modes (not the internal functions) can't pass silently.
-        // The bare `dedupe` mode is matched by its dispatch line because any
-        // string containing "dedupe-all" trivially contains "dedupe".
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("detect"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("if mode == \"dedupe\":"));
-        assert!(DEVICE_BUILDER_MAINT_PY.contains("dedupe-all"));
+        // Behavior, including main()'s dispatch and exit codes, is covered by
+        // tests/test_device_builder_maintenance.py; here we only pin the mode
+        // *names* the two runners above pass on argv, so a rename can't pass
+        // silently. Quoted, so the bare "dedupe" can't be satisfied by the
+        // "dedupe-all" literal, and no statement shape is pinned.
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"detect\""));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"dedupe\""));
+        assert!(DEVICE_BUILDER_MAINT_PY.contains("\"dedupe-all\""));
         assert!(DEVICE_BUILDER_MAINT_PY.contains("esphome-device-builder-frontend"));
     }
 

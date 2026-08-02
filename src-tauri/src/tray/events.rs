@@ -56,7 +56,9 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
             let state = state.clone();
             let app = app_handle.clone();
             async_runtime::spawn(async move {
-                let _guard = guard_or_return!(state, "Check for Updates");
+                // Named (not `_guard`): passed down so the device-builder
+                // check can prove it holds the guard (`HealPolicy::GuardHeld`).
+                let guard = guard_or_return!(state, "Check for Updates");
                 // Always check the desktop app first. Installing a self-update
                 // replaces the bundled `python/` directory, which would wipe
                 // any pip bump we do here. If the user accepts the app update
@@ -164,7 +166,7 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                 // ESPHome release channel.
                 let Some(builder_version) = state
                     .update_checker
-                    .check_device_builder_for_user(&app, backend)
+                    .check_device_builder_for_user(&app, backend, &guard)
                     .await
                 else {
                     return;

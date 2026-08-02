@@ -79,12 +79,59 @@ const PIP_CONFLICT_MARKER: &str = "The conflict is caused by:";
 /// Bounding the joined report instead would let a long diagnostic evict the
 /// headline and its own opening — the symptom and the cause — keeping only
 /// the boilerplate.
+///
+/// pip's hint lines are stripped first: see [`strip_pip_hint_lines`].
 fn pip_failure_report(stdout: &str, stderr: &str) -> String {
-    let stderr = tail_for_log(stderr);
+    let stderr = tail_for_log(&strip_pip_hint_lines(stderr));
     match stdout.find(PIP_CONFLICT_MARKER) {
         Some(start) => format!("{stderr}\n{}", head_for_log(&stdout[start..])),
         None => stderr,
     }
+}
+
+/// Drop pip's `hint:` lines from a report the user will see.
+///
+/// The hints speak to whoever manages the installed environment directly, and
+/// in this app that is only ever the updater: the environment is the bundled
+/// tree, reachable through the app alone, so no hint is user-actionable. The
+/// worst of them is actively harmful: under the missing-RECORD abort pip
+/// prints `hint: You might be able to recover from this via: pip install
+/// --ignore-installed --no-deps <pkg>==<v>` (`--force-reinstall` on newer
+/// pips), which skips pip's uninstall bookkeeping and piles more orphaned
+/// metadata onto an already-corrupt tree — the same damage that got
+/// `--ignore-installed` removed from the app (#330) — and a user typing it
+/// into a terminal reaches their system pip, not the bundled interpreter. The
+/// error lines above the hint keep carrying the facts a bug report needs.
+///
+/// Only flush-left `hint:` lines start a dropped block: those are pip's own.
+/// An *indented* `hint:` is subprocess output pip relays inside its nested
+/// build-error block — git emits them, and the dev channel installs from
+/// `git+` — and swallowing from there would eat the rest of that factual
+/// block.
+///
+/// Indented lines following pip's own `hint:` are dropped with it: pip does
+/// not wrap the hint when its output is captured, but if a renderer change
+/// ever does, the continuation is where the command itself would land. pip's
+/// indented factual blocks precede any hint — hints are terminal in pip's
+/// diagnostics — so an indented line after a flush-left `hint:` can only
+/// belong to the hint.
+fn strip_pip_hint_lines(stderr: &str) -> String {
+    let mut in_hint = false;
+    stderr
+        .lines()
+        .filter(|line| {
+            if line.starts_with("hint:") {
+                in_hint = true;
+                return false;
+            }
+            if in_hint && line.starts_with(|c: char| c.is_whitespace()) && !line.trim().is_empty() {
+                return false;
+            }
+            in_hint = false;
+            true
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// [`pip_failure_report`] over a captured pip [`std::process::Output`].
@@ -354,6 +401,91 @@ mod tests {
             report.len() <= 2 * LOG_TAIL_BYTES + 100,
             "report is bounded"
         );
+    }
+
+    #[test]
+    fn pip_failure_report_drops_pips_manual_recovery_hint() {
+        // The hint is pip talking to a developer at a terminal. In this app it
+        // is wrong twice over: the suggested flags skip pip's uninstall
+        // bookkeeping (the very damage that got --ignore-installed removed,
+        // #330), and a user's terminal pip is the system one, not the bundled
+        // interpreter. A user was sent chasing exactly this "recovery".
+        for flag in ["--ignore-installed", "--force-reinstall"] {
+            let stderr = format!(
+                "error: uninstall-no-record-file\n\n\
+                 × Cannot uninstall esphome-device-builder-frontend None\n\
+                 ╰─> The package's contents are unknown: no RECORD file was \
+                 found for esphome-device-builder-frontend.\n\n\
+                 hint: You might be able to recover from this via: pip install \
+                 {flag} --no-deps esphome-device-builder-frontend==0.1.172\n"
+            );
+            let report = pip_failure_report("", &stderr);
+            assert!(report.contains("no RECORD file was found"), "{report}");
+            assert!(!report.contains("pip install"), "{report}");
+            assert!(!report.contains(flag), "{report}");
+        }
+    }
+
+    #[test]
+    fn pip_failure_report_drops_a_wrapped_hint_continuation() {
+        // pip does not wrap the hint when captured, but a renderer change
+        // could; the continuation line is where the pip install command
+        // itself would land, so the block is dropped through its indented
+        // continuations. The blank line and the flush-left diagnostics
+        // around it survive.
+        let report = pip_failure_report(
+            "",
+            "error: uninstall-no-record-file\n\
+             hint: You might be able to recover from this via: pip install\n\
+             \x20     --ignore-installed --no-deps esphome-device-builder-frontend==0.1.172\n\
+             \n\
+             ERROR: some closing line\n",
+        );
+        assert!(
+            report.contains("error: uninstall-no-record-file"),
+            "{report}"
+        );
+        assert!(report.contains("ERROR: some closing line"), "{report}");
+        assert!(!report.contains("pip install"), "{report}");
+        assert!(!report.contains("--ignore-installed"), "{report}");
+    }
+
+    #[test]
+    fn pip_failure_report_keeps_an_indented_subprocess_hint_block() {
+        // An indented hint: is not pip talking — it is subprocess output
+        // (git emits hint: lines; the dev channel installs from git+) that
+        // pip relays inside its nested build-error block. Treating it as a
+        // hint start would swallow the rest of that factual block.
+        let report = pip_failure_report(
+            "",
+            "ERROR: command errored out\n\
+             \x20 hint: Using 'master' as the name for the initial branch\n\
+             \x20 fatal: repository not found\n\
+             hint: You might be able to recover from this via: pip install --ignore-installed x\n",
+        );
+        assert!(
+            report.contains("hint: Using 'master'"),
+            "relayed subprocess output was eaten: {report}"
+        );
+        assert!(
+            report.contains("fatal: repository not found"),
+            "the factual block after the relayed hint was eaten: {report}"
+        );
+        assert!(!report.contains("pip install"), "{report}");
+    }
+
+    #[test]
+    fn pip_failure_report_drops_every_hint_line() {
+        // Not just the recovery command: every pip hint addresses whoever
+        // manages the installed environment directly, and here that is only
+        // ever the updater. The error lines above it stay, since they carry
+        // the facts a bug report needs.
+        let report = pip_failure_report(
+            "",
+            "ERROR: something broke\nhint: See above for the traceback.\n",
+        );
+        assert!(report.contains("ERROR: something broke"), "{report}");
+        assert!(!report.contains("hint:"), "{report}");
     }
 
     #[test]

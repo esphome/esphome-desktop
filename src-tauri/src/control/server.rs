@@ -504,8 +504,12 @@ async fn build_status(app: &AppHandle, state: &Arc<AppState>) -> StatusReply {
 
 /// Check every component for an available update without installing anything.
 /// Read-only, so it takes no [`UpdateGuard`] and is safe to run even while an
-/// update is in flight. The three checks hit the network (GitHub, PyPI) and
-/// spawn Python for the installed versions, so run them concurrently.
+/// update is in flight — this path reads versions through the non-healing
+/// `get_installed_device_builder_version`, so no destructive step ever runs
+/// here (the lazy dist-info heal lives on the tray and background check
+/// paths, gated by `HealPolicy`). The three checks hit the network (GitHub,
+/// PyPI) and spawn Python for the installed versions, so run them
+/// concurrently.
 async fn build_update_check(app: &AppHandle, state: &Arc<AppState>) -> UpdateCheckReply {
     let (channel, backend) = {
         let settings = state.settings.read().await;

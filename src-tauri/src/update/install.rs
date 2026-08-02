@@ -4,10 +4,13 @@
 //! the user that a managed Python tree could not be repaired.
 
 use anyhow::{Context, Result};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
+use crate::control::ops::UpdateGuard;
 use crate::i18n::{t, t_with};
 use crate::platform;
 use crate::settings::Backend;
@@ -39,29 +42,163 @@ pub fn get_installed_device_builder_version(app_handle: &AppHandle) -> Result<Op
 /// so this lazy device-builder-scoped heal mostly covers trees that predate
 /// that self-clean; duplicate metadata does not fail an install or the
 /// `esphome config` health probe, so nothing else would recover them.
+///
+/// The prune also removes RECORD-less dist-info dirs. Those do fail an
+/// install — pip aborts with `uninstall-no-record-file` — and when the
+/// overlay plants one in the bundled tree, the repair re-copy restores it, so
+/// without this removal the [`install_with_record_recovery`] retry would hit
+/// the identical abort forever ("Cannot uninstall
+/// esphome-device-builder-frontend None").
 pub fn dedupe_device_builder_dist_info(app_handle: &AppHandle) -> Result<()> {
     let python_path = platform::get_python_path(app_handle)?;
     platform::dedupe_dist_info(&python_path, platform::DistInfoDedupeScope::DeviceBuilder)
 }
 
+/// The `UpdateGuard` flag, when the app state is managed (it is not in unit
+/// tests).
+fn update_guard_flag(app_handle: &AppHandle) -> Option<Arc<AtomicBool>> {
+    use tauri::Manager;
+    app_handle
+        .try_state::<Arc<crate::AppState>>()
+        .map(|state| state.update_in_flight.clone())
+}
+
+/// What the caller of [`detect_device_builder_version_with_heal_async`] knows
+/// about the `UpdateGuard`, which decides whether the destructive dist-info
+/// heal may run.
+///
+/// A global flag read alone cannot make this decision: it cannot tell
+/// "someone else's sequence is running" from "my own caller holds the guard",
+/// and the two mean opposite things for the heal (a guard the caller holds is
+/// proof that no pip install can be racing).
+#[derive(Clone, Copy)]
+pub(super) enum HealPolicy<'g> {
+    /// The caller holds the `UpdateGuard` (the tray's Check for Updates arm),
+    /// so its sequence is the only one running and the steps are sequential:
+    /// no pip install can be concurrently in flight when the heal runs. This
+    /// is also the main user-facing recovery for the #190 pileup, so the heal
+    /// must not stand down here. The reference is the proof: a guardless
+    /// caller cannot claim this variant without acquiring a guard first. It
+    /// is never read — possession at construction is its whole job.
+    GuardHeld(#[allow(dead_code)] &'g UpdateGuard),
+    /// The caller runs without the guard (the daily background check). The
+    /// heal takes the guard itself for its duration, or stands down if one is
+    /// in flight: pip writes `RECORD` last, so a package mid-install passes
+    /// through exactly the RECORD-less shape the prune condemns. While held,
+    /// a coincident click on any guard-taking tray arm (update, switch,
+    /// Quit) is refused with a log line; the prune's 60s bound is what caps
+    /// that window.
+    WhenIdle,
+}
+
+/// Permission to run the destructive heal, alive for the heal's duration.
+enum HealPermit {
+    /// Allowed without holding anything: the caller already holds the
+    /// `UpdateGuard`, or no state is managed (unit tests).
+    Unguarded,
+    /// Allowed, holding the guard until dropped. Never read — the RAII
+    /// release on drop is its whole job.
+    Held(#[allow(dead_code)] UpdateGuard),
+}
+
+/// Secure permission to run the destructive heal. `None` means denied.
+///
+/// On the guardless path this *takes* the `UpdateGuard` (returned inside the
+/// permit so it is held, RAII, for the heal's duration) rather than sampling
+/// the flag: a read alone is check-then-act, and a sequence acquiring between
+/// the read and the Python spawn would race the rmtree into a live pip
+/// install. `try_acquire` keeps it non-blocking. A caller that already holds
+/// the guard must not re-acquire (it would deny against itself).
+fn acquire_heal_permit(
+    caller_holds_guard: bool,
+    guard_flag: Option<Arc<AtomicBool>>,
+) -> Option<HealPermit> {
+    if caller_holds_guard {
+        return Some(HealPermit::Unguarded);
+    }
+    match guard_flag {
+        None => {
+            // Only unit tests run unmanaged; in production the state is
+            // managed before any check can reach here, so a miss would be a
+            // bug — say so rather than silently waiving the serialization
+            // guarantee.
+            warn!("update guard state not managed; running the dist-info heal unguarded");
+            Some(HealPermit::Unguarded)
+        }
+        Some(flag) => UpdateGuard::try_acquire(flag).map(HealPermit::Held),
+    }
+}
+
+/// What a healed detection concluded — kept three-armed so a deferred heal
+/// never masquerades as "not installed".
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum HealOutcome {
+    /// The detection ran to completion: `Some(version)` when installed,
+    /// `None` when genuinely absent or still undeterminable after the heal.
+    Determined(Option<String>),
+    /// The pre-heal lookup was undeterminable and the heal stood down
+    /// (another sequence holds the guard). Says nothing about the package;
+    /// only the `WhenIdle` policy can produce it.
+    Deferred,
+}
+
+/// Orchestrate detect → permit → heal → re-detect.
+///
+/// A `None` detection is the exact symptom of the pileup (#190), so prune the
+/// duplicates and re-query before giving up. A genuinely-absent package stays
+/// `None` (dedup finds nothing to remove), at the cost of one extra Python
+/// spawn only on the already-unusual not-determinable path. A denied permit
+/// defers the heal: an undeterminable version then is far more likely a
+/// concurrent install's transient state than the #190 pileup, and a real
+/// pileup is still healed by the next check once the guard frees. A failed
+/// heal still re-queries — best-effort, but not invisible.
+///
+/// The permit is scoped to the heal alone: the re-detect is read-only, so
+/// there is no reason to keep the guard across a second Python spawn.
+///
+/// The steps are injected, exactly like [`install_with_record_recovery`]'s,
+/// so this policy stays testable without an `AppHandle` or a live
+/// interpreter.
+fn heal_and_redetect<D, H, P>(detect: D, heal: H, permit: P) -> Result<HealOutcome>
+where
+    D: Fn() -> Result<Option<String>>,
+    H: FnOnce() -> Result<()>,
+    P: FnOnce() -> Option<HealPermit>,
+{
+    let installed = detect()?;
+    if installed.is_some() {
+        return Ok(HealOutcome::Determined(installed));
+    }
+    {
+        let Some(_permit) = permit() else {
+            info!("deferring the dist-info heal: another update sequence is in flight");
+            return Ok(HealOutcome::Deferred);
+        };
+        if let Err(e) = heal() {
+            // The heal is best-effort, but a failed attempt shouldn't be
+            // invisible: the re-query below will just return the same
+            // undeterminable result.
+            warn!("device-builder dist-info heal failed: {e}");
+        }
+    }
+    detect().map(HealOutcome::Determined)
+}
+
 /// Detect the installed device-builder version, healing a duplicate dist-info
 /// pileup once if the first lookup cannot determine a version.
 ///
-/// A `None` result is the exact symptom of the pileup (#190), so prune the
-/// duplicates and re-query before giving up. A genuinely-absent package stays
-/// `None` (dedup finds nothing to remove), at the cost of one extra Python spawn
-/// only on the already-unusual not-determinable path.
-fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Option<String>> {
-    let installed = get_installed_device_builder_version(app_handle)?;
-    if installed.is_some() {
-        return Ok(installed);
-    }
-    if let Err(e) = dedupe_device_builder_dist_info(app_handle) {
-        // The heal is best-effort, but a failed attempt shouldn't be invisible:
-        // the re-query below will just return the same undeterminable result.
-        warn!("device-builder dist-info heal failed: {e}");
-    }
-    get_installed_device_builder_version(app_handle)
+/// The policy lives in [`heal_and_redetect`]; whether the heal may run is the
+/// caller's knowledge, not this function's (see [`HealPolicy`] and
+/// [`acquire_heal_permit`]).
+fn detect_device_builder_version_with_heal(
+    app_handle: &AppHandle,
+    caller_holds_guard: bool,
+) -> Result<HealOutcome> {
+    heal_and_redetect(
+        || get_installed_device_builder_version(app_handle),
+        || dedupe_device_builder_dist_info(app_handle),
+        || acquire_heal_permit(caller_holds_guard, update_guard_flag(app_handle)),
+    )
 }
 
 /// Async wrapper around the blocking [`detect_device_builder_version_with_heal`].
@@ -72,11 +209,18 @@ fn detect_device_builder_version_with_heal(app_handle: &AppHandle) -> Result<Opt
 /// `spawn_blocking` instead.
 pub(super) async fn detect_device_builder_version_with_heal_async(
     app_handle: &AppHandle,
-) -> Result<Option<String>> {
+    policy: HealPolicy<'_>,
+) -> Result<HealOutcome> {
+    // The guard reference proves possession at the call site but cannot cross
+    // spawn_blocking's 'static boundary; reduce it to the fact the blocking
+    // side acts on.
+    let caller_holds_guard = matches!(policy, HealPolicy::GuardHeld(_));
     let app = app_handle.clone();
-    tokio::task::spawn_blocking(move || detect_device_builder_version_with_heal(&app))
-        .await
-        .context("device-builder version detection task panicked or was cancelled")?
+    tokio::task::spawn_blocking(move || {
+        detect_device_builder_version_with_heal(&app, caller_holds_guard)
+    })
+    .await
+    .context("device-builder version detection task panicked or was cancelled")?
 }
 
 /// Build the `pip install` argument list (appended after the `-m pip install`
@@ -262,8 +406,10 @@ pub(super) fn notify_repair_needed(app_handle: &AppHandle, body: String) {
 ///
 /// This is the signal that the tree is corrupt rather than the install being
 /// wrong, so it is what selects the repair path in
-/// [`install_with_record_recovery`].
-fn is_missing_record_error(stderr: &str) -> bool {
+/// [`install_with_record_recovery`]. `pub(crate)` so the repair e2e can
+/// assert the abort it plants is the one this predicate keys on, rather than
+/// re-hardcoding pip's wording and drifting from it.
+pub(crate) fn is_missing_record_error(stderr: &str) -> bool {
     stderr.contains("uninstall-no-record-file") || stderr.contains("no RECORD file was found")
 }
 
@@ -276,6 +422,12 @@ fn is_missing_record_error(stderr: &str) -> bool {
 /// more against the clean tree. Any other failure bails immediately, reported
 /// through [`platform::pip_output_report`] so a resolution failure carries its
 /// cause from both of pip's streams.
+///
+/// The retry can only succeed if the repair actually clears the offending
+/// dist-info, and a re-copy alone does not when the bundled tree itself
+/// carries it (the installer overlay, #389): the post-copy dedupe's removal
+/// of RECORD-less dist-info dirs is what breaks that loop (see
+/// [`dedupe_device_builder_dist_info`]).
 ///
 /// The repair puts back the version the user had and `run` then installs the
 /// target over it, so this path can pip-install twice. That is deliberate, not
@@ -436,6 +588,144 @@ mod tests {
             args.last().map(String::as_str),
             Some("esphome-device-builder==1.2.3")
         );
+    }
+
+    #[test]
+    fn the_heal_permit_takes_the_guard_rather_than_sampling_it() {
+        use std::sync::atomic::Ordering;
+
+        // A caller holding the UpdateGuard is proof no pip install can be
+        // racing, and re-acquiring would deny against itself: permitted
+        // without touching the flag.
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(matches!(
+            acquire_heal_permit(true, None),
+            Some(HealPermit::Unguarded)
+        ));
+        assert!(matches!(
+            acquire_heal_permit(true, Some(flag.clone())),
+            Some(HealPermit::Unguarded)
+        ));
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "GuardHeld must not acquire: its caller owns the flag"
+        );
+
+        // The guardless path with the flag free: the permit HOLDS the guard
+        // for the heal's duration — sampling alone would be check-then-act,
+        // letting a sequence start between the read and the rmtree — and
+        // releases it on drop.
+        let permit =
+            acquire_heal_permit(false, Some(flag.clone())).expect("a free flag permits the heal");
+        assert!(matches!(permit, HealPermit::Held(_)));
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the permit must hold the flag, not sample it"
+        );
+        drop(permit);
+        assert!(!flag.load(Ordering::Acquire), "released on drop");
+
+        // The guardless path while a sequence is in flight: denied.
+        let held = UpdateGuard::try_acquire(flag.clone()).expect("flag is free");
+        assert!(acquire_heal_permit(false, Some(flag.clone())).is_none());
+        drop(held);
+
+        // No managed state (unit tests): no guard exists to take.
+        assert!(matches!(
+            acquire_heal_permit(false, None),
+            Some(HealPermit::Unguarded)
+        ));
+    }
+
+    /// Drive [`heal_and_redetect`] against canned detections. `detections` is
+    /// what each successive detect returns; `permit` grants or denies the
+    /// heal. Returns the result plus (detects run, heals run).
+    fn drive_heal(
+        detections: Vec<Result<Option<String>>>,
+        permit_granted: bool,
+        heal: Result<()>,
+    ) -> (Result<HealOutcome>, (usize, usize)) {
+        use std::cell::{Cell, RefCell};
+
+        let queue = RefCell::new(detections.into_iter());
+        let detects = Cell::new(0);
+        let heals = Cell::new(0);
+        let heal = RefCell::new(Some(heal));
+
+        let result = heal_and_redetect(
+            || {
+                detects.set(detects.get() + 1);
+                queue
+                    .borrow_mut()
+                    .next()
+                    .expect("detect ran more times than the test planned for")
+            },
+            || {
+                heals.set(heals.get() + 1);
+                heal.borrow_mut().take().expect("healed twice")
+            },
+            || permit_granted.then_some(HealPermit::Unguarded),
+        );
+        (result, (detects.get(), heals.get()))
+    }
+
+    #[test]
+    fn heal_and_redetect_returns_a_determinable_version_without_healing() {
+        // A version the first lookup resolves needs no heal: the destructive
+        // prune must not run on a healthy tree.
+        let (result, counts) = drive_heal(vec![Ok(Some("1.8.2".into()))], true, Ok(()));
+        assert_eq!(
+            result.unwrap(),
+            HealOutcome::Determined(Some("1.8.2".into()))
+        );
+        assert_eq!(counts, (1, 0));
+    }
+
+    #[test]
+    fn heal_and_redetect_heals_once_and_requeries() {
+        // The #190 shape: undeterminable, then the prune clears the pileup
+        // and the re-query resolves.
+        let (result, counts) = drive_heal(vec![Ok(None), Ok(Some("1.8.2".into()))], true, Ok(()));
+        assert_eq!(
+            result.unwrap(),
+            HealOutcome::Determined(Some("1.8.2".into()))
+        );
+        assert_eq!(counts, (2, 1));
+    }
+
+    #[test]
+    fn heal_and_redetect_defers_without_a_permit() {
+        // A denied permit means an update sequence is in flight, and an
+        // undeterminable version is then more likely pip mid-install than
+        // the pileup: no heal, no second spawn, and the outcome says
+        // "deferred" rather than masquerading as "not installed".
+        let (result, counts) = drive_heal(vec![Ok(None)], false, Ok(()));
+        assert_eq!(result.unwrap(), HealOutcome::Deferred);
+        assert_eq!(counts, (1, 0));
+    }
+
+    #[test]
+    fn heal_and_redetect_requeries_even_after_a_failed_heal() {
+        // Best-effort, but not silent, and never a reason to skip the
+        // re-query: the second lookup reports whatever is true afterwards.
+        let (result, counts) = drive_heal(
+            vec![Ok(None), Ok(None)],
+            true,
+            Err(anyhow::anyhow!("interpreter is broken")),
+        );
+        assert_eq!(result.unwrap(), HealOutcome::Determined(None));
+        assert_eq!(counts, (2, 1));
+    }
+
+    #[test]
+    fn heal_and_redetect_propagates_a_failed_detection_unhealed() {
+        // Err means the check itself could not run (Python missing), which
+        // implicates nothing about the tree: pruning on it would be
+        // destructive action on zero evidence.
+        let (result, counts) =
+            drive_heal(vec![Err(anyhow::anyhow!("no interpreter"))], true, Ok(()));
+        assert!(result.is_err());
+        assert_eq!(counts, (1, 0));
     }
 
     #[test]

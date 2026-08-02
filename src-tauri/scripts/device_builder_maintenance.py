@@ -17,6 +17,18 @@ return None or the wrong version and loops the updater forever. The version
 ranking is self-contained so this does not depend on the third-party
 ``packaging`` library being importable in the bundled interpreter.
 
+Both dedupe modes also remove RECORD-less dist-info dirs. pip cannot uninstall
+an entry with no RECORD file, so every upgrade that touches the package aborts
+with ``uninstall-no-record-file`` ("Cannot uninstall <pkg> None", or with the
+version when METADATA survived), and because the installer overlay can plant
+one in the bundled tree itself (#389), the repair re-copy restores it and the
+failure becomes permanent. A completed pip install always writes RECORD, so
+this shape is torn metadata rather than a real install; deleting the dist-info
+dir loses nothing pip could use, and the next install writes a fresh one.
+In-scope damage the prune could not resolve — a removal that failed, a
+directory it could not list — fails the run (exit 1): a partial prune must
+never read as a heal.
+
 Embedded into the Rust binary via ``include_str!`` and run with the bundled
 interpreter as ``python -c <this file> <mode>``; also imported directly by the
 pytest suite, which is why the functions take an injectable distributions
@@ -25,12 +37,32 @@ iterable instead of always reading the live environment.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import stat
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib.metadata import Distribution, distributions
 from pathlib import Path
+from typing import NamedTuple
+
+
+class _Entry(NamedTuple):
+    """One dist-info dir under consideration by the dedupe prune.
+
+    Named rather than a bare tuple because three of the fields are adjacent
+    same-typed booleans feeding the destructive branch: a silent positional
+    transposition would flip "deliberate keep" into "counted failure" (or
+    worse) without any test noticing the shape change.
+    """
+
+    version: str | None
+    path: Path
+    has_record: bool
+    inferred: bool
+    unreadable: bool
+
 
 # Only the builder packages: the device-builder updater resolves its version via
 # importlib.metadata, which the duplicate dist-info pileup breaks (#190). Plain
@@ -88,6 +120,83 @@ def _dist_path(dist: Distribution) -> object:
     return getattr(dist, "_path", "?")
 
 
+def _clear_readonly_and_retry(
+    func: Callable[[str], object], failed: str, exc: BaseException
+) -> None:
+    """``shutil.rmtree`` error handler: clear a read-only flag, retry once.
+
+    A path that is writable yet still failed re-raises the original error:
+    the flag is not the problem there, and retrying would just fail again. A
+    retry that fails anew chains the original error so the log names both
+    causes. Module-level rather than nested in [`_rmtree`] so the early-out
+    and the chain are unit-testable on every platform; the flag-clearing leg
+    only ever fires on Windows.
+    """
+    if os.access(failed, os.W_OK):
+        raise exc
+    try:
+        Path(failed).chmod(stat.S_IWUSR | stat.S_IRUSR | stat.S_IXUSR)
+        func(failed)
+    except OSError as retry_err:
+        raise retry_err from exc
+
+
+# Whether shutil.rmtree accepts ``onexc`` (3.12+). Evaluated at import so the
+# test suite can force the fallback branch without patching the process-wide
+# ``sys.version_info``.
+_RMTREE_HAS_ONEXC = sys.version_info >= (3, 12)
+
+
+def _rmtree(path: Path) -> None:
+    """``shutil.rmtree`` that clears Windows' read-only flag and retries.
+
+    Files inside a dist-info can carry the read-only attribute on Windows,
+    which fails the plain delete (same handling as ``esphome.helpers.rmtree``,
+    plus the execute bit so a chmod'd directory stays traversable for the
+    retry).
+    """
+    if _RMTREE_HAS_ONEXC:
+        shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+        return
+
+    # The bundled interpreter is far newer, but dev builds without a bundle
+    # fall back to the system Python, which can predate ``onexc`` (3.12); the
+    # resulting TypeError would escape the callers' ``except OSError`` and
+    # kill the whole prune. ``onerror`` passes an exc_info triple instead of
+    # the exception, so adapt.
+    def _onerror(
+        func: Callable[[str], object],
+        failed: str,
+        exc_info: tuple[type[BaseException], BaseException, object],
+    ) -> None:
+        _clear_readonly_and_retry(func, failed, exc_info[1])
+
+    shutil.rmtree(path, onerror=_onerror)
+
+
+def _infer_name(path: Path) -> str:
+    """Normalized package name from a ``*.dist-info`` directory name.
+
+    ``pkg_name-1.2.3.dist-info`` -> ``pkg-name``; when the tail after the last
+    ``-`` does not look like a version, the whole stem is taken as the name.
+    The wheel spec underscore-normalizes the name part, so the last ``-``
+    always cuts at the version for anything pip wrote, and pip resolves
+    identity from the directory name the same way when METADATA is gone
+    ("Cannot uninstall esphome-device-builder-frontend None"). The digit check
+    only matters for hand-damaged names like ``foo-bar.dist-info``, which must
+    not shed their last segment on the way into the scope filter.
+
+    Only used when METADATA is missing or has no Name header, and only to
+    scope-filter the entry and attribute the RECORD-less removal; an inferred
+    name never ranks its entry against properly named siblings.
+    """
+    stem = path.name[: -len(".dist-info")]
+    name, sep, version = stem.rpartition("-")
+    if sep and version[:1].isdigit():
+        return _norm(name)
+    return _norm(stem)
+
+
 def detect_version(dists: Iterable[Distribution]) -> str | None:
     """Return the highest version among all esphome-device-builder dists.
 
@@ -119,18 +228,99 @@ def detect_version(dists: Iterable[Distribution]) -> str | None:
 
 def dedupe_dist_info(
     dists: Iterable[Distribution], targets: set[str] | None = TARGETS
-) -> int:
+) -> tuple[int, int]:
     """Keep the highest-version dist-info per package; remove the rest.
 
     ``targets`` limits the prune to the given normalized package names;
     ``None`` considers every distribution (the ``dedupe-all`` mode).
 
     The newest version is the code installed last by ``pip install --upgrade``,
-    so its metadata is the one to keep. Returns the number of stale dist-info
-    directories removed.
+    so its metadata is the one to keep. RECORD-less entries are removed
+    regardless of group size or version readability: pip can never uninstall
+    one, so it aborts every upgrade with ``uninstall-no-record-file`` until it
+    is gone. Returns ``(removed, failed)``: dist-info directories removed, and
+    in-scope damage the prune could not resolve — a RECORD-less entry it could
+    not remove (still aborts every install), a stale duplicate it could not
+    remove (still breaks version detection, #190), a directory it could not
+    even list, a METADATA it could not read (either may be any of those), or,
+    in all-scope mode, an entry with no attributable name or usable path. The
+    CLI turns ``failed`` into a non-zero exit so a partial prune is never
+    reported as a heal. Deliberate conservative keeps
+    (unrankable or dir-name-only entries that still have a RECORD, ambiguous
+    groups) are not failures: pip can still manage those, and deleting on a
+    guess is the one wrong this prune must never commit. The exception is a
+    group whose best surviving entry still has no rankable version — nothing
+    rankable at all, a lone entry with an unparseable Version, or an
+    all-unparseable pileup: its keeps count as unresolved even though they
+    stay, since detect_version resolves them all to nothing alike.
     """
-    groups: dict[str, list[tuple[str | None, Path]]] = {}
+    groups, failed = _collect_entries(dists, targets)
+    removed = 0
+    for entries in groups.values():
+        group_removed, group_failed = _prune_group(entries)
+        removed += group_removed
+        failed += group_failed
+    return removed, failed
+
+
+def _remove_counted(path: Path, kind: str) -> bool:
+    """Remove ``path``, returning whether it worked.
+
+    On failure prints the could-not-remove line for ``kind``: the two kinds
+    are worded apart so a bounded stderr tail says which failure drove the
+    exit 1.
+    """
+    try:
+        _rmtree(path)
+        return True
+    except OSError as err:
+        print(
+            f"dedupe: could not remove {kind} {path}: {err}",
+            file=sys.stderr,
+        )
+        return False
+
+
+def _collect_entries(
+    dists: Iterable[Distribution], targets: set[str] | None
+) -> tuple[dict[str, list[_Entry]], int]:
+    """Classify ``dists`` into per-package [`_Entry`] groups.
+
+    Returns the groups plus the count of entries that could not even be
+    classified (pathless, nameless in all-scope mode, unlistable) — the
+    collection-phase share of ``dedupe_dist_info``'s ``failed``.
+    """
+    failed = 0
+    groups: dict[str, list[_Entry]] = {}
     for dist in dists:
+        # ``_path`` is private; guard it so a future importlib change degrades
+        # to a logged, counted no-op rather than deleting the wrong directory
+        # or silently reading as a clean tree. Deliberately no ``is_dir()``
+        # here: it folds a stat error into False, which would vanish a
+        # possibly-blocking entry uncounted — a non-directory or unstatable
+        # path flows through to the scope-aware, counted listing probe below
+        # instead.
+        path = getattr(dist, "_path", None)
+        if not isinstance(path, Path):
+            # If importlib ever changes the private attribute, every entry
+            # lands here and the prune can do nothing at all; a total no-op
+            # must not read as a heal. Counted in both modes: unlike a single
+            # nameless directory (which may genuinely be foreign to the
+            # scoped heal), a pathless entry is a systemic contract break
+            # that hits the target packages by definition.
+            failed += 1
+            print(
+                f"dedupe: no usable path for distribution {_dist_path(dist)}",
+                file=sys.stderr,
+            )
+            continue
+        if path.suffix != ".dist-info":
+            # egg-info and friends are out of this prune's contract: a quiet
+            # skip by design.
+            continue
+        name = ""
+        version = None
+        metadata_unreadable = False
         try:
             # .get() avoids the implicit-None DeprecationWarning (future
             # KeyError) on missing headers, and reading Version here keeps a
@@ -141,62 +331,160 @@ def dedupe_dist_info(
         except Exception as err:
             # Log rather than silently skip: an unreadable target dist-info that
             # is never considered for dedup leaves the pileup in place (#190).
+            # Whether it also counts as unresolved is decided below, once the
+            # listing says if METADATA is even there: an absent file is the
+            # torn shape (a deliberate keep), a present-but-unreadable one is
+            # a transient failure hiding the pileup.
+            metadata_unreadable = True
             print(
-                f"dedupe: skipping unreadable distribution {_dist_path(dist)}: {err}",
+                f"dedupe: unreadable metadata in {path}: {err}",
                 file=sys.stderr,
             )
-            continue
+        inferred = not name
+        if inferred:
+            # No METADATA, or one with no Name header. The directory name still
+            # identifies the package well enough to scope-filter the entry;
+            # without it the torn dist-info behind the permanent
+            # uninstall-no-record-file abort could never be considered at all.
+            name = _infer_name(path)
         if not name:
-            # A dist-info with no Name header cannot be attributed to a
-            # package. Grouping the nameless together (their names all
-            # normalize to "") would treat unrelated broken dist-infos as
-            # duplicates of one another — never prune on missing identity.
+            # No name from metadata or the directory: the entry cannot be
+            # attributed, ranked, or condemned. In all-scope mode that is
+            # unresolved (it may be install-blocking damage), so it counts; in
+            # target scope it cannot be tied to the packages this heal owns,
+            # so it is left for dedupe-all, uncounted.
+            if targets is None:
+                failed += 1
             print(
-                f"dedupe: skipping nameless distribution {_dist_path(dist)}",
+                f"dedupe: cannot attribute nameless {path}",
                 file=sys.stderr,
             )
             continue
         if targets is not None and name not in targets:
             continue
-        # ``_path`` is private; guard it so a future importlib change degrades to
-        # a no-op rather than deleting the wrong directory.
-        path = getattr(dist, "_path", None)
-        if (
-            not isinstance(path, Path)
-            or path.suffix != ".dist-info"
-            or not path.is_dir()
-        ):
+        try:
+            children = {child.name for child in path.iterdir()}
+        except OSError as err:
+            # A directory that cannot even be listed decides nothing, least of
+            # all its own removal: a transient read failure must not turn
+            # "RECORD not seen" into "RECORD absent" and delete a real install.
+            # But it is counted: this entry may be the RECORD-less blocker,
+            # and "could not determine the tree is clean" must not read as
+            # clean. After the scope filter so an unlistable non-target dir
+            # cannot fail the scoped heal.
+            failed += 1
+            print(f"dedupe: could not list {path}: {err}", file=sys.stderr)
             continue
-        groups.setdefault(name, []).append((version, path))
+        unreadable = metadata_unreadable and "METADATA" in children
+        if not unreadable and inferred and "METADATA" in children:
+            # importlib suppresses read failures (PermissionError and
+            # friends) into an empty answer, indistinguishable from a
+            # Name-less file, so no exception reached the handler above.
+            # Probe the file directly: present but unreadable is a transient
+            # failure hiding the pileup, not a torn shape.
+            try:
+                (path / "METADATA").read_bytes()
+            except OSError as err:
+                unreadable = True
+                print(
+                    f"dedupe: unreadable metadata in {path}: {err}",
+                    file=sys.stderr,
+                )
+        groups.setdefault(name, []).append(
+            _Entry(
+                version=version,
+                path=path,
+                has_record="RECORD" in children,
+                inferred=inferred,
+                unreadable=unreadable,
+            )
+        )
+    return groups, failed
 
+
+def _prune_group(entries: list[_Entry]) -> tuple[int, int]:
+    """Prune one package's entries; returns its ``(removed, failed)`` share."""
     removed = 0
-    for items in groups.values():
-        if len(items) < 2:
-            continue  # a single healthy install is left untouched
-        items.sort(key=lambda item: vkey(item[0]))
-        keep_version, keep_path = items[-1]
-        if vkey(keep_version) == _UNRANKED:
-            # No entry in the group has a parseable version, so we can't tell
-            # which is the real install. Leave the whole group rather than risk
-            # a wrong rmtree; detect_version still tolerates the duplicates.
+    failed = 0
+    items: list[_Entry] = []
+    kept_dir_name_only = 0
+    for entry in entries:
+        path = entry.path
+        if not entry.has_record:
+            # No RECORD: pip can never uninstall this entry, so any install
+            # that tries aborts with uninstall-no-record-file, whether or not
+            # the version is still readable ("Cannot uninstall <pkg> None",
+            # or with the version when METADATA survived). A completed pip
+            # install always writes RECORD, so unlike the
+            # unrankable-but-managed case below this cannot be the real
+            # install, and removing the dist-info dir is the only way out of
+            # the abort loop. A failed removal is counted, not just logged:
+            # the entry still blocks every install, so the run must not
+            # report success around it.
+            print(f"dedupe: removing RECORD-less {path}", file=sys.stderr)
+            if _remove_counted(path, "RECORD-less"):
+                removed += 1
+            else:
+                failed += 1
+            continue
+        if entry.inferred:
+            if entry.unreadable:
+                # METADATA exists but could not be read. pip can still
+                # manage the entry (a RECORD got it past the branch
+                # above), but its version is unknowable right now, so any
+                # pileup it belongs to is unresolved: counted, not folded
+                # into the deliberate keeps below.
+                failed += 1
+                print(
+                    f"dedupe: could not read METADATA in {path}",
+                    file=sys.stderr,
+                )
+                continue
+            # A directory name is identity enough to condemn a
+            # RECORD-less entry above (pip trusts it the same way when
+            # it aborts), but not to rank the entry against properly named
+            # siblings: a corrupted name landing in another package's
+            # group could evict that package's real dist-info. Keep it
+            # and keep it out of the ranking.
+            kept_dir_name_only += 1
+            print(f"dedupe: keeping dir-name-only {path}", file=sys.stderr)
+            continue
+        items.append(entry)
+    items.sort(key=lambda entry: vkey(entry.version))
+    if not items or vkey(items[-1].version) == _UNRANKED:
+        # Resolvability is judged once, for every group size: if even the
+        # best surviving entry has no rankable version, detect_version still
+        # resolves this package to nothing — the same #190 consequence
+        # whichever shape produced it (nothing rankable at all, a lone entry
+        # with an unparseable Version, or an all-unparseable pileup) — and on
+        # the builder path no install is ever offered that would let pip heal
+        # the keeps. They stand (deleting on a guess is still the one
+        # forbidden wrong), but the run must not call any of these resolved.
+        failed += kept_dir_name_only + len(items)
+        if items:
             print(
                 f"dedupe: keeping ambiguous group, no parseable version "
-                f"near {keep_path}",
+                f"near {items[-1].path}",
                 file=sys.stderr,
             )
+        return removed, failed
+    if len(items) < 2:
+        return removed, failed  # a single healthy install is left untouched
+    for entry in items[:-1]:
+        if vkey(entry.version) == _UNRANKED:
+            # An unparseable version with a RECORD (RECORD-less entries
+            # never reach this loop) might itself be the real install, so
+            # never delete it on the strength of the lowest-sort sentinel.
+            print(f"dedupe: keeping unrankable {entry.path}", file=sys.stderr)
             continue
-        for version, path in items[:-1]:
-            if vkey(version) == _UNRANKED:
-                # An unparseable version might itself be the real install, so
-                # never delete it on the strength of the lowest-sort sentinel.
-                print(f"dedupe: keeping unrankable {path}", file=sys.stderr)
-                continue
-            try:
-                shutil.rmtree(path)
-                removed += 1
-            except OSError as err:
-                print(f"skip {path}: {err}", file=sys.stderr)
-    return removed
+        # A failed removal is counted: a surviving duplicate keeps the #190
+        # pileup in place, so importlib still cannot resolve a single
+        # version and the updater loops on "version None".
+        if _remove_counted(entry.path, "stale duplicate"):
+            removed += 1
+        else:
+            failed += 1
+    return removed, failed
 
 
 def main(argv: list[str]) -> int:
@@ -206,12 +494,17 @@ def main(argv: list[str]) -> int:
         if version:
             print(version)
         return 0
-    if mode == "dedupe":
-        print(dedupe_dist_info(distributions()))
-        return 0
-    if mode == "dedupe-all":
-        print(dedupe_dist_info(distributions(), targets=None))
-        return 0
+    if mode in ("dedupe", "dedupe-all"):
+        removed, failed = dedupe_dist_info(
+            distributions(), targets=TARGETS if mode == "dedupe" else None
+        )
+        print(removed)
+        # Damage the prune could not resolve still blocks the updater (a
+        # RECORD-less dir aborts every install, a surviving duplicate breaks
+        # version detection); exit 1 so a partial prune is never reported as
+        # a heal. The callers are best-effort and continue either way, so the
+        # exit code buys a distinguishable log line, not a control-flow guard.
+        return 1 if failed else 0
     print(f"unknown mode: {mode!r}", file=sys.stderr)
     return 2
 
