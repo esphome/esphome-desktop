@@ -10,11 +10,14 @@
 # Note: No venv is used to avoid absolute path issues in bundled executables
 #
 # Usage: ./prepare_bundle.sh [platform]
+#
+# PREPARE_PYTHON_ONLY=1 stops after step 2, leaving the tree in
+# build/python-<platform> and src-tauri/ untouched; see the check below.
 
 set -e
 
-PYTHON_VERSION="3.13.14"
-PBS_VERSION="20260623"
+PYTHON_VERSION="3.14.6"
+PBS_VERSION="20260728"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
 # MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
@@ -416,7 +419,7 @@ EOF
 # machine the kernel can't find the interpreter and every `esphome`,
 # `platformio`, `pip`, … invocation fails silently (see issue #34).
 # Replace each shebang with the same sh/Python polyglot that
-# python-build-standalone uses for its own scripts (idle3, pydoc3.13, …),
+# python-build-standalone uses for its own scripts (idle3, pydoc3.14, …),
 # so the whole bin/ directory is consistent and relocatable.
 # Windows uses .exe launchers (not text scripts) so it's not called there.
 make_scripts_relocatable() {
@@ -490,6 +493,9 @@ install_python_packages() {
 
     echo ""
     echo "=== Installing ESPHome (${platform}) ==="
+    # Deliberately unpinned: every bundle build ships whatever ESPHome is
+    # current on PyPI, so picking up a new ESPHome release just needs any
+    # merge to main after it publishes.
     "$python_dir/$python_bin" -m pip install esphome
 
     echo ""
@@ -500,6 +506,9 @@ install_python_packages() {
     # release so the bundle matches Backend::default() == BuilderStable in
     # src-tauri/src/settings/mod.rs; a beta binary here would put fresh installs
     # on the beta channel while the UI reports Stable (see #241/#245).
+    # Deliberately unpinned within that channel: every bundle build ships the
+    # latest stable on PyPI, so picking up a new device builder release just
+    # needs any merge to main after it publishes.
     echo ""
     echo "=== Installing ESPHome Device Builder (${platform}) ==="
     "$python_dir/$python_bin" -m pip install esphome-device-builder
@@ -548,9 +557,24 @@ fi
 
 echo "=== Preparing ESPHome bundle for ${PLATFORM} ==="
 
+mkdir -p "$BUILD_DIR"
+
+# PREPARE_PYTHON_ONLY=1 stops once build/python-<platform> is ready: the same
+# tree, from the same code path, but without the release-only tail (the copy
+# into src-tauri/python; MinGit, patch.exe and ccache on Windows). Used by
+# python-tree-repair.yml, whose e2e reads only the build/ tree and which stubs
+# the src-tauri resource dirs itself; this path must not touch src-tauri/ at
+# all, or it would delete those stubs out from under the crate build (#336).
+if [[ "${PREPARE_PYTHON_ONLY:-0}" == "1" ]]; then
+    prepare_python_for_platform "$PLATFORM"
+    echo ""
+    echo "=== Python tree ready (PREPARE_PYTHON_ONLY) ==="
+    echo "Location: $BUILD_DIR/python-${PLATFORM}"
+    exit 0
+fi
+
 # Clean up previous builds
 rm -rf "$BUNDLE_DIR"
-mkdir -p "$BUILD_DIR"
 
 prepare_python_for_platform "$PLATFORM"
 prepare_git_for_platform "$PLATFORM"

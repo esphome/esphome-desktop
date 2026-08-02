@@ -13,9 +13,9 @@
     "startup": "Startup",
     "launch_at_login": "Launch at Login",
     "dont_launch_at_login": "Don't Launch at Login",
-    "check_updates": "Check for Updates...",
-    "view_logs": "View Logs...",
-    "open_config": "Open Config Folder...",
+    "check_updates": "Check for Updates",
+    "view_logs": "View Logs",
+    "open_config": "Open Config Folder",
     "restart_dashboard": "Restart Dashboard",
     "quit": "Quit ESPHome"
   },
@@ -58,7 +58,12 @@
     "builder_update_failed": "Failed to update ESPHome Device Builder: {error}",
     "builder_updated": "ESPHome Device Builder has been updated to version {version}.",
     "builder_partial": "Device builder updated to {version}, but failed to restart backend: {error}",
-    "builder_available_title": "Device Builder Update Available"
+    "builder_available_title": "Device Builder Update Available",
+    "repair_failed_title": "ESPHome Needs Attention",
+    "repair_failed": "Your ESPHome install is damaged and could not be repaired automatically.\n\n{error}\n\nBuilds will fail until this is fixed. {hint}",
+    "repair_incomplete": "Your ESPHome install is damaged and could not be repaired automatically.\n\nBuilds will fail until this is fixed. {hint}",
+    "repair_hint_retry": "Reopening the app will try the repair again.",
+    "repair_hint_delete_tree": "Deleting this folder and reopening the app will restore it:\n{path}"
   },
   "app_update": {
     "available_title": "Desktop Update Available",
@@ -94,7 +99,7 @@
   },
   "daemon": {
     "stopped_title": "{backend} stopped",
-    "stopped_body": "{backend} exited unexpectedly ({status}). Open the tray menu and choose \"View Logs...\" for details."
+    "stopped_body": "{backend} exited unexpectedly ({status}). Open the tray menu and choose \"View Logs\" for details."
   },
   "git_check": {
     "missing_title": "Git is not installed",
@@ -107,10 +112,14 @@
     "remove_legacy_title": "Remove old ESPHome Builder",
     "remove_legacy_prompt": "An older version of this app named “ESPHome Builder” was found in your Applications folder. Move it to the Trash?\n\nYour settings and configs are not affected.",
     "move_to_trash": "Move to Trash",
-    "keep": "Keep"
+    "keep": "Keep",
+    "firewall_title": "Allow network pairing",
+    "firewall_prompt": "Windows Firewall is blocking other ESPHome dashboards from pairing with this computer. Allow incoming connections for the app’s Python backend?\n\nWindows will ask for administrator approval.",
+    "firewall_allow": "Allow access",
+    "firewall_decline": "No thanks"
   },
   "hint": {
-    "updates_menu": "Open the tray menu and choose \"Check for Updates...\" to update.",
+    "updates_menu": "Open the tray menu and choose \"Check for Updates\" to update.",
     "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update."
   }
 }

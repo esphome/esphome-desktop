@@ -20,6 +20,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # NOTE: the "cancel superseded Build runs" fallback lives in its own
+  # workflow (cancel-superseded-builds.yml), NOT here. A job inside this
+  # workflow can never do that cancelling: when `cancel-in-progress` (above)
+  # misses, the superseding run waits at this workflow's concurrency gate with
+  # no jobs started, so an in-run canceller only executes in the cases where
+  # the gate already cleared and there is nothing left to cancel.
+
+  # On pull requests, decide whether the build matrix needs to run at all. A PR
+  # that only touches documentation or repo meta files skips it (the logic and
+  # its fail-safe bias live in .github/scripts/determine_jobs.py). The CI Status
+  # job below turns a skipped build into a passing required check, so a docs-only
+  # PR merges without paying for the ~60 minute matrix. Non-PR events (the
+  # release workflow_run, a manual dispatch) skip this job and build regardless.
+  determine-jobs:
+    name: Determine jobs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # determine_jobs.py reads the PR's changed files via `gh pr diff`; without
+      # pull-requests:read the token is denied, the script fails safe to
+      # run-everything, and the docs-only skip silently never happens.
+      pull-requests: read
+    outputs:
+      build: ${{ steps.determine.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Determine jobs
+        id: determine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          output=$(python3 .github/scripts/determine_jobs.py)
+          echo "$output" | jq
+          echo "build=$(echo "$output" | jq -r '.build')" >> "$GITHUB_OUTPUT"
+
   # Release builds embed every translated locale (src-tauri/build.rs picks up
   # whatever JSON files sit in src-tauri/translations/ at compile time). The
   # download runs in its own small job so the Lokalise API token is only ever
@@ -37,14 +75,14 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Download from Lokalise
         # Non-English locales are gitignored, so pull them before building to
@@ -80,10 +118,11 @@ jobs:
     # must block the release rather than silently shipping English-only
     # binaries. PR/dispatch builds run regardless (translations is skipped
     # there, hence the `always()`).
-    needs: translations
+    needs: [translations, determine-jobs]
     if: >-
       always() && (
-        (github.event_name != 'workflow_run' && needs.translations.result == 'skipped') ||
+        (github.event_name == 'pull_request' && needs.translations.result == 'skipped' && needs.determine-jobs.outputs.build == 'true') ||
+        (github.event_name == 'workflow_dispatch' && needs.translations.result == 'skipped') ||
         (github.event.workflow_run.conclusion == 'success' && needs.translations.result == 'success')
       )
     permissions:
@@ -141,7 +180,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # For workflow_run events, check out the commit that triggered the
           # Release Drafter workflow (the latest push to main).
@@ -173,10 +212,16 @@ jobs:
           targets: ${{ matrix.rust_target }}
           cache-key: ${{ matrix.target }}
 
-      # Resolve a tauri-cli version from the locked `tauri` crate version so it
-      # tracks Dependabot's cargo bumps automatically (no hardcoded version to go
-      # stale). Used for the prebuilt install on the stock jobs below. The
-      # AppImage jobs build a pinned fork instead, so they skip this.
+      # Resolve a tauri-cli requirement from the locked `tauri` crate's
+      # major.minor so it tracks Dependabot's cargo bumps automatically (no
+      # hardcoded version to go stale). We pin the minor line, not the exact
+      # patch: `tauri` (the library) and `tauri-cli` publish on independent
+      # cadences, so an exact-patch pin breaks whenever they diverge by a patch
+      # (e.g. library 2.11.5 with no matching CLI 2.11.5). A `~major.minor`
+      # requirement installs the newest CLI patch in the same minor, which Tauri
+      # keeps compatible with the library. Used for the prebuilt install on the
+      # stock jobs below; the AppImage jobs build a pinned fork instead, so they
+      # skip this.
       - name: Resolve Tauri CLI version
         if: ${{ !matrix.tauri_rev }}
         shell: bash
@@ -192,8 +237,11 @@ jobs:
             echo "::error::unexpected tauri version from src-tauri/Cargo.lock: '$ver'"
             exit 1
           fi
-          echo "TAURI_CLI_VERSION=$ver" >> "$GITHUB_ENV"
-          echo "Resolved tauri-cli version: $ver"
+          # Derive the minor line (2.11.5 -> 2.11) from the already-validated
+          # string, then hand cargo-binstall a `~2.11` requirement.
+          minor=$(echo "$ver" | cut -d. -f1,2)
+          echo "TAURI_CLI_VERSION=~$minor" >> "$GITHUB_ENV"
+          echo "Resolved tauri-cli requirement: ~$minor (from tauri $ver)"
 
       # Stock jobs install a prebuilt cargo-tauri via cargo-binstall (seconds)
       # rather than compiling tauri-cli from source, which dominated the per-job
@@ -203,7 +251,7 @@ jobs:
       # no prebuilt (e.g. aarch64 Linux).
       - name: Install cargo-binstall
         if: ${{ !matrix.tauri_rev }}
-        uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
 
       # Version reaches the script only through env, never via ${{ }}
       # interpolation into the run block, so a crafted Cargo.lock cannot inject
@@ -303,13 +351,18 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Build step - Windows CI
+      # `--bundles` so the matrix stays authoritative, as it already is on Linux.
+      # Without it `targets: "all"` in tauri.conf.json decides, which quietly
+      # builds an MSI as well: two bundles, one of which nothing uploads or
+      # installs. The E2E step below reads `bundle/nsis/`, so the guarantee it
+      # depends on should be stated here rather than inherited from a default.
       - name: Build (Windows CI)
         if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
-        run: cargo tauri build
+        run: cargo tauri build --bundles ${{ matrix.bundles }}
 
       - name: Build (Windows Release with signing)
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
-        run: cargo tauri build --config src-tauri/tauri.release.conf.json
+        run: cargo tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -366,6 +419,75 @@ jobs:
           RESOURCE_DIR="$APPDIR/lib/esphome-desktop"
           mkdir -p "$RESOURCE_DIR"
           cp -r src-tauri/python "$RESOURCE_DIR/python"
+
+          # Bundle libayatana-appindicator3 and its runtime deps.
+          # The tray backend (libappindicator-sys) dlopen()s this library
+          # lazily by bare soname at runtime, so it is absent from the
+          # binary's DT_NEEDED and sharun/lib4bin never bundles it. Without
+          # it the tray silently disappears on the AppImage even on desktops
+          # that support it, e.g. KDE Plasma / GNOME (issue #87). Copy the
+          # library the build runner installed (libayatana-appindicator3-dev)
+          # plus its closure into sharun's lib dir, which is already on the
+          # loader search path and where platform/linux.rs's AppDir fallback
+          # looks for it.
+          LIB_DIR="$APPDIR/shared/lib"
+          mkdir -p "$LIB_DIR"
+
+          APPINDICATOR=""
+          for soname in libayatana-appindicator3.so.1 libappindicator3.so.1; do
+            found=$(ldconfig -p | awk -v s="$soname" '$1 == s { print $NF; exit }')
+            if [ -n "$found" ] && [ -e "$found" ]; then
+              APPINDICATOR="$found"
+              break
+            fi
+          done
+          if [ -z "$APPINDICATOR" ]; then
+            echo "::error::appindicator library not found on build runner; tray would be missing from the AppImage (issue #87)"
+            exit 1
+          fi
+          echo "Bundling appindicator from: $APPINDICATOR"
+
+          # Copy the library plus every non-core object in its dependency
+          # closure into LIB_DIR, but never clobber a library sharun already
+          # bundled (e.g. the gtk/glib the webkit stack pulls in). Skip the
+          # glibc/loader core, which must come from the host to stay
+          # ABI-consistent. ldd already resolves the closure recursively, so a
+          # single pass is enough.
+          copy_dep() {
+            local src="$1" base soname
+            base=$(basename "$src")
+            case "$base" in
+              ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*)
+                return 0 ;;
+            esac
+            # Name the bundled file after the ELF SONAME, not the on-disk
+            # filename. ldconfig/ldd may resolve to a fully-versioned real file
+            # (e.g. libfoo.so.1.2.3), but the loader — and the dlopen() by bare
+            # soname described above — searches by SONAME (libfoo.so.1). Bundle
+            # under the SONAME so runtime resolution finds it; fall back to the
+            # basename only if the object has no SONAME.
+            soname=$(patchelf --print-soname "$src" 2>/dev/null || true)
+            [ -n "$soname" ] && base="$soname"
+            # Skip if sharun already bundled this lib anywhere under shared/,
+            # including the multiarch subdirs (shared/lib/x86_64-linux-gnu, seen
+            # in the wild per platform/linux.rs) — copying a second host-sourced
+            # copy risks a version-skewed duplicate of a lib the app loads.
+            [ -n "$(find "$APPDIR/shared" -name "$base" -print -quit 2>/dev/null)" ] && return 0
+            cp -L "$src" "$LIB_DIR/$base"
+            # Resolve co-bundled deps relative to the library's own directory.
+            # patchelf is installed by linux-tauri-deps; a failure here would
+            # ship a lib that resolves against the host and silently regress the
+            # tray, so fail the build loud rather than continue.
+            if ! patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base"; then
+              echo "::error::patchelf --set-rpath failed for $base; refusing to ship an AppImage whose bundled libs resolve against the host (issue #87)"
+              exit 1
+            fi
+          }
+
+          copy_dep "$APPINDICATOR"
+          while read -r dep; do
+            [ -n "$dep" ] && [ -e "$dep" ] && copy_dep "$dep"
+          done < <(ldd "$APPINDICATOR" | awk '/=> \// { print $3 }')
 
           # Extract the uruntime header from the existing AppImage
           chmod +x "$APPIMAGE"
@@ -473,6 +595,45 @@ jobs:
           path: src-tauri/target/release/bundle/nsis/*.exe
           archive: false
 
+      # After the upload on purpose: this is the one failure nobody can
+      # reproduce locally, so the installer that failed has to survive as an
+      # artifact rather than being suppressed by the step that rejected it.
+      #
+      # Exercises the installed bundle rather than the crate — it installs what
+      # we just built, starts it, and force-kills the desktop to prove the real
+      # `python.exe` cannot outlive it. The unit tests cover the job object's
+      # mechanics; only this covers the actual app.
+      #
+      # CI bundle only. The release build is signed and `workflow_run`-triggered,
+      # and installing a GUI app between a tag and its artifacts buys no signal
+      # the CI leg has not already given.
+      - name: E2E backend lifetime (Windows CI)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_backend_lifetime.ps1
+
+      # The firewall pairing flow (#384): the app must settle without a
+      # prompt when the rule already exists, an update-mode uninstall must
+      # keep the rule, a real uninstall must remove it. Runs after the
+      # lifetime script, which leaves the runner uninstalled.
+      - name: E2E firewall rule (Windows CI)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_firewall.ps1
+
+      # The overlay wipe (#417): the installer lays files over $INSTDIR
+      # without deleting the previous release's, so the preinstall hook must
+      # wipe the bundled trees (a stranded esphome component shadowed its
+      # rename alias, failed every config read, and made the repair loop
+      # forever) and reset the repair budget, and a real uninstall must not
+      # strand orphaned trees. The drift tests prove the hook lines exist;
+      # only this proves them against the real installer. Runs after the
+      # firewall script, which leaves the runner uninstalled.
+      - name: E2E overlay wipe (Windows CI)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_overlay_wipe.ps1
+
       - name: Upload NSIS updater signature
         if: contains(matrix.bundles, 'nsis') && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -550,16 +711,46 @@ jobs:
           path: pr-info.json
           archive: false
 
+  # The single required status check for pull requests. Branch protection
+  # requires this instead of the individual "Build *" matrix legs: a docs-only PR
+  # skips the build job entirely (see determine-jobs), and a skipped matrix leg
+  # never reports its own named check, so requiring those names directly would
+  # leave a docs-only PR waiting forever. This aggregates the PR jobs and passes
+  # only when each one succeeded or was skipped, so a skipped build still merges
+  # while a real build failure (or a cancelled run) blocks the merge.
+  ci-status:
+    name: CI Status
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - determine-jobs
+      - build
+      - pr-info
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | jq
+          echo "$NEEDS_JSON" | jq -e 'all(.result == "success" or .result == "skipped")'
+
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_run'
+    # `always()` + an explicit result check, NOT the bare event guard: without
+    # a status function GitHub prepends `success()`, which is false whenever
+    # any job in the transitive needs chain was skipped — and `determine-jobs`
+    # (pull_request only) is always skipped on workflow_run events. That
+    # combination silently skipped this job on every release build after
+    # #357, stranding the draft release with stale assets.
+    if: always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Need the latest.json generator script + the JSON Schema it produces;
           # nothing else from the source tree is required by the release job.

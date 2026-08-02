@@ -34,7 +34,7 @@ echo ""
 
 SIGNED=0
 
-# Use find -L to follow symlinks (python, python3 are often symlinks to python3.13)
+# Use find -L to follow symlinks (python, python3 are often symlinks to python3.14)
 # Sign dylibs and .so files first (inside-out signing)
 echo "--- Signing shared libraries (.dylib and .so) ---"
 while IFS= read -r -d '' file; do

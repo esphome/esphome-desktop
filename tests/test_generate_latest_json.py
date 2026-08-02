@@ -269,3 +269,84 @@ def test_missing_published_at_falls_back_to_now() -> None:
     # Falls back to an ISO 8601 UTC timestamp (……Z). We don't assert the
     # exact value, only that it has the published shape.
     assert re.search(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", manifest["pub_date"])
+
+
+# --- the release gate -----------------------------------------------------
+#
+# build_platforms warns and skips a platform it can't match, which is right for
+# a transform but fatal as a release outcome: tauri-plugin-updater reads an
+# absent platform key as "up to date", so a dropped platform stops offering
+# updates silently and forever. The schema can't catch it (`platforms` requires
+# only one entry), so main() is the gate.
+
+
+def _artifacts_without(tmp_path: Path, *, drop: str) -> Path:
+    """Copy the artifacts fixture, omitting sig dirs whose name matches `drop`."""
+    dest = tmp_path / "artifacts"
+    for sig in ARTIFACTS_FIXTURE.rglob("*.sig"):
+        if not sig.is_file() or drop in sig.name:
+            continue
+        target = dest / sig.parent.name / sig.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(sig.read_text())
+    return dest
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, artifacts: Path, output: Path) -> int:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate_latest_json.py",
+            "--tag",
+            TAG,
+            "--repo",
+            REPO,
+            "--release-fixture",
+            str(RELEASE_FIXTURE),
+            "--artifacts-dir",
+            str(artifacts),
+            "--output",
+            str(output),
+        ],
+    )
+    return gen.main()
+
+
+def test_main_writes_manifest_when_every_platform_is_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "latest.json"
+    assert _run_main(monkeypatch, ARTIFACTS_FIXTURE, output) == 0
+    written = json.loads(output.read_text())
+    assert set(written["platforms"]) == {plat for plat, _ in gen.PLATFORM_SIG_MATCHERS}
+
+
+def test_main_fails_when_an_updater_platform_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The realistic drift: the bundle/artifact path changes, so one platform's
+    # .sig never lands, every build leg stays green, and the manifest quietly
+    # ships without Windows.
+    artifacts = _artifacts_without(tmp_path, drop="setup.exe")
+    output = tmp_path / "latest.json"
+
+    assert _run_main(monkeypatch, artifacts, output) == 1
+    err = capsys.readouterr().err
+    assert "::error::" in err
+    assert "windows-x86_64" in err
+    # The whole point is that the bad manifest never reaches the release.
+    assert not output.exists()
+
+
+def test_main_error_names_every_missing_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifacts = _artifacts_without(tmp_path, drop="app.tar.gz")
+    assert _run_main(monkeypatch, artifacts, tmp_path / "latest.json") == 1
+    err = capsys.readouterr().err
+    assert "darwin-aarch64" in err
+    assert "darwin-x86_64" in err

@@ -149,11 +149,29 @@ fn locale_candidates(locale: &str) -> Vec<String> {
         .collect()
 }
 
+/// The script subtag of a normalized locale, if present: `hans` in
+/// `zh-hans-cn`. Scripts are the only four-letter subtags in BCP 47
+/// (languages are 2–3 letters, regions two letters or three digits), so after
+/// normalization a four-letter alphabetic segment identifies the script
+/// without a lookup table.
+fn locale_script(normalized: &str) -> Option<&str> {
+    normalized
+        .split('-')
+        .find(|segment| segment.len() == 4 && segment.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
 /// Match the requested locale against the available locale stems.
 ///
 /// Tries each fallback candidate for an exact (normalized) match, then falls
 /// back to the first available stem for the same language (`fr` requested,
 /// only `fr-CA` shipped). Returns the stem exactly as embedded.
+///
+/// The language-only fallback never crosses a *script* boundary: a
+/// Simplified-Chinese (`zh-Hans`) user must not be served Traditional
+/// (`zh-Hant`) just because they share the `zh` language — the two are
+/// different writing systems, so falling through to English (the base) is the
+/// safer miss (esphome/esphome-desktop#373). A request that carries no script
+/// keeps the permissive same-language fallback.
 fn pick_locale<'a>(requested: &str, available: &[&'a str]) -> Option<&'a str> {
     let candidates = locale_candidates(requested);
     for candidate in &candidates {
@@ -165,15 +183,21 @@ fn pick_locale<'a>(requested: &str, available: &[&'a str]) -> Option<&'a str> {
         }
     }
     // Language-only fallback: any available stem whose language matches the
-    // broadest candidate (which is the bare language code).
+    // broadest candidate (which is the bare language code) and whose script,
+    // if both sides name one, agrees.
     let language = candidates.last()?;
+    let requested_normalized = normalize_locale(requested);
+    let requested_script = locale_script(&requested_normalized);
     available
         .iter()
         .find(|stem| {
-            normalize_locale(stem)
-                .split('-')
-                .next()
-                .is_some_and(|lang| lang == language)
+            let normalized = normalize_locale(stem);
+            let language_matches = normalized.split('-').next() == Some(language.as_str());
+            let script_agrees = match (requested_script, locale_script(&normalized)) {
+                (Some(requested), Some(available)) => requested == available,
+                _ => true,
+            };
+            language_matches && script_agrees
         })
         .copied()
 }
@@ -367,6 +391,43 @@ mod tests {
     fn pick_locale_no_match() {
         assert_eq!(pick_locale("ja", &["de", "fr"]), None);
         assert_eq!(pick_locale("", &["de", "fr"]), None);
+    }
+
+    #[test]
+    fn pick_locale_does_not_cross_script_boundary() {
+        // A Simplified-Chinese user must not be handed Traditional via the
+        // language-only fallback (and vice versa): different writing systems,
+        // so fall through to English instead (esphome-desktop#373).
+        assert_eq!(pick_locale("zh-Hans-CN", &["de", "zh-Hant"]), None);
+        assert_eq!(pick_locale("zh-Hant-TW", &["de", "zh-Hans"]), None);
+    }
+
+    #[test]
+    fn pick_locale_same_script_still_falls_back() {
+        // Same script, different region — the fallback should still land.
+        assert_eq!(
+            pick_locale("zh-Hans-CN", &["de", "zh-Hans-SG"]),
+            Some("zh-Hans-SG")
+        );
+        assert_eq!(pick_locale("zh-Hans", &["zh-Hans-CN"]), Some("zh-Hans-CN"));
+    }
+
+    #[test]
+    fn pick_locale_scriptless_request_keeps_permissive_fallback() {
+        // A request without a script keeps the same-language fallback: a bare
+        // `zh` has no script preference, and non-scripted languages (`fr`) are
+        // unaffected.
+        assert_eq!(pick_locale("zh", &["zh-Hant"]), Some("zh-Hant"));
+        assert_eq!(pick_locale("fr", &["de", "fr-CA"]), Some("fr-CA"));
+    }
+
+    #[test]
+    fn locale_script_extracts_only_the_script_subtag() {
+        assert_eq!(locale_script("zh-hans-cn"), Some("hans"));
+        assert_eq!(locale_script("sr-latn"), Some("latn"));
+        // Region (two letters / three digits) and bare language carry no script.
+        assert_eq!(locale_script("zh-cn"), None);
+        assert_eq!(locale_script("en"), None);
     }
 
     #[test]

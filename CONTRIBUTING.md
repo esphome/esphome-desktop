@@ -9,6 +9,32 @@ project and be sure to join us on [Discord](https://discord.gg/KhAMKrd).
 
 [Documentation](https://esphome.io) -- [Issues](https://github.com/esphome/esphome-desktop/issues) -- [Feature requests](https://github.com/orgs/esphome/discussions)
 
+## Code structure policies
+
+**File size cap: 800 lines.** Split a file into submodules before it crosses
+the cap; there are no exemptions for new files. `Lint & Test` enforces this
+(`.github/scripts/check_file_size.py`), and a pre-commit hook runs the same
+check locally.
+
+The cap counts code, not tests. A top-level `#[cfg(test)] mod` block does not
+count against it, wherever in the file it sits, so a well tested file is never
+pushed over the cap by its own tests. Everything else does count: code that
+follows a test module, and a test module nested inside another `mod`.
+
+The script's `EXEMPT` list is empty: the six files that were already over the
+cap when it landed have all since been brought back under it. The mechanism
+stays for the next rule that lands on top of in-flight work — an exempt file is
+allowed to grow, so nothing is blocked by a rule it predates — but the list only
+shrinks. Once an exempt file drops to the cap or below, the check fails until
+its entry is removed, and the cap holds it there from then on. Don't add
+entries; split the file instead.
+
+To check before pushing:
+
+```bash
+python3 .github/scripts/check_file_size.py   # `python` on Windows
+```
+
 ## Running the Rust checks locally
 
 The `src-tauri` crate is gated in CI by a `Lint & Test` workflow. Run the same
@@ -31,7 +57,7 @@ locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 The first-party Python (the release tooling under `.github/scripts/` and the
 runtime helpers under `src-tauri/scripts/` that the Rust binary embeds) is gated
 by the `Scripts Test` workflow, which lints with `ruff` and runs the `pytest`
-suite across macOS, Windows, and Linux on the CPython 3.13 line we bundle:
+suite across macOS, Windows, and Linux on the CPython 3.14 line we bundle:
 
 ```bash
 python3 -m pip install pytest ruff   # one-time
@@ -39,6 +65,10 @@ ruff check .
 ruff format --check .
 python3 -m pytest tests/ -v
 ```
+
+On Windows, use `py -m` rather than `python3`; a python.org install never ships a
+`python3.exe`, and the `py` launcher is the reliable spelling there (plain
+`python` works only if you added it to PATH during install).
 
 ---
 

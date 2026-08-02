@@ -2,6 +2,13 @@
 
 A cross-platform desktop application that bundles ESPHome with Python and runs the ESPHome Device Builder as a background daemon with system tray integration.
 
+> **Status:** stable and ready for production use. With the 1.0.0 release, the
+> recovery system works the same on every platform (Windows was the last to
+> gain it). Issues and feedback welcome; please check
+> [existing issues](https://github.com/esphome/esphome-desktop/issues) first,
+> and join the [Discord channel](https://discord.gg/Rf2jWGVjaK) for live
+> discussion.
+
 ## Features
 
 - **System Tray Integration**: Runs in the background with a system tray icon
@@ -9,7 +16,7 @@ A cross-platform desktop application that bundles ESPHome with Python and runs t
 - **Auto-Updates**: Checks for ESPHome (Python) updates and notifies you
 - **Self-Updating App**: macOS DMG, Windows NSIS, and Linux AppImage installs can update themselves in-place from GitHub Releases
 - **Cross-Platform**: Native installers for macOS (DMG), Windows (NSIS), and Linux (AppImage/deb)
-- **Bundled Python**: Includes a full Python 3.13 runtime - no system Python required
+- **Bundled Python**: Includes a full Python 3.14 runtime - no system Python required
 
 ## Installation
 
@@ -24,6 +31,17 @@ Download the latest release for your platform from [desktop.esphome.io](https://
 | Windows               | `ESPHome.Device.Builder_x.x.x_x64-setup.exe`                    |
 | Linux (x86_64)        | `ESPHome.Device.Builder_x.x.x_amd64.AppImage` or `.deb`         |
 | Linux (aarch64)       | `ESPHome.Device.Builder_x.x.x_aarch64.AppImage` or `_arm64.deb` |
+
+### Upgrading from a 0.x pre-release
+
+If you were running a pre-release 0.x version on Windows, do a one-time clean
+upgrade: uninstall the app, reboot, then install the latest release. The reboot
+ensures no backend process from the old install is left running
+([#322](https://github.com/esphome/esphome-desktop/issues/322)). This only
+affects Windows; macOS and Linux installs update in place as usual. Your
+ESPHome configurations in `~/esphome` are not touched by the uninstaller, and the
+`C:\esphb` build data folder is also kept (see
+[Data Locations](#data-locations)), so builds stay warm.
 
 ### First Run
 

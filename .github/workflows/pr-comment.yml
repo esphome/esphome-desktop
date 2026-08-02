@@ -46,6 +46,7 @@ jobs:
           echo "number=${number}" >> "$GITHUB_OUTPUT"
 
       - name: Build artifact comment
+        id: build-comment
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |
@@ -56,6 +57,20 @@ jobs:
 
           artifacts_json=$(gh api "repos/${repo}/actions/runs/${run_id}/artifacts" --paginate)
           artifacts=$(echo "$artifacts_json" | jq -s '[.[].artifacts[]]')
+
+          # A docs-only PR skips the whole build matrix (determine_jobs.py),
+          # so the run carries no installers, only pr-info.json. Posting the
+          # comment then would produce empty platform headings, and since the
+          # classifier looks at the PR's full diff, such a PR never gains
+          # artifacts on a later push either; skip commenting entirely.
+          installers=$(echo "$artifacts" | jq \
+            '[.[] | select(.name | test("\\.(exe|AppImage|deb|rpm|dmg)$"; "i"))] | length')
+          if [ "$installers" -eq 0 ]; then
+            echo "No installer artifacts in run ${run_id}; skipping the comment."
+            echo "post=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "post=true" >> "$GITHUB_OUTPUT"
 
           write_links() {
             local ext="$1"
@@ -113,6 +128,7 @@ jobs:
           EOF
 
       - name: Post or update comment
+        if: steps.build-comment.outputs.post == 'true'
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
         run: |

@@ -4,15 +4,19 @@
 //! a one-shot request/reply exchange needs. `logs` never touches the channel
 //! at all — the log paths are deterministic from the bundle identifier.
 
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+#[cfg(windows)]
+use std::io::Read;
+use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use super::protocol::{
-    self, backend_name, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
+    backend_name, channel_name, ErrCode, Reply, Request, StatusReply, STEP_APP_RESTARTING,
 };
-use crate::{ApiMethod, CliCommand, OnOff};
+use crate::{CliCommand, OnOff};
+
+mod api;
+mod logs;
 
 /// The operation succeeded.
 const EXIT_SUCCESS: u8 = 0;
@@ -29,14 +33,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(180);
 /// Switches and updates download and pip-install packages.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(600);
-/// `check-update` hits GitHub and PyPI and spawns Python for the installed
-/// versions; more headroom than a local request, far less than an install.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Lines shown by the default (non-follow) `logs` tail.
-const TAIL_LINES: usize = 50;
-/// How far back from the end of the file the tail looks.
-const TAIL_WINDOW_BYTES: u64 = 64 * 1024;
 
 /// Entry point for all subcommands; returns the process exit code.
 /// (On Windows, `main` has already attached the parent console.)
@@ -71,11 +67,11 @@ pub(crate) fn run(command: CliCommand) -> ExitCode {
             ),
         },
         CliCommand::Update => simple(Request::Update, UPDATE_TIMEOUT),
-        CliCommand::Logs { follow, open } => logs_cmd(follow, open),
+        CliCommand::Logs { follow, open } => logs::run(follow, open),
         CliCommand::Restart => simple(Request::Restart, RESTART_TIMEOUT),
         CliCommand::Quit => simple(Request::Quit, DEFAULT_TIMEOUT),
         CliCommand::Status { json } => status_cmd(json),
-        CliCommand::Api(method) => api(method),
+        CliCommand::Api(method) => api::run(method),
     }
 }
 
@@ -95,6 +91,20 @@ enum ConnectError {
     /// The socket path itself is unusable (e.g. too long for `sun_path`).
     /// "Not running" would mislead here — the app may well be running with
     /// its own server disabled for the same reason.
+    ///
+    /// Only ever constructed on Unix: `sun_path` is a Unix domain socket
+    /// limit, and the Windows `connect()` opens a fixed-name pipe that can
+    /// only fail as `NotRunning`. Kept on both platforms and allowed to be
+    /// dead on Windows rather than `#[cfg(unix)]`-gated.
+    ///
+    /// Gating was tried and does not work: it leaves `ConnectError`
+    /// single-valued on Windows, so the `Err(ConnectError::NotRunning)` arms in
+    /// `open_cmd` and `status_cmd` become exhaustive and the catch-all
+    /// `Err(e) => connect_failed(e)` after each one is an unreachable-pattern
+    /// error. Those two arms never name `BadPath`, so they don't turn up when
+    /// you grep for it. A uniform enum shape keeps every match identical on
+    /// both platforms and doesn't leave the same trap for the next catch-all.
+    #[cfg_attr(windows, allow(dead_code))]
     BadPath(String),
     /// Connecting failed — the usual "app is not running" case.
     NotRunning,
@@ -583,269 +593,6 @@ fn offline_status(json: bool) -> ExitCode {
     ExitCode::from(EXIT_NOT_RUNNING)
 }
 
-/// `api <method>`: the machine-readable contract the device-builder dashboard
-/// codes against. Emits newline-delimited JSON only — one object per line, on
-/// stdout, valid JSON even for errors — so the human CLI's wording stays free
-/// to change. Versioned via [`protocol::API_SCHEMA_VERSION`].
-fn api(method: ApiMethod) -> ExitCode {
-    let (request, timeout) = match method {
-        // Pure handshake: answer even while the app is starting (or absent), so
-        // the dashboard can gate on the version before making any other call.
-        ApiMethod::Version => {
-            println!(
-                "{}",
-                serde_json::json!({ "schema_version": protocol::API_SCHEMA_VERSION })
-            );
-            return ExitCode::SUCCESS;
-        }
-        ApiMethod::Status => (Request::Status, DEFAULT_TIMEOUT),
-        ApiMethod::CheckUpdate => (Request::CheckUpdate, CHECK_TIMEOUT),
-        // Non-interactive by construction: the server restarts the backend
-        // without any consent, so an unattended remote builder recovers itself.
-        ApiMethod::Update => (Request::Update, UPDATE_TIMEOUT),
-    };
-    // The stream helpers work in raw exit codes so they stay unit-testable
-    // (ExitCode is opaque); wrap once here at the boundary.
-    ExitCode::from(api_stream(&request, timeout))
-}
-
-/// Connect, send one request, and forward each server reply as a validated JSON
-/// line (trimmed of surrounding whitespace) until the terminal reply or EOF. The
-/// exit code mirrors the terminal reply for shell callers; the JSON line is
-/// authoritative for the dashboard.
-fn api_stream(request: &Request, timeout: Duration) -> u8 {
-    let mut stream = match connect() {
-        Ok(stream) => stream,
-        Err(ConnectError::NotRunning) => {
-            return api_err_line("not_running", "the app is not running", EXIT_NOT_RUNNING)
-        }
-        Err(ConnectError::BadPath(message)) => {
-            return api_err_line("bad_path", &message, EXIT_FAILED)
-        }
-    };
-    if let Err(e) = send_request(&mut stream, request) {
-        return match e {
-            SendError::Encode(e) => api_err_line("encode_failed", &e.to_string(), EXIT_FAILED),
-            SendError::Send(e) => api_err_line("send_failed", &e.to_string(), EXIT_FAILED),
-        };
-    }
-    api_read(reply_reader(stream, timeout))
-}
-
-/// Drain reply lines, forwarding each validated JSON line, until a terminal reply.
-/// Returns the exit code the terminal reply maps to.
-fn api_read<R: BufRead>(mut reader: R) -> u8 {
-    let mut saw_restart_marker = false;
-    let mut line = String::new();
-    loop {
-        match read_reply_line(&mut reader, &mut line) {
-            LineStep::Got => {}
-            LineStep::Eof => {
-                // A desktop self-update relaunch tears the connection down right
-                // after its terminal `ok`; the marker tells us that's success.
-                return if saw_restart_marker {
-                    EXIT_SUCCESS
-                } else {
-                    api_err_line(
-                        "connection_closed",
-                        "connection closed before the operation finished",
-                        EXIT_FAILED,
-                    )
-                };
-            }
-            LineStep::Timeout => {
-                return api_err_line(
-                    "timeout",
-                    "timed out waiting for the app's reply; the operation may still be running",
-                    EXIT_FAILED,
-                )
-            }
-            LineStep::ReadErr(e) => {
-                return api_err_line("read_failed", &e.to_string(), EXIT_FAILED)
-            }
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Parse before echoing: the `api` contract is NDJSON-only, so a line
-        // that is not valid JSON must never reach stdout (it would break a
-        // dashboard doing `json.loads` per line). Guard that case up front, then
-        // echo exactly once for every valid-JSON line.
-        let reply = serde_json::from_str::<Reply>(trimmed);
-        if reply.is_err() && serde_json::from_str::<serde_json::Value>(trimmed).is_err() {
-            return api_err_line(
-                "protocol_error",
-                "the app sent a line that was not valid JSON",
-                EXIT_FAILED,
-            );
-        }
-        echo_json_line(trimmed);
-        match reply {
-            Ok(Reply::Ok { .. }) | Ok(Reply::Status(_)) | Ok(Reply::UpdateCheck(_)) => {
-                return EXIT_SUCCESS
-            }
-            Ok(Reply::Err { code, .. }) => {
-                return match code {
-                    ErrCode::Busy => EXIT_BUSY,
-                    ErrCode::Failed => EXIT_FAILED,
-                }
-            }
-            Ok(Reply::Progress { step, .. }) => {
-                if step == STEP_APP_RESTARTING {
-                    saw_restart_marker = true;
-                }
-            }
-            // Valid JSON, just not a Reply we recognize: already echoed (still
-            // NDJSON); keep reading for the terminal reply. This is defensive —
-            // the client and app are the same binary, so their reply shapes
-            // always match — but it keeps a stray line from ending the stream.
-            Err(_) => {}
-        }
-    }
-}
-
-/// Print one already-validated JSON line and flush, so a dashboard consuming
-/// this process's stdout as a pipe sees each progress line promptly rather than
-/// only when the OS buffer fills.
-fn echo_json_line(line: &str) {
-    let mut out = std::io::stdout();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
-}
-
-/// Print a synthesized client-side error as one JSON line and return `exit`.
-/// Client-only `code`s (`not_running`, `timeout`, ...) sit alongside the
-/// server's `busy`/`failed`; the dashboard treats `code` as an opaque string.
-fn api_err_line(code: &str, message: &str, exit: u8) -> u8 {
-    println!(
-        "{}",
-        serde_json::json!({ "type": "err", "code": code, "message": message })
-    );
-    exit
-}
-
-/// `logs`: print/tail the dashboard log, or open the logs folder. Fully
-/// offline — works whether or not the app is running.
-fn logs_cmd(follow: bool, open_dir: bool) -> ExitCode {
-    let Some(logs_dir) = crate::platform::data_dir_no_handle().map(|d| d.join("logs")) else {
-        return fail("could not resolve the logs directory");
-    };
-    if open_dir {
-        return match open::that_detached(&logs_dir) {
-            Ok(()) => {
-                println!("opened {}", logs_dir.display());
-                ExitCode::SUCCESS
-            }
-            Err(e) => fail(format!("failed to open {}: {e}", logs_dir.display())),
-        };
-    }
-
-    let log_path = logs_dir.join(crate::daemon::DASHBOARD_LOG_NAME);
-    println!("Dashboard log: {}", log_path.display());
-    println!();
-    let pos = match print_tail(&log_path) {
-        Ok(pos) => pos,
-        Err(e) => {
-            if !follow {
-                return fail(format!("could not read {}: {e}", log_path.display()));
-            }
-            println!("(waiting for {} to appear)", log_path.display());
-            0
-        }
-    };
-    if !follow {
-        return ExitCode::SUCCESS;
-    }
-    follow_log(&log_path, pos)
-}
-
-/// Print the last [`TAIL_LINES`] lines of the file and return the offset the
-/// follow loop should continue from (the end of the file at read time).
-fn print_tail(path: &Path) -> std::io::Result<u64> {
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let start = len.saturating_sub(TAIL_WINDOW_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf);
-    for line in tail_lines(&text, TAIL_LINES, start > 0) {
-        println!("{line}");
-    }
-    // Continue from what was actually printed, not the pre-read length —
-    // bytes appended during the read would otherwise print twice.
-    Ok(start + buf.len() as u64)
-}
-
-/// Last `n` lines of `text`. With `truncated`, the first line is dropped:
-/// the read started mid-file, so it is almost certainly partial.
-fn tail_lines(text: &str, n: usize, truncated: bool) -> Vec<&str> {
-    let mut lines: Vec<&str> = text.lines().collect();
-    if truncated && !lines.is_empty() {
-        lines.remove(0);
-    }
-    let skip = lines.len().saturating_sub(n);
-    lines.split_off(skip)
-}
-
-/// Follow the log by polling for growth. The daemon rotates dashboard.log on
-/// every backend start, so a rotation is detected by file identity where the
-/// platform exposes one — a shrunk length alone misses the case where the
-/// fresh file outgrows the old offset within one poll, which would silently
-/// skip its head — with the length check as the fallback.
-fn follow_log(path: &Path, mut pos: u64) -> ExitCode {
-    let mut identity = std::fs::metadata(path)
-        .ok()
-        .as_ref()
-        .and_then(file_identity);
-    loop {
-        std::thread::sleep(Duration::from_millis(500));
-        let Ok(meta) = std::fs::metadata(path) else {
-            pos = 0;
-            identity = None;
-            continue;
-        };
-        let current = file_identity(&meta);
-        if (current.is_some() && current != identity) || meta.len() < pos {
-            if pos > 0 {
-                println!("--- log rotated ---");
-            }
-            pos = 0;
-        }
-        identity = current;
-        if meta.len() == pos {
-            continue;
-        }
-        let Ok(mut file) = std::fs::File::open(path) else {
-            continue;
-        };
-        if file.seek(SeekFrom::Start(pos)).is_err() {
-            continue;
-        }
-        let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).is_err() {
-            continue;
-        }
-        pos += buf.len() as u64;
-        print!("{}", String::from_utf8_lossy(&buf));
-        let _ = std::io::stdout().flush();
-    }
-}
-
-/// Stable identity of the file behind the metadata, used to detect rotation.
-#[cfg(unix)]
-fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    Some((meta.dev(), meta.ino()))
-}
-
-/// Windows has no cheap inode equivalent here; the length heuristic remains.
-#[cfg(windows)]
-fn file_identity(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,94 +779,6 @@ mod tests {
     #[test]
     fn garbage_reply_is_a_failure() {
         assert!(matches!(outcome_for("not json\n"), Outcome::Failed(_)));
-    }
-
-    fn api_exit_for(lines: &str) -> u8 {
-        api_read(Cursor::new(lines.as_bytes().to_vec()))
-    }
-
-    #[test]
-    fn api_ok_after_progress_exits_success() {
-        let exit = api_exit_for(
-            "{\"type\":\"progress\",\"step\":\"esphome\",\"detail\":\"installing\"}\n\
-             {\"type\":\"ok\",\"message\":\"done\"}\n",
-        );
-        assert_eq!(exit, EXIT_SUCCESS);
-    }
-
-    #[test]
-    fn api_update_check_reply_exits_success() {
-        let raw = serde_json::to_string(&Reply::UpdateCheck(Box::new(
-            crate::control::protocol::UpdateCheckReply {
-                any_available: false,
-                app: crate::control::protocol::ComponentUpdate::not_installed(),
-                esphome: crate::control::protocol::ComponentUpdate::not_installed(),
-                device_builder: crate::control::protocol::ComponentUpdate::not_installed(),
-            },
-        )))
-        .unwrap();
-        assert_eq!(api_exit_for(&format!("{raw}\n")), EXIT_SUCCESS);
-    }
-
-    #[test]
-    fn api_busy_and_failed_map_to_their_exit_codes() {
-        assert_eq!(
-            api_exit_for("{\"type\":\"err\",\"message\":\"busy\",\"code\":\"busy\"}\n"),
-            EXIT_BUSY
-        );
-        assert_eq!(
-            api_exit_for("{\"type\":\"err\",\"message\":\"boom\",\"code\":\"failed\"}\n"),
-            EXIT_FAILED
-        );
-    }
-
-    #[test]
-    fn api_eof_after_restart_marker_is_success() {
-        // The load-bearing case for unattended builders: the self-update
-        // relaunch closes the connection after the marker, which is success.
-        let exit = api_exit_for(
-            "{\"type\":\"progress\",\"step\":\"app_restarting\",\"detail\":\"restarting\"}\n",
-        );
-        assert_eq!(exit, EXIT_SUCCESS);
-    }
-
-    #[test]
-    fn api_eof_without_terminal_reply_is_a_failure() {
-        let exit =
-            api_exit_for("{\"type\":\"progress\",\"step\":\"stop\",\"detail\":\"stopping\"}\n");
-        assert_eq!(exit, EXIT_FAILED);
-    }
-
-    #[test]
-    fn api_non_json_line_is_a_protocol_error() {
-        // The `api` contract is NDJSON-only: a line that isn't valid JSON must
-        // not be echoed as-is (it would break a per-line `json.loads`); it ends
-        // the stream with a synthesized JSON error instead.
-        let exit = api_exit_for("not json\n{\"type\":\"ok\",\"message\":\"done\"}\n");
-        assert_eq!(exit, EXIT_FAILED);
-    }
-
-    #[test]
-    fn api_unknown_json_variant_is_echoed_and_stream_continues() {
-        // A line that is valid JSON but not a Reply we recognize (e.g. a newer
-        // server variant) is still NDJSON, so it's forwarded and the following
-        // terminal reply still decides the exit code.
-        let exit = api_exit_for("{\"type\":\"future\"}\n{\"type\":\"ok\",\"message\":\"done\"}\n");
-        assert_eq!(exit, EXIT_SUCCESS);
-    }
-
-    #[test]
-    fn tail_lines_keeps_only_the_last_n() {
-        let text = "a\nb\nc\nd\ne\n";
-        assert_eq!(tail_lines(text, 3, false), vec!["c", "d", "e"]);
-        assert_eq!(tail_lines(text, 10, false), vec!["a", "b", "c", "d", "e"]);
-    }
-
-    #[test]
-    fn tail_lines_drops_partial_first_line_when_truncated() {
-        // A mid-file read starts inside a line; the fragment must not be shown.
-        let text = "tial line\nb\nc\n";
-        assert_eq!(tail_lines(text, 10, true), vec!["b", "c"]);
     }
 
     #[cfg(unix)]
