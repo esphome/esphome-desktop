@@ -87,8 +87,9 @@ Write-Host 'PASS: the real uninstall removed the orphaned trees and the install 
 # and no main exe beside it: the third sentinel must fire the wipe anyway.
 # This gate fails closed and silently (a comparison typo just skips the
 # wipe and the installer still exits 0), so only this case evaluates it.
-$strandedOrphan = Join-Path $InstallDir `
-    "$BundledPythonDirName\Lib\site-packages\esphome\components\rp2040\overlay_orphan_probe.py"
+# The deep, field-failure-shaped probe is the last $Probes entry; reuse it
+# rather than spelling the path a second time.
+$strandedOrphan = $Probes[-1]
 New-Item -ItemType Directory -Force (Split-Path $strandedOrphan) | Out-Null
 Set-Content -Path $strandedOrphan -Value 'stranded by an old uninstaller' -Encoding ascii
 Install-Bundle
