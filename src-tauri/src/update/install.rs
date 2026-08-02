@@ -110,38 +110,57 @@ fn acquire_heal_permit(
     }
 }
 
-/// Detect the installed device-builder version, healing a duplicate dist-info
-/// pileup once if the first lookup cannot determine a version.
+/// Orchestrate detect → permit → heal → re-detect.
 ///
-/// A `None` result is the exact symptom of the pileup (#190), so prune the
+/// A `None` detection is the exact symptom of the pileup (#190), so prune the
 /// duplicates and re-query before giving up. A genuinely-absent package stays
-/// `None` (dedup finds nothing to remove), at the cost of one extra Python spawn
-/// only on the already-unusual not-determinable path.
+/// `None` (dedup finds nothing to remove), at the cost of one extra Python
+/// spawn only on the already-unusual not-determinable path. A denied permit
+/// skips the heal: an undeterminable version then is far more likely a
+/// concurrent install's transient state than the #190 pileup, and a real
+/// pileup is still healed by the next check once the guard frees. A failed
+/// heal still re-queries — best-effort, but not invisible.
 ///
-/// Whether the heal may run is the caller's knowledge, not this function's:
-/// see [`HealPolicy`] and [`acquire_heal_permit`]. When it stands down, an
-/// undeterminable version is far more likely a concurrent install's transient
-/// state than the #190 pileup, and a real pileup is still healed by the next
-/// check once the guard frees.
-fn detect_device_builder_version_with_heal(
-    app_handle: &AppHandle,
-    caller_holds_guard: bool,
-) -> Result<Option<String>> {
-    let installed = get_installed_device_builder_version(app_handle)?;
+/// The steps are injected, exactly like [`install_with_record_recovery`]'s,
+/// so this policy stays testable without an `AppHandle` or a live
+/// interpreter.
+fn heal_and_redetect<D, H, P>(detect: D, heal: H, permit: P) -> Result<Option<String>>
+where
+    D: Fn() -> Result<Option<String>>,
+    H: FnOnce() -> Result<()>,
+    P: FnOnce() -> Option<Option<UpdateGuard>>,
+{
+    let installed = detect()?;
     if installed.is_some() {
         return Ok(installed);
     }
-    let Some(_permit) = acquire_heal_permit(caller_holds_guard, update_guard_flag(app_handle))
-    else {
+    let Some(_permit) = permit() else {
         info!("skipping the dist-info heal: another update sequence is in flight");
         return Ok(installed);
     };
-    if let Err(e) = dedupe_device_builder_dist_info(app_handle) {
+    if let Err(e) = heal() {
         // The heal is best-effort, but a failed attempt shouldn't be invisible:
         // the re-query below will just return the same undeterminable result.
         warn!("device-builder dist-info heal failed: {e}");
     }
-    get_installed_device_builder_version(app_handle)
+    detect()
+}
+
+/// Detect the installed device-builder version, healing a duplicate dist-info
+/// pileup once if the first lookup cannot determine a version.
+///
+/// The policy lives in [`heal_and_redetect`]; whether the heal may run is the
+/// caller's knowledge, not this function's (see [`HealPolicy`] and
+/// [`acquire_heal_permit`]).
+fn detect_device_builder_version_with_heal(
+    app_handle: &AppHandle,
+    caller_holds_guard: bool,
+) -> Result<Option<String>> {
+    heal_and_redetect(
+        || get_installed_device_builder_version(app_handle),
+        || dedupe_device_builder_dist_info(app_handle),
+        || acquire_heal_permit(caller_holds_guard, update_guard_flag(app_handle)),
+    )
 }
 
 /// Async wrapper around the blocking [`detect_device_builder_version_with_heal`].
@@ -569,6 +588,90 @@ mod tests {
 
         // No managed state (unit tests): no guard exists to take.
         assert!(matches!(acquire_heal_permit(false, None), Some(None)));
+    }
+
+    /// Drive [`heal_and_redetect`] against canned detections. `detections` is
+    /// what each successive detect returns; `permit` grants or denies the
+    /// heal. Returns the result plus (detects run, heals run).
+    fn drive_heal(
+        detections: Vec<Result<Option<String>>>,
+        permit_granted: bool,
+        heal: Result<()>,
+    ) -> (Result<Option<String>>, (usize, usize)) {
+        use std::cell::{Cell, RefCell};
+
+        let queue = RefCell::new(detections.into_iter());
+        let detects = Cell::new(0);
+        let heals = Cell::new(0);
+        let heal = RefCell::new(Some(heal));
+
+        let result = heal_and_redetect(
+            || {
+                detects.set(detects.get() + 1);
+                queue
+                    .borrow_mut()
+                    .next()
+                    .expect("detect ran more times than the test planned for")
+            },
+            || {
+                heals.set(heals.get() + 1);
+                heal.borrow_mut().take().expect("healed twice")
+            },
+            || permit_granted.then_some(None),
+        );
+        (result, (detects.get(), heals.get()))
+    }
+
+    #[test]
+    fn heal_and_redetect_returns_a_determinable_version_without_healing() {
+        // A version the first lookup resolves needs no heal: the destructive
+        // prune must not run on a healthy tree.
+        let (result, counts) = drive_heal(vec![Ok(Some("1.8.2".into()))], true, Ok(()));
+        assert_eq!(result.unwrap().as_deref(), Some("1.8.2"));
+        assert_eq!(counts, (1, 0));
+    }
+
+    #[test]
+    fn heal_and_redetect_heals_once_and_requeries() {
+        // The #190 shape: undeterminable, then the prune clears the pileup
+        // and the re-query resolves.
+        let (result, counts) = drive_heal(vec![Ok(None), Ok(Some("1.8.2".into()))], true, Ok(()));
+        assert_eq!(result.unwrap().as_deref(), Some("1.8.2"));
+        assert_eq!(counts, (2, 1));
+    }
+
+    #[test]
+    fn heal_and_redetect_stands_down_without_a_permit() {
+        // A denied permit means an update sequence is in flight, and an
+        // undeterminable version is then more likely pip mid-install than
+        // the pileup: no heal, no second spawn, the None is reported as is.
+        let (result, counts) = drive_heal(vec![Ok(None)], false, Ok(()));
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(counts, (1, 0));
+    }
+
+    #[test]
+    fn heal_and_redetect_requeries_even_after_a_failed_heal() {
+        // Best-effort, but not silent, and never a reason to skip the
+        // re-query: the second lookup reports whatever is true afterwards.
+        let (result, counts) = drive_heal(
+            vec![Ok(None), Ok(None)],
+            true,
+            Err(anyhow::anyhow!("interpreter is broken")),
+        );
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(counts, (2, 1));
+    }
+
+    #[test]
+    fn heal_and_redetect_propagates_a_failed_detection_unhealed() {
+        // Err means the check itself could not run (Python missing), which
+        // implicates nothing about the tree: pruning on it would be
+        // destructive action on zero evidence.
+        let (result, counts) =
+            drive_heal(vec![Err(anyhow::anyhow!("no interpreter"))], true, Ok(()));
+        assert!(result.is_err());
+        assert_eq!(counts, (1, 0));
     }
 
     #[test]
