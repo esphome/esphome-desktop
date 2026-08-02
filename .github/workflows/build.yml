@@ -621,6 +621,19 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/e2e_windows_firewall.ps1
 
+      # The overlay wipe (#417): the installer lays files over $INSTDIR
+      # without deleting the previous release's, so the preinstall hook must
+      # wipe the bundled trees (a stranded esphome component shadowed its
+      # rename alias, failed every config read, and made the repair loop
+      # forever) and reset the repair budget, and a real uninstall must not
+      # strand orphaned trees. The drift tests prove the hook lines exist;
+      # only this proves them against the real installer. Runs after the
+      # firewall script, which leaves the runner uninstalled.
+      - name: E2E overlay wipe (Windows CI)
+        if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
+        shell: pwsh
+        run: ./.github/scripts/e2e_windows_overlay_wipe.ps1
+
       - name: Upload NSIS updater signature
         if: contains(matrix.bundles, 'nsis') && github.event_name == 'workflow_run'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

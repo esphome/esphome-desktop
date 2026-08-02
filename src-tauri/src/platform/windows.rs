@@ -252,4 +252,120 @@ mod tests {
             "installer-hooks.nsi must delete the marker under the bundle identifier's local data dir"
         );
     }
+
+    /// `installer-hooks.nsi` with its comment lines removed. Every drift
+    /// assertion matches against this: the prose around the hooks quotes the
+    /// same statements, and matching raw text would keep a test green with a
+    /// statement deleted (or redden it over a comment edit).
+    fn installer_hook_code() -> String {
+        include_str!("../../installer-hooks.nsi")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Each install must lay down pristine resource trees. The generated
+    /// installer overlays `$INSTDIR` without deleting the previous release's
+    /// files, and a polluted bundled site-packages breaks esphome outright:
+    /// the stranded `components/rp2040/` package shadowed the `rp2` alias
+    /// after the rename, failed every config read, and made the
+    /// wipe-and-recopy repair loop forever because the copy source itself
+    /// carried the orphan. The wipe lives in `installer-hooks.nsi`; this
+    /// pins it there for every bundled tree the app ships.
+    #[test]
+    fn installer_hook_wipes_the_previous_bundled_trees() {
+        let code = installer_hook_code();
+        let hooks = code.as_str();
+        // The authoritative list of overlaid trees is `bundle.resources`: a
+        // resource dir added there without a matching wipe would quietly
+        // start accumulating the previous release's files again — the exact
+        // class of rot the wipe exists to stop.
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json"))
+            .expect("tauri.conf.json must parse");
+        let resources: Vec<&str> = conf["bundle"]["resources"]
+            .as_array()
+            .expect("bundle.resources must be an array")
+            .iter()
+            .map(|r| {
+                r.as_str()
+                    .expect("bundle.resources entries must be plain dir names")
+            })
+            .collect();
+        assert!(
+            !resources.is_empty(),
+            "bundle.resources is empty; the wipe drift test has nothing to pin"
+        );
+        for dir in &resources {
+            // Twice: the preinstall wipe (before the overlay) and the
+            // post-uninstall wipe (the manifest-only uninstall strands
+            // orphaned files, keeping the tree and $INSTDIR behind).
+            assert_eq!(
+                hooks
+                    .matches(&format!("RMDir /r \"$INSTDIR\\{dir}\""))
+                    .count(),
+                2,
+                "installer-hooks.nsi must wipe the bundled {dir} tree both before the overlay \
+                 and after a real uninstall"
+            );
+        }
+        // The template's own RMDir "$INSTDIR" runs before the post-uninstall
+        // hook, so the hook must retry it after emptying the trees or a real
+        // uninstall strands an empty install dir forever.
+        assert!(
+            hooks
+                .lines()
+                .any(|line| line.trim() == "RMDir \"$INSTDIR\""),
+            "installer-hooks.nsi must retry removing $INSTDIR after the post-uninstall wipe"
+        );
+        // The post-uninstall wipe must stay confined to the default install
+        // location: $INSTDIR is user-selectable, and a merged directory can
+        // hold a python/ tree that predates us.
+        assert!(
+            hooks.contains(r#"${If} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}""#),
+            "installer-hooks.nsi must gate the post-uninstall wipe to the default install dir"
+        );
+        // The wipe must only fire on a directory that provably holds a
+        // previous install: an interactive install pointed at an unrelated
+        // non-empty directory must not delete a python/, git/ or ccache/
+        // folder that was never ours.
+        for sentinel in [
+            "${If} ${FileExists} \"$INSTDIR\\uninstall.exe\"",
+            "${OrIf} ${FileExists} \"$INSTDIR\\${MAINBINARYNAME}.exe\"",
+            // The default location counts as ours even with both files gone:
+            // uninstall-then-reinstall (the remedy a stuck user tries first)
+            // deletes them while an old uninstaller strands the orphans.
+            "${OrIf} $INSTDIR == \"$LOCALAPPDATA\\${PRODUCTNAME}\"",
+        ] {
+            assert!(
+                hooks.contains(sentinel),
+                "installer-hooks.nsi must gate the wipe on a previous-install sentinel: {sentinel}"
+            );
+        }
+    }
+
+    /// A fresh install lays down a pristine bundle, so the installer grants a
+    /// fresh repair budget; without it, reinstalling the same app version on
+    /// a budget-spent machine leaves every repair refused (the app only
+    /// clears the counter once a probe passes, and a same-version reinstall
+    /// triggers no refresh copy that would let one pass).
+    #[test]
+    fn installer_hook_resets_the_repair_budget() {
+        let code = installer_hook_code();
+        let hooks = code.as_str();
+        assert!(
+            hooks.contains(&format!(
+                "!define REPAIR_COUNT_MARKER \"{}\"",
+                super::super::health::REPAIR_COUNT_MARKER
+            )),
+            "installer-hooks.nsi must define the same repair-count marker name"
+        );
+        assert!(
+            hooks.contains(&format!(
+                "Delete \"$LOCALAPPDATA\\{}\\${{REPAIR_COUNT_MARKER}}\"",
+                super::super::BUNDLE_IDENTIFIER
+            )),
+            "installer-hooks.nsi must delete the repair counter so a reinstall gets a fresh budget"
+        );
+    }
 }

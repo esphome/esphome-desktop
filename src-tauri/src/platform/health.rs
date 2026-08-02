@@ -82,7 +82,11 @@ fn make_probe_dir() -> Result<PathBuf> {
 /// very repair it exists to bound: every launch would read zero, wipe,
 /// re-copy, and do it again forever — exactly the loop [`MAX_REPAIRS`] is
 /// here to stop.
-const REPAIR_COUNT_MARKER: &str = ".repair-count";
+/// Also deleted by the installer (`installer-hooks.nsi`, drift-tested in
+/// `windows.rs`): a fresh install lays down a pristine bundle, so it deserves
+/// a fresh budget — without that, "reinstall the app" leaves a budget-spent
+/// machine refusing the very repair the reinstall was meant to enable.
+pub(crate) const REPAIR_COUNT_MARKER: &str = ".repair-count";
 
 /// Maximum repairs triggered by a failing health probe before giving up.
 ///
