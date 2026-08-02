@@ -949,11 +949,9 @@ mod tests {
     fn run_python_capture_bounded_kills_a_child_that_will_not_exit() {
         // The probe runs in front of daemon.start(); an unbounded child there
         // means the backend never starts and nothing says why.
-        let python = test_python();
-        let python = python.as_path();
         let started = std::time::Instant::now();
         let err = run_python_capture_bounded(
-            python,
+            &test_python(),
             ["-c", "import time; time.sleep(600)"],
             std::time::Duration::from_millis(300),
         )
@@ -1151,6 +1149,12 @@ mod tests {
         static PYTHON: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         PYTHON
             .get_or_init(|| {
+                // Each candidate's fate is recorded so the panic reports what
+                // was actually observed: an absent `python` and a Store-alias
+                // `python` are different problems, and a message asserting a
+                // cause it never saw would misdirect exactly the way the
+                // original failure did.
+                let mut evidence: Vec<String> = Vec::new();
                 for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
                     // Bounded with the module's own primitive: a hung
                     // candidate (a misbehaving shim) must not stall the
@@ -1161,24 +1165,35 @@ mod tests {
                     // UnicodeEncodeError for an install path under a
                     // non-ASCII user profile — either way a valid
                     // interpreter would be skipped or garbled.
-                    let Ok(out) = run_python_capture_bounded(
+                    let out = match run_python_capture_bounded(
                         std::path::Path::new(program),
                         version_args.iter().copied().chain([
                             "-c",
                             "import sys; sys.stdout.buffer.write(sys.executable.encode('utf-8'))",
                         ]),
                         std::time::Duration::from_secs(30),
-                    ) else {
-                        continue;
+                    ) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            evidence.push(format!("`{program}` did not run: {e}"));
+                            continue;
+                        }
                     };
                     if !out.status.success() {
+                        evidence.push(format!(
+                            "`{program}` exited with {}: {}",
+                            out.status,
+                            tail_for_log(&String::from_utf8_lossy(&out.stderr))
+                        ));
                         continue;
                     }
                     let Ok(path) = std::str::from_utf8(&out.stdout) else {
+                        evidence.push(format!("`{program}` printed a non-UTF-8 sys.executable"));
                         continue;
                     };
                     let path = std::path::PathBuf::from(path.trim());
                     if path.as_os_str().is_empty() {
+                        evidence.push(format!("`{program}` printed an empty sys.executable"));
                         continue;
                     }
                     // A component check, not a substring one: a user dir
@@ -1187,16 +1202,21 @@ mod tests {
                         .components()
                         .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
                     {
+                        evidence.push(format!(
+                            "`{program}` is the Microsoft Store interpreter at {}",
+                            path.display()
+                        ));
                         continue;
                     }
                     return path;
                 }
                 panic!(
-                    "no real CPython found: `python` resolves to the Microsoft Store alias \
-                     (or nothing) and the `py` launcher found no install. The Store Python's \
-                     MSIX packaging creates child processes outside the parent's job \
-                     hierarchy, which defeats the job-based reaping these tests assert on \
-                     (#418); install a python.org CPython to run them."
+                    "no usable CPython found for the reaper tests ({}). The Microsoft \
+                     Store interpreter is rejected on purpose: its MSIX packaging creates \
+                     child processes outside the parent's job hierarchy, which defeats the \
+                     job-based reaping these tests assert on (#418). Install a python.org \
+                     CPython to run them.",
+                    evidence.join("; ")
                 )
             })
             .clone()
