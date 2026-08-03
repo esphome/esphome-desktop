@@ -594,6 +594,59 @@ def test_emit_outputs_multiline_value_uses_heredoc_form(
     assert content == ("body<<__GHA_EOF_BODY__\nline one\nline two\n__GHA_EOF_BODY__\n")
 
 
+def test_emit_outputs_widens_delimiter_colliding_with_the_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GitHub ends a heredoc value at the first line equal to the delimiter, so a
+    # body containing that delimiter on its own line would be truncated there and
+    # the rest read as further step outputs. The PR body is built from
+    # esphome.io's template, i.e. content from another repository, so the
+    # delimiter has to be widened until it provably cannot occur in the value.
+    out = tmp_path / "gha_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    gha.emit_outputs(body="before\n__GHA_EOF_BODY__\nafter")
+
+    content = out.read_text(encoding="utf-8")
+    assert content == (
+        "body<<__GHA_EOF_BODY__1__\n"
+        "before\n__GHA_EOF_BODY__\nafter\n"
+        "__GHA_EOF_BODY__1__\n"
+    )
+
+
+def test_emit_outputs_widens_delimiter_past_repeated_collisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The widened delimiter can itself collide, so the search has to keep going
+    # rather than widen once and assume it is now safe.
+    out = tmp_path / "gha_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    gha.emit_outputs(body="__GHA_EOF_BODY__\n__GHA_EOF_BODY__1__\nreal content")
+
+    content = out.read_text(encoding="utf-8")
+    assert content.startswith("body<<__GHA_EOF_BODY__2__\n")
+    assert content.endswith("\n__GHA_EOF_BODY__2__\n")
+    # The value itself survives intact, collisions and all.
+    assert "__GHA_EOF_BODY__\n__GHA_EOF_BODY__1__\nreal content\n" in content
+
+
+def test_emit_outputs_delimiter_collision_only_matches_whole_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GitHub compares the delimiter against the whole line, so a value that only
+    # mentions it mid-line is not a collision and must not force a wider
+    # delimiter - widening on a substring would be needless churn.
+    out = tmp_path / "gha_output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+
+    gha.emit_outputs(body="see __GHA_EOF_BODY__ inline\nsecond line")
+
+    content = out.read_text(encoding="utf-8")
+    assert content.startswith("body<<__GHA_EOF_BODY__\n")
+
+
 def test_emit_outputs_writes_to_stdout_without_github_output(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
