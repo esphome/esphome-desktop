@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bump FALLBACK_VERSION in the esphome.io install page to a released version.
 
-Run by .github/workflows/bump-docs-fallback-version.yml after a (non-pre)release
-is published, against a checkout of esphome/esphome.io. That repo's install page
+Run by .github/workflows/bump-docs-fallback-version.yml after a non-prerelease is
+published, against a checkout of esphome/esphome.io. That repo's install page
 resolves the current Device Builder version by fetching latest.json at build
 time and only falls back to this constant when the fetch fails (offline build,
 GitHub outage, HTTP error, or a version that fails the page's own validation).
@@ -57,8 +57,9 @@ INSTALL_SELECTOR = "src/components/InstallSelector.astro"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
 # Anchored on the declaration line, capturing the quoted value. FALLBACK_VERSION
-# is referenced five more times in the file (in the warning messages), so the
-# `const ... = "` prefix is what makes this a single match.
+# is referenced five more times in the file (an assignment, a code comment and
+# three console.warn template strings), so the `const ... = "` prefix is what
+# makes this a single match.
 FALLBACK_RE = re.compile(r'^(const FALLBACK_VERSION = ")([^"]*)(";)$', re.MULTILINE)
 
 RELEASES_URL = "https://github.com/esphome/esphome-desktop/releases/tag/v{version}"

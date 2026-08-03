@@ -2,7 +2,7 @@
 """Tests for .github/scripts/bump_docs_fallback_version.py.
 
 The bump-docs-fallback-version workflow rewrites the FALLBACK_VERSION constant
-in esphome.io's install page after every non-pre release, fills in esphome.io's
+in esphome.io's install page after every non-prerelease, fills in esphome.io's
 own pull request template, and opens a PR. The FALLBACK_VERSION constant
 drifted seven releases behind before anyone noticed (see the script's own
 docstring), so the rewrite gets a regression net: the anchor must match the
@@ -37,9 +37,10 @@ bump = load_script_module(SCRIPT_PATH)
 gha = load_script_module(GHA_PATH)
 
 # A realistic slice of InstallSelector.astro: the frontmatter that declares
-# FALLBACK_VERSION, five more references to it inside console.warn template
-# strings, and other version-shaped text (a ${tag} download URL, a numeric
-# AbortSignal.timeout) that a looser anchor could mistake for the constant.
+# FALLBACK_VERSION, four more references to it (one plain assignment and three
+# inside console.warn template strings), and other version-shaped text (a ${tag}
+# download URL, a numeric AbortSignal.timeout) that a looser anchor could
+# mistake for the constant.
 SAMPLE = """\
 ---
 import { Code, Tabs, TabItem, LinkButton } from "@astrojs/starlight/components";
