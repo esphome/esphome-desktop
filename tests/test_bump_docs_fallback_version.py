@@ -105,9 +105,9 @@ def test_bump_fallback_version_rewrites_only_the_declaration() -> None:
     assert new == SAMPLE.replace(
         'const FALLBACK_VERSION = "1.0.2";', 'const FALLBACK_VERSION = "1.1.0";'
     )
-    # The identifier appears 5 times total (the declaration plus 4 more inside
-    # console.warn template strings); rewriting only the quoted value must
-    # leave every occurrence of the identifier itself in place.
+    # The identifier appears 5 times total (the declaration, one plain
+    # assignment and three console.warn template strings); rewriting only the
+    # quoted value must leave every occurrence of the identifier itself in place.
     assert new.count("FALLBACK_VERSION") == SAMPLE.count("FALLBACK_VERSION") == 5
     # The other version-shaped text (the ${tag} download URL and the numeric
     # AbortSignal timeout) must be untouched too, not just present somewhere.
