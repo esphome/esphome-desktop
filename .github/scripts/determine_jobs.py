@@ -47,15 +47,19 @@ from _gha import warn  # noqa: E402
 # signal. fnmatch's ``*`` spans ``/``, so ``*.md`` matches markdown at any depth.
 #
 # Deliberately conservative. Image and icon assets are omitted because
-# src-tauri/icons feeds the build; workflow and dependabot files are omitted
-# because a CI or dependency change must still build and test. When in doubt a
-# path is NOT listed here, so it counts as code and runs CI.
+# src-tauri/icons feeds the build; workflow and dependabot files are generally
+# omitted because a CI or dependency change must still build and test.
+# deploy-pages.yml is a targeted exception: it only deploys the static
+# web/ folder to GitHub Pages and can't affect the build or lint gate. When in
+# doubt a path is NOT listed here, so it counts as code and runs CI.
 META_ONLY_GLOBS = (
     "*.md",
     "LICENSE",
     ".gitignore",
     ".github/FUNDING.yml",
     ".github/ISSUE_TEMPLATE/*",
+    ".github/workflows/deploy-pages.yml",
+    "web/*",
 )
 
 
