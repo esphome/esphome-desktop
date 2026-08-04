@@ -1,8 +1,12 @@
 name: Deploy Pages
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - web/**
+      - .github/latest.schema.json
+      - .github/workflows/deploy-pages.yml
   workflow_dispatch:
 
 permissions: {}
@@ -25,55 +29,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Determine latest release
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          if [ -n "${EVENT_TAG}" ]; then
-            tag="${EVENT_TAG}"
-          else
-            if ! tag=$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName); then
-              echo "::error::Could not determine latest release tag."
-              exit 1
-            fi
-          fi
-          version="${tag#v}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Building page for $tag (version $version)"
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
-      - name: Build site
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
+      # Stage the site: web/ verbatim, plus latest.schema.json so the
+      # `$schema` URL baked into generated latest.json files resolves on
+      # this domain for schema-aware editors.
+      - name: Assemble site
         run: |
           set -euo pipefail
           mkdir -p _site
-          # envsubst only substitutes the listed variables; any other $VAR
-          # references in the template (e.g. $USER in shell snippets) are
-          # left alone.
-          envsubst '$VERSION $TAG' < web/index.html > _site/index.html
-          cp src-tauri/icons/128x128.png _site/icon.png
-
-      # Mirror the release manifest to the Pages site so consumers (download
-      # pages, integrations, etc.) can fetch a stable
-      # https://desktop.esphome.io/latest.json without hitting the GitHub
-      # releases API. The schema is published alongside it so the manifest's
-      # `$schema` reference resolves on the same domain.
-      - name: Mirror latest.json + schema to site
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern latest.json --dir _site --clobber
+          cp -R web/. _site/
           cp .github/latest.schema.json _site/latest.schema.json
-
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       # The artifact name includes the run attempt so re-running the job
       # after a transient Pages failure works; artifacts persist across

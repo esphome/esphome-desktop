@@ -63,3 +63,23 @@ def test_icon_and_workflow_files_are_not_treated_as_docs() -> None:
 
 def test_empty_change_set_fails_safe_to_running() -> None:
     assert SCRIPT.determine([]) == {"build": True, "lint_test": True}
+
+
+def test_web_folder_is_docs_only() -> None:
+    # web/ is the desktop.esphome.io redirect page; changes there just
+    # redeploy Pages and don't affect the Rust build or lint gate.
+    assert SCRIPT.is_meta_only("web/index.html")
+    assert SCRIPT.is_meta_only("web/assets/style.css")
+    assert SCRIPT.determine(["web/index.html"]) == {
+        "build": False,
+        "lint_test": False,
+    }
+
+
+def test_deploy_pages_workflow_is_docs_only() -> None:
+    # deploy-pages.yml is a targeted exception to the "workflow files count
+    # as code" rule: it only publishes web/ to GitHub Pages.
+    assert SCRIPT.is_meta_only(".github/workflows/deploy-pages.yml")
+    assert SCRIPT.determine(
+        ["web/index.html", ".github/workflows/deploy-pages.yml"]
+    ) == {"build": False, "lint_test": False}
