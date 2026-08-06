@@ -12,7 +12,9 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::control::protocol::channel_name;
 use crate::i18n::t_with;
+use crate::settings::ReleaseChannel;
 
 mod apply;
 mod check;
@@ -86,6 +88,34 @@ const DEVICE_BUILDER_WORDING: UpdateWording<'static> = UpdateWording {
     channel_label: None,
 };
 
+impl UpdateWording<'static> {
+    /// Wording for the ESPHome check tails, labelled with the channel whose
+    /// version is being offered.
+    ///
+    /// Both tails come here rather than building the struct inline, which is
+    /// what actually delivers the no-drift promise above: the component name
+    /// and log prefix exist once. `notify.rs` pins the rendered strings through
+    /// this constructor for the same reason — pinning a hand-built copy would
+    /// let production drift away from the assertions without failing them.
+    ///
+    /// Panics on [`ReleaseChannel::Dev`], which never reaches a shared tail:
+    /// the dev channel has no PyPI version to compare or label, so both
+    /// callers return before this point.
+    fn esphome(channel: ReleaseChannel) -> Self {
+        let channel_label = match channel {
+            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
+            ReleaseChannel::Dev => {
+                unreachable!("dev channel is handled before the shared check tail")
+            }
+        };
+        Self {
+            component: "ESPHome",
+            log_prefix: "Update",
+            channel_label: Some(channel_label),
+        }
+    }
+}
+
 impl UpdateWording<'_> {
     /// "<component> <version>" with the channel label appended when present,
     /// e.g. "ESPHome 2025.1.0 (stable)" or "ESPHome Device Builder 1.2.3".
@@ -112,5 +142,30 @@ impl UpdateWording<'_> {
             "update.notification_title",
             &[("component", self.component)],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn esphome_wording_labels_the_offered_channel() {
+        assert_eq!(
+            UpdateWording::esphome(ReleaseChannel::Stable).subject("2025.1.0"),
+            "ESPHome 2025.1.0 (stable)"
+        );
+        assert_eq!(
+            UpdateWording::esphome(ReleaseChannel::Beta).subject("2025.2.0b1"),
+            "ESPHome 2025.2.0b1 (beta)"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "dev channel is handled before the shared check tail")]
+    fn esphome_wording_rejects_the_dev_channel() {
+        // The dev channel has no PyPI version to label, so a caller reaching
+        // the shared tail with it is a bug rather than a string to render.
+        let _ = UpdateWording::esphome(ReleaseChannel::Dev);
     }
 }

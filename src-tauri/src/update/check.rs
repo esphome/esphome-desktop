@@ -9,7 +9,6 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::MessageDialogKind;
 use tracing::{debug, info, warn};
 
-use crate::control::protocol::channel_name;
 use crate::i18n::{t, t_with};
 use crate::settings::{Backend, ReleaseChannel};
 
@@ -158,22 +157,11 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions and ask the user. Dev is handled at the top of
-        // this function, so channel_name only ever yields "stable" or "beta";
-        // keep that invariant explicit.
-        let channel_label = match channel {
-            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
-            ReleaseChannel::Dev => {
-                unreachable!("dev channel is handled before the shared check tail")
-            }
-        };
+        // Compare versions and ask the user. Dev is handled at the top of this
+        // function, so the constructor's dev-channel panic is unreachable here.
         prompt_if_newer(
             app_handle,
-            &UpdateWording {
-                component: "ESPHome",
-                log_prefix: "Update",
-                channel_label: Some(channel_label),
-            },
+            &UpdateWording::esphome(channel),
             &t("update.available_title"),
             latest,
             &installed,
@@ -219,21 +207,10 @@ impl UpdateChecker {
         };
 
         // Compare versions and notify. Dev is handled at the top of this
-        // function, so channel_name only ever yields "stable" or "beta";
-        // keep that invariant explicit.
-        let channel_label = match channel {
-            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
-            ReleaseChannel::Dev => {
-                unreachable!("dev channel is handled before the shared check tail")
-            }
-        };
+        // function, so the constructor's dev-channel panic is unreachable here.
         notify_if_newer(
             app_handle,
-            &UpdateWording {
-                component: "ESPHome",
-                log_prefix: "Update",
-                channel_label: Some(channel_label),
-            },
+            &UpdateWording::esphome(channel),
             &latest,
             &installed,
             tray_available,
