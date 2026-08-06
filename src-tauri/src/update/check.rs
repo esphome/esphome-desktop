@@ -18,7 +18,7 @@ use super::install::{
 };
 use super::notify::{notify_if_newer, prompt_if_newer};
 use super::version::{find_latest_any, select_beta_target};
-use super::{PyPIResponse, UpdateChecker, UpdateWording, DEVICE_BUILDER_WORDING};
+use super::{PyPIResponse, PypiChannel, UpdateChecker, UpdateWording, DEVICE_BUILDER_WORDING};
 
 impl UpdateChecker {
     /// Fetch and parse the PyPI JSON metadata for `package`.
@@ -80,8 +80,9 @@ impl UpdateChecker {
         app_handle: &AppHandle,
         channel: ReleaseChannel,
     ) -> Option<String> {
-        // Dev channel: offer to reinstall from git HEAD
-        if channel == ReleaseChannel::Dev {
+        // Dev channel: offer to reinstall from git HEAD. Narrowing here is
+        // also what lets the shared tail below take a channel it can label.
+        let Some(pypi_channel) = PypiChannel::from_release(channel) else {
             let installed = installed_esphome_version_async(app_handle)
                 .await
                 .ok()
@@ -103,7 +104,7 @@ impl UpdateChecker {
                 return Some("dev".to_string());
             }
             return None;
-        }
+        };
 
         // Get installed version
         let installed = match installed_esphome_version_async(app_handle).await {
@@ -157,11 +158,10 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions and ask the user. Dev is handled at the top of this
-        // function, so the constructor's dev-channel panic is unreachable here.
+        // Compare versions and ask the user.
         prompt_if_newer(
             app_handle,
-            &UpdateWording::esphome(channel),
+            &UpdateWording::esphome(pypi_channel),
             &t("update.available_title"),
             latest,
             &installed,
@@ -178,10 +178,10 @@ impl UpdateChecker {
         channel: ReleaseChannel,
         tray_available: bool,
     ) {
-        if channel == ReleaseChannel::Dev {
+        let Some(pypi_channel) = PypiChannel::from_release(channel) else {
             debug!("Dev channel: skipping background update check");
             return;
-        }
+        };
 
         // Get installed version
         let installed = match installed_esphome_version_async(app_handle).await {
@@ -206,11 +206,10 @@ impl UpdateChecker {
             }
         };
 
-        // Compare versions and notify. Dev is handled at the top of this
-        // function, so the constructor's dev-channel panic is unreachable here.
+        // Compare versions and notify.
         notify_if_newer(
             app_handle,
-            &UpdateWording::esphome(channel),
+            &UpdateWording::esphome(pypi_channel),
             &latest,
             &installed,
             tray_available,

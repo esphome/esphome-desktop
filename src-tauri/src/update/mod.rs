@@ -52,6 +52,37 @@ struct PyPIRelease {
     yanked: bool,
 }
 
+/// The release channels that have a PyPI version to offer.
+///
+/// [`ReleaseChannel::Dev`] installs from git HEAD, so it has no version to
+/// compare against or to label, and every ESPHome check tail handles it and
+/// returns before the shared part. Narrowing to this type at that guard is
+/// what keeps the tails honest: `Dev` cannot be spelled past it, so nothing
+/// downstream has to defend against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PypiChannel {
+    Stable,
+    Beta,
+}
+
+impl PypiChannel {
+    /// `None` for [`ReleaseChannel::Dev`], whose own handling is the caller's.
+    fn from_release(channel: ReleaseChannel) -> Option<Self> {
+        match channel {
+            ReleaseChannel::Stable => Some(Self::Stable),
+            ReleaseChannel::Beta => Some(Self::Beta),
+            ReleaseChannel::Dev => None,
+        }
+    }
+
+    fn release(self) -> ReleaseChannel {
+        match self {
+            Self::Stable => ReleaseChannel::Stable,
+            Self::Beta => ReleaseChannel::Beta,
+        }
+    }
+}
+
 /// Update checker
 pub struct UpdateChecker {
     client: reqwest::Client,
@@ -98,20 +129,14 @@ impl UpdateWording<'static> {
     /// this constructor for the same reason — pinning a hand-built copy would
     /// let production drift away from the assertions without failing them.
     ///
-    /// Panics on [`ReleaseChannel::Dev`], which never reaches a shared tail:
-    /// the dev channel has no PyPI version to compare or label, so both
-    /// callers return before this point.
-    fn esphome(channel: ReleaseChannel) -> Self {
-        let channel_label = match channel {
-            ReleaseChannel::Stable | ReleaseChannel::Beta => channel_name(channel),
-            ReleaseChannel::Dev => {
-                unreachable!("dev channel is handled before the shared check tail")
-            }
-        };
+    /// Takes a [`PypiChannel`] rather than a [`ReleaseChannel`] so the dev
+    /// channel — which has no version to label — cannot be asked for wording
+    /// at all, instead of being a panic each tail has to keep steering around.
+    fn esphome(channel: PypiChannel) -> Self {
         Self {
             component: "ESPHome",
             log_prefix: "Update",
-            channel_label: Some(channel_label),
+            channel_label: Some(channel_name(channel.release())),
         }
     }
 }
@@ -152,20 +177,27 @@ mod tests {
     #[test]
     fn esphome_wording_labels_the_offered_channel() {
         assert_eq!(
-            UpdateWording::esphome(ReleaseChannel::Stable).subject("2025.1.0"),
+            UpdateWording::esphome(PypiChannel::Stable).subject("2025.1.0"),
             "ESPHome 2025.1.0 (stable)"
         );
         assert_eq!(
-            UpdateWording::esphome(ReleaseChannel::Beta).subject("2025.2.0b1"),
+            UpdateWording::esphome(PypiChannel::Beta).subject("2025.2.0b1"),
             "ESPHome 2025.2.0b1 (beta)"
         );
     }
 
     #[test]
-    #[should_panic(expected = "dev channel is handled before the shared check tail")]
-    fn esphome_wording_rejects_the_dev_channel() {
-        // The dev channel has no PyPI version to label, so a caller reaching
-        // the shared tail with it is a bug rather than a string to render.
-        let _ = UpdateWording::esphome(ReleaseChannel::Dev);
+    fn pypi_channel_admits_every_channel_with_a_pypi_version() {
+        // The dev channel installs from git HEAD, so it has no version to
+        // offer and is deliberately the one channel this rejects.
+        assert_eq!(
+            PypiChannel::from_release(ReleaseChannel::Stable),
+            Some(PypiChannel::Stable)
+        );
+        assert_eq!(
+            PypiChannel::from_release(ReleaseChannel::Beta),
+            Some(PypiChannel::Beta)
+        );
+        assert_eq!(PypiChannel::from_release(ReleaseChannel::Dev), None);
     }
 }
