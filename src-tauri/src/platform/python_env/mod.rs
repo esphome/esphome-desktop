@@ -562,4 +562,121 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    /// Stub interpreter body that fails the version probe while passing the
+    /// usability check — the "the tree is fine, we just can't read what is
+    /// pinned in it" shape the defer exists for. The probe's script is the only
+    /// one mentioning `PackageNotFoundError`, so matching argv separates it from
+    /// the bare `import importlib.metadata` the usability check runs.
+    #[cfg(unix)]
+    const PROBE_FAILS_BUT_USABLE: &str =
+        "case \"$*\" in *PackageNotFoundError*) exit 1;; esac; exit 0";
+
+    /// A user tree whose interpreter is a stub running `body`, plus a sentinel
+    /// file that only survives if the tree is left in place. Every test below
+    /// turns on the same question — was this tree wiped? — so they ask it the
+    /// same way.
+    #[cfg(unix)]
+    fn stubbed_user_tree(base: &Path, body: &str) -> PathBuf {
+        let user = base.join("python");
+        let interpreter = interpreter_in_tree(&user);
+        write_stub_interpreter(interpreter.parent().unwrap(), body);
+        std::fs::write(user.join("sentinel.txt"), "kept").unwrap();
+        user
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_defers_when_the_probe_fails_on_a_usable_interpreter() {
+        let base = unique_temp_dir("refresh-defer-startup");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = stubbed_user_tree(&base, PROBE_FAILS_BUT_USABLE);
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup)
+            .expect("a deferred refresh is not a failed one");
+
+        assert!(
+            user.join("sentinel.txt").is_file(),
+            "the tree must survive: wiping it would discard the pinned version \
+             the probe just failed to read"
+        );
+        assert!(
+            !user.join(PYTHON_VERSION_MARKER).exists(),
+            "a defer must not leave a marker claiming the tree is current"
+        );
+        assert_eq!(
+            read_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER)),
+            1,
+            "the defer is counted, which is what makes it bounded"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_stops_deferring_at_the_bound_and_wipes() {
+        let base = unique_temp_dir("refresh-defer-bound-e2e");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = stubbed_user_tree(&base, PROBE_FAILS_BUT_USABLE);
+        bump_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER), MAX_REFRESH_DEFERS);
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+
+        assert!(
+            !user.join("sentinel.txt").exists(),
+            "package metadata that is persistently unreadable must not gate the \
+             self-heal behind itself forever"
+        );
+        assert_marker_current(&user);
+        assert_eq!(
+            read_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER)),
+            0,
+            "the wipe takes the counter with the tree, so defers are consecutive"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_wipes_when_the_interpreter_itself_is_unusable() {
+        let base = unique_temp_dir("refresh-unusable");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = stubbed_user_tree(&base, "exit 1");
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+
+        assert!(
+            !user.join("sentinel.txt").exists(),
+            "an interpreter that cannot run has no pinned version worth \
+             protecting; deferring would leave a corrupt tree with no repair path"
+        );
+        assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_never_defers_even_when_the_probe_fails() {
+        let base = unique_temp_dir("refresh-defer-repair");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = stubbed_user_tree(&base, PROBE_FAILS_BUT_USABLE);
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Repair).unwrap();
+
+        assert!(
+            !user.join("sentinel.txt").exists(),
+            "a repair is called on a tree already proven broken; keeping it one \
+             more launch answers a question nobody asked"
+        );
+        assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
