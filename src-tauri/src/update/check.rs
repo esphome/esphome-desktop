@@ -73,6 +73,31 @@ impl UpdateChecker {
         }
     }
 
+    /// Ask a dev-channel user whether to reinstall from git HEAD.
+    ///
+    /// The dev channel has no version to compare against, so there is nothing
+    /// to check — the whole flow is this one prompt. Returns the sentinel
+    /// `"dev"` that `update_to` recognises if the user accepts.
+    async fn prompt_dev_reinstall(app_handle: &AppHandle) -> Option<String> {
+        let installed = installed_esphome_version_async(app_handle)
+            .await
+            .ok()
+            .flatten();
+        let unknown = t("version.unknown");
+        let installed_str = installed.as_deref().unwrap_or(&unknown);
+
+        let should_update = crate::dialog::confirm(
+            app_handle,
+            &t("update.dev_channel_title"),
+            t_with("update.dev_channel_prompt", &[("version", installed_str)]),
+            &t("common.update_now"),
+            &t("common.cancel"),
+        )
+        .await;
+
+        should_update.then(|| "dev".to_string())
+    }
+
     /// Check for updates (user-initiated) - always shows feedback via dialog
     /// Returns Some(version) if user wants to update, None otherwise
     pub async fn check_for_user(
@@ -83,27 +108,7 @@ impl UpdateChecker {
         // Dev channel: offer to reinstall from git HEAD. Narrowing here is
         // also what lets the shared tail below take a channel it can label.
         let Some(pypi_channel) = PypiChannel::from_release(channel) else {
-            let installed = installed_esphome_version_async(app_handle)
-                .await
-                .ok()
-                .flatten();
-            let unknown = t("version.unknown");
-            let installed_str = installed.as_deref().unwrap_or(&unknown);
-
-            let should_update = crate::dialog::confirm(
-                app_handle,
-                &t("update.dev_channel_title"),
-                t_with("update.dev_channel_prompt", &[("version", installed_str)]),
-                &t("common.update_now"),
-                &t("common.cancel"),
-            )
-            .await;
-
-            if should_update {
-                // Return a sentinel value that update_to will recognize
-                return Some("dev".to_string());
-            }
-            return None;
+            return Self::prompt_dev_reinstall(app_handle).await;
         };
 
         // Get installed version
