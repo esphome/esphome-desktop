@@ -12,16 +12,13 @@ use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_notification::NotificationExt;
 use tracing::{error, info, warn};
 
-use crate::control::ops::{self, SwitchOutcome, UpdateGuard};
+use crate::control::ops::{self, InstallOutcome, SwitchOutcome, UpdateGuard};
 use crate::i18n::{t, t_with};
 use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
 use super::ids;
-use super::{
-    refresh_builder_version_display, refresh_version_display, update_backend_checks,
-    update_channel_checks,
-};
+use super::{refresh_builder_version_display, update_backend_checks, update_channel_checks};
 
 pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
     /// Acquire the `UpdateGuard` or log and `return` from the spawned task.
@@ -79,85 +76,62 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                 if let Some(version) = state.update_checker.check_for_user(&app, channel).await {
                     info!("User requested update to version {}", version);
 
-                    // Stop the dashboard
-                    if let Err(e) = state.daemon.stop().await {
-                        error!("Failed to stop backend for update: {}", e);
-                        crate::dialog::notice(
-                            &app,
-                            &t("update.update_failed_title"),
-                            t_with("errors.stop_dashboard_failed", &[("error", &e.to_string())]),
-                            MessageDialogKind::Error,
-                        )
-                        .await;
-                        return;
-                    }
-
-                    // Perform the update
-                    match state
-                        .update_checker
-                        .update_to(&app, &version, channel)
-                        .await
-                    {
-                        Ok(()) => {
+                    // The stop→install→start sequence (and its logging) lives
+                    // in ops so the CLI's update command drives the exact same
+                    // code; the tray adds the dialogs.
+                    let outcome = ops::stop_install_start(
+                        &state,
+                        "ESPHome update",
+                        || state.update_checker.update_to(&app, &version, channel),
+                        || ops::refresh_version_display_blocking(&app),
+                    )
+                    .await;
+                    match outcome {
+                        InstallOutcome::Installed => {
                             info!("Update completed successfully");
-
-                            // Update the version display in the tray menu, off
-                            // the async executor (detection spawns a Python
-                            // subprocess) — mirrors the device-builder arm below.
-                            let refresh_app = app.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                refresh_version_display(&refresh_app)
-                            })
-                            .await;
-
-                            // Restart the dashboard
-                            if let Err(e) = state.daemon.start().await {
-                                error!("Failed to restart backend after update: {}", e);
-                                crate::dialog::notice(
-                                    &app,
-                                    &t("update.update_partial_title"),
-                                    t_with(
-                                        "update.esphome_partial",
-                                        &[("version", version.as_str()), ("error", &e.to_string())],
-                                    ),
-                                    MessageDialogKind::Warning,
-                                )
-                                .await;
+                            let msg = if channel == ReleaseChannel::Dev {
+                                t("update.esphome_updated_dev")
                             } else {
-                                let msg = if channel == ReleaseChannel::Dev {
-                                    t("update.esphome_updated_dev")
-                                } else {
-                                    t_with("update.esphome_updated", &[("version", &version)])
-                                };
-                                crate::dialog::notice(
-                                    &app,
-                                    &t("update.update_complete_title"),
-                                    msg,
-                                    MessageDialogKind::Info,
-                                )
-                                .await;
-                            }
+                                t_with("update.esphome_updated", &[("version", &version)])
+                            };
+                            crate::dialog::notice(
+                                &app,
+                                &t("update.update_complete_title"),
+                                msg,
+                                MessageDialogKind::Info,
+                            )
+                            .await;
                         }
-                        Err(e) => {
-                            error!("Update failed: {}", e);
+                        InstallOutcome::StopFailed(e) => {
                             crate::dialog::notice(
                                 &app,
                                 &t("update.update_failed_title"),
-                                t_with(
-                                    "update.esphome_update_failed",
-                                    &[("error", &e.to_string())],
-                                ),
+                                t_with("errors.stop_dashboard_failed", &[("error", &e)]),
                                 MessageDialogKind::Error,
                             )
                             .await;
-
-                            // Try to restart dashboard anyway
-                            if let Err(restart_err) = state.daemon.start().await {
-                                error!(
-                                    "Failed to restart backend after failed update: {}",
-                                    restart_err
-                                );
-                            }
+                            return;
+                        }
+                        InstallOutcome::InstallFailed { error, .. } => {
+                            crate::dialog::notice(
+                                &app,
+                                &t("update.update_failed_title"),
+                                t_with("update.esphome_update_failed", &[("error", &error)]),
+                                MessageDialogKind::Error,
+                            )
+                            .await;
+                        }
+                        InstallOutcome::StartFailed(e) => {
+                            crate::dialog::notice(
+                                &app,
+                                &t("update.update_partial_title"),
+                                t_with(
+                                    "update.esphome_partial",
+                                    &[("version", version.as_str()), ("error", &e)],
+                                ),
+                                MessageDialogKind::Warning,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -176,74 +150,53 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                     builder_version
                 );
 
-                if let Err(e) = state.daemon.stop().await {
-                    error!("Failed to stop backend for device-builder update: {}", e);
-                    crate::dialog::notice(
-                        &app,
-                        &t("update.update_failed_title"),
-                        t_with("errors.stop_backend_failed", &[("error", &e.to_string())]),
-                        MessageDialogKind::Error,
-                    )
-                    .await;
-                    return;
-                }
-
-                match state
-                    .update_checker
-                    .install_device_builder(&app, backend)
-                    .await
-                {
-                    Ok(()) => {
+                let outcome = ops::stop_install_start(
+                    &state,
+                    "device-builder update",
+                    || state.update_checker.install_device_builder(&app, backend),
+                    || refresh_builder_version_display(&app),
+                )
+                .await;
+                match outcome {
+                    InstallOutcome::Installed => {
                         info!("Device builder updated successfully to {}", builder_version);
-
-                        // Refresh the device-builder version display in the tray menu
-                        refresh_builder_version_display(&app).await;
-
-                        if let Err(e) = state.daemon.start().await {
-                            error!(
-                                "Failed to restart backend after device-builder update: {}",
-                                e
-                            );
-                            crate::dialog::notice(
-                                &app,
-                                &t("update.update_partial_title"),
-                                t_with(
-                                    "update.builder_partial",
-                                    &[
-                                        ("version", builder_version.as_str()),
-                                        ("error", &e.to_string()),
-                                    ],
-                                ),
-                                MessageDialogKind::Warning,
-                            )
-                            .await;
-                        } else {
-                            crate::dialog::notice(
-                                &app,
-                                &t("update.update_complete_title"),
-                                t_with("update.builder_updated", &[("version", &builder_version)]),
-                                MessageDialogKind::Info,
-                            )
-                            .await;
-                        }
+                        crate::dialog::notice(
+                            &app,
+                            &t("update.update_complete_title"),
+                            t_with("update.builder_updated", &[("version", &builder_version)]),
+                            MessageDialogKind::Info,
+                        )
+                        .await;
                     }
-                    Err(e) => {
-                        error!("Device-builder update failed: {}", e);
+                    InstallOutcome::StopFailed(e) => {
                         crate::dialog::notice(
                             &app,
                             &t("update.update_failed_title"),
-                            t_with("update.builder_update_failed", &[("error", &e.to_string())]),
+                            t_with("errors.stop_backend_failed", &[("error", &e)]),
                             MessageDialogKind::Error,
                         )
                         .await;
-
-                        // Try to restart backend anyway
-                        if let Err(restart_err) = state.daemon.start().await {
-                            error!(
-                                "Failed to restart backend after failed device-builder update: {}",
-                                restart_err
-                            );
-                        }
+                    }
+                    InstallOutcome::InstallFailed { error, .. } => {
+                        crate::dialog::notice(
+                            &app,
+                            &t("update.update_failed_title"),
+                            t_with("update.builder_update_failed", &[("error", &error)]),
+                            MessageDialogKind::Error,
+                        )
+                        .await;
+                    }
+                    InstallOutcome::StartFailed(e) => {
+                        crate::dialog::notice(
+                            &app,
+                            &t("update.update_partial_title"),
+                            t_with(
+                                "update.builder_partial",
+                                &[("version", builder_version.as_str()), ("error", &e)],
+                            ),
+                            MessageDialogKind::Warning,
+                        )
+                        .await;
                     }
                 }
             });

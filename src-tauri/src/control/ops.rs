@@ -550,9 +550,10 @@ struct PackagePhase<D, F, R> {
 
 /// Shared skeleton of the per-package phases of [`run_full_update`]: map the
 /// [`InstallAction`] onto the report for the no-op and failure arms, and for
-/// an actual install run [`stop_install_start`], refresh the version display
-/// on success, and record the outcome. Everything component-specific comes
-/// bundled in the [`PackagePhase`].
+/// an actual install run [`stop_install_start`] and record what it returned.
+/// Everything component-specific comes bundled in the [`PackagePhase`] —
+/// including the version-display `refresh`, which the install sequence runs
+/// itself so the tray and CLI paths refresh at the same point.
 async fn run_package_phase<D, F, Fut, R, RFut>(
     state: &Arc<AppState>,
     progress: Progress<'_>,
@@ -598,36 +599,123 @@ async fn run_package_phase<D, F, Fut, R, RFut>(
         labels.step,
         &format!("updating {} {installed} to {label}", labels.display_name),
     );
-    let result = stop_install_start(state, || install(target)).await;
-    match result {
-        Ok(()) => {
-            refresh().await;
-            report.note(format!("{component} updated to {label}"));
-        }
-        Err(e) => report.fail(format!("{component} update failed: {e}")),
+    let outcome = stop_install_start(
+        state,
+        &format!("{component} update"),
+        || install(target),
+        refresh,
+    )
+    .await;
+    record_outcome(report, component, &label, outcome);
+}
+
+/// Record `outcome` as the report line for `component` updating to `label`.
+///
+/// Split out of [`run_package_phase`] so the wording — which is the CLI's
+/// user-facing contract, not an implementation detail — is unit-testable
+/// without an `AppState` to feed the surrounding install sequence.
+fn record_outcome(
+    report: &mut UpdateReport,
+    component: &str,
+    label: &str,
+    outcome: InstallOutcome,
+) {
+    match outcome {
+        InstallOutcome::Installed => report.note(format!("{component} updated to {label}")),
+        InstallOutcome::StopFailed(e) => report.fail(format!(
+            "{component} update failed: failed to stop the dashboard: {e}"
+        )),
+        InstallOutcome::StartFailed(e) => report.fail(format!(
+            "{component} update failed: updated, but the dashboard failed to start: {e}"
+        )),
+        InstallOutcome::InstallFailed {
+            error,
+            restart_error: None,
+        } => report.fail(format!("{component} update failed: {error}")),
+        InstallOutcome::InstallFailed {
+            error,
+            restart_error: Some(restart_error),
+        } => report.fail(format!(
+            "{component} update failed: {error}; additionally the dashboard failed to \
+             restart: {restart_error}"
+        )),
     }
 }
 
-/// Stop the dashboard, run `install`, then start the dashboard again. The
-/// start is attempted even after a failed install so the user isn't left
-/// without a dashboard.
-async fn stop_install_start<F, Fut>(state: &Arc<AppState>, install: F) -> Result<(), String>
+/// How a [`stop_install_start`] sequence ended. The tray maps these onto
+/// dialogs, [`run_package_phase`] onto the CLI report's lines.
+///
+/// Deliberately not folded into a `Result<(), String>`: the surfaces disagree
+/// on what each failure means. A failed start is a warning to the tray (the
+/// new version *is* installed) but an error to the CLI, and only the CLI
+/// mentions a failed post-install restart at all.
+pub(crate) enum InstallOutcome {
+    /// Installed, and the dashboard came back.
+    Installed,
+    /// The dashboard could not be stopped, so nothing was installed.
+    StopFailed(String),
+    /// The install failed. The dashboard was restarted anyway; `restart_error`
+    /// carries the reason when even that did not work.
+    InstallFailed {
+        error: String,
+        restart_error: Option<String>,
+    },
+    /// The install succeeded but the dashboard did not come back.
+    StartFailed(String),
+}
+
+/// Stop the dashboard, run `install`, then start the dashboard again — the
+/// sequence behind both the tray's Check for Updates arm and the CLI's update
+/// command, so the two cannot drift. `what` names the operation in the log
+/// lines this emits on every failure arm, leaving callers to render outcomes
+/// rather than re-log them.
+///
+/// The start is attempted even after a failed install, so a user is never left
+/// without a dashboard. `refresh` (the tray version display) runs between a
+/// successful install and the start, matching the switch flows: the new
+/// version is on disk from that moment, so the tray must show it even if the
+/// start then fails.
+pub(crate) async fn stop_install_start<F, Fut, R, RFut>(
+    state: &Arc<AppState>,
+    what: &str,
+    install: F,
+    refresh: R,
+) -> InstallOutcome
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = ()>,
 {
     if let Err(e) = state.daemon.stop().await {
-        return Err(format!("failed to stop the dashboard: {e}"));
+        error!("Failed to stop the dashboard for the {}: {}", what, e);
+        return InstallOutcome::StopFailed(e.to_string());
     }
     let install_result = install().await;
+    if install_result.is_ok() {
+        refresh().await;
+    }
     let start_result = state.daemon.start().await;
     match (install_result, start_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Ok(()), Err(e)) => Err(format!("updated, but the dashboard failed to start: {e}")),
-        (Err(e), Ok(())) => Err(e.to_string()),
-        (Err(e), Err(start_err)) => Err(format!(
-            "{e}; additionally the dashboard failed to restart: {start_err}"
-        )),
+        (Ok(()), Ok(())) => InstallOutcome::Installed,
+        (Ok(()), Err(e)) => {
+            error!("Failed to restart the dashboard after the {}: {}", what, e);
+            InstallOutcome::StartFailed(e.to_string())
+        }
+        (Err(e), start) => {
+            error!("The {} failed: {}", what, e);
+            let restart_error = start.err().map(|start_err| {
+                error!(
+                    "Failed to restart the dashboard after the failed {}: {}",
+                    what, start_err
+                );
+                start_err.to_string()
+            });
+            InstallOutcome::InstallFailed {
+                error: e.to_string(),
+                restart_error,
+            }
+        }
     }
 }
 
@@ -645,7 +733,7 @@ async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
 
 /// Re-detect the installed ESPHome version and update the tray display, off
 /// the async executor (the detection spawns a Python subprocess).
-async fn refresh_version_display_blocking(app: &AppHandle) {
+pub(crate) async fn refresh_version_display_blocking(app: &AppHandle) {
     let app = app.clone();
     let _ = tokio::task::spawn_blocking(move || tray::refresh_version_display(&app)).await;
 }
@@ -688,5 +776,75 @@ mod tests {
             UpdateGuard::try_acquire(flag.clone()).is_some(),
             "reacquirable after release"
         );
+    }
+
+    /// The single line `record_outcome` appended, and whether it was recorded
+    /// as a failure. Asserting on both together keeps a line that reads like a
+    /// failure from being filed as a success.
+    fn recorded(outcome: InstallOutcome) -> (String, bool) {
+        let mut report = UpdateReport {
+            app_update_installed: false,
+            lines: Vec::new(),
+            any_failed: false,
+        };
+        record_outcome(&mut report, "esphome", "2026.8.0", outcome);
+        assert_eq!(report.lines.len(), 1, "exactly one line per component");
+        (report.lines.remove(0), report.any_failed)
+    }
+
+    #[test]
+    fn installed_reports_the_new_version_without_failing() {
+        assert_eq!(
+            recorded(InstallOutcome::Installed),
+            ("esphome updated to 2026.8.0".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn a_failed_stop_reports_that_nothing_was_installed() {
+        let (line, failed) = recorded(InstallOutcome::StopFailed("port busy".into()));
+        assert_eq!(
+            line,
+            "esphome update failed: failed to stop the dashboard: port busy"
+        );
+        assert!(failed);
+    }
+
+    /// The install worked, so the line must say so — a bare "update failed"
+    /// would send the user chasing a package that is in fact installed.
+    #[test]
+    fn a_failed_start_reports_the_install_as_done() {
+        let (line, failed) = recorded(InstallOutcome::StartFailed("no such file".into()));
+        assert_eq!(
+            line,
+            "esphome update failed: updated, but the dashboard failed to start: no such file"
+        );
+        assert!(failed);
+    }
+
+    #[test]
+    fn a_failed_install_that_restarted_reports_only_the_install_error() {
+        let (line, failed) = recorded(InstallOutcome::InstallFailed {
+            error: "pip exited 1".into(),
+            restart_error: None,
+        });
+        assert_eq!(line, "esphome update failed: pip exited 1");
+        assert!(failed);
+    }
+
+    /// Both failures reach the user: the second one means there is no
+    /// dashboard running now, which the install error alone would not say.
+    #[test]
+    fn a_failed_install_that_could_not_restart_reports_both() {
+        let (line, failed) = recorded(InstallOutcome::InstallFailed {
+            error: "pip exited 1".into(),
+            restart_error: Some("no such file".into()),
+        });
+        assert_eq!(
+            line,
+            "esphome update failed: pip exited 1; additionally the dashboard failed to \
+             restart: no such file"
+        );
+        assert!(failed);
     }
 }
