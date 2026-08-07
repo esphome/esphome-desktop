@@ -121,7 +121,7 @@ pub(in crate::platform) fn run_bounded(
     }
 
     // Unix: put the child in its own process group so the whole tree can be
-    // signalled on the bound (matches `daemon::start_inner`). Windows: nothing
+    // signalled on the bound (matches `daemon::spawn::start_inner`). Windows: nothing
     // here; the per-call job is created and assigned after spawn. Do NOT touch
     // creation flags on Windows -- the callers set CREATE_NO_WINDOW and
     // `creation_flags` overwrites rather than accumulates.
@@ -219,7 +219,7 @@ impl Reaper {
         use std::os::windows::io::AsRawHandle;
         let job = super::create_kill_on_close_job();
         // Accept the small CreateProcess->assign race (a descendant spawned in
-        // that window escapes the job), exactly as `daemon::start_inner` does:
+        // that window escapes the job), exactly as `daemon::spawn::start_inner` does:
         // closing it needs CREATE_SUSPENDED + a thread handle std does not
         // expose, and the callers spawn Python, which spawns nothing that early.
         // `super::assign_process_to_job` / `super::create_kill_on_close_job` log

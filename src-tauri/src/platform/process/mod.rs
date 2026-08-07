@@ -706,7 +706,7 @@ mod tests {
         // that reads like a real inheritance bug. Starting cmd suspended means
         // it cannot spawn anything until we resume it, which is strictly after
         // the assignment. (The production spawn accepts this same race rather
-        // than paying for it; see the note in `daemon::start_inner`.)
+        // than paying for it; see the note in `daemon::spawn::start_inner`.)
         //
         // CREATE_NO_WINDOW is folded in here rather than via
         // `configure_no_window_command` because `creation_flags` overwrites
@@ -810,7 +810,7 @@ mod tests {
             return;
         }
 
-        // Spawn the member exactly the way `daemon::start_inner` spawns the
+        // Spawn the member exactly the way `daemon::spawn::start_inner` spawns the
         // backend — tokio's Command, `configure_daemon_tokio_command`, and the
         // handle from tokio's `raw_handle()` — so this exercises the real code
         // path rather than a std::process lookalike that happens to agree.
