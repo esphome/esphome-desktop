@@ -61,23 +61,33 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     // real reason (EACCES, a Windows handle held on the path, a half-deleted
     // directory) be replaced by its symptom.
     let mut removal_error: Option<std::io::Error> = None;
-    if let Ok(meta) = dst.symlink_metadata() {
-        let file_type = meta.file_type();
-        if file_type.is_symlink() {
-            // A directory symlink must be removed with `remove_dir` on Windows;
-            // `remove_file` works for file symlinks on all platforms. Try
-            // `remove_file` first, then fall back to `remove_dir`.
-            if let Err(file_err) = std::fs::remove_file(dst) {
-                // Report the fallback's error, not the first attempt's: on a
-                // directory symlink the `remove_file` failure is expected and
-                // says nothing.
-                removal_error = std::fs::remove_dir(dst).err().or(Some(file_err));
+    match dst.symlink_metadata() {
+        Ok(meta) => {
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                // A directory symlink must be removed with `remove_dir` on Windows;
+                // `remove_file` works for file symlinks on all platforms. Try
+                // `remove_file` first, then fall back to `remove_dir`.
+                if let Err(file_err) = std::fs::remove_file(dst) {
+                    // Report the fallback's error, not the first attempt's: on a
+                    // directory symlink the `remove_file` failure is expected and
+                    // says nothing.
+                    removal_error = std::fs::remove_dir(dst).err().or(Some(file_err));
+                }
+            } else if file_type.is_dir() {
+                removal_error = std::fs::remove_dir_all(dst).err();
+            } else {
+                removal_error = std::fs::remove_file(dst).err();
             }
-        } else if file_type.is_dir() {
-            removal_error = std::fs::remove_dir_all(dst).err();
-        } else {
-            removal_error = std::fs::remove_file(dst).err();
         }
+        // Nothing there is the common case and the good one: no removal needed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // Any other stat failure (EACCES on the parent, a Windows sharing
+        // violation) means we could not even find out whether something is in
+        // the way, so no removal was attempted. Keep it for the same reason as
+        // a failed removal: it is the likely cause if the symlink call below
+        // then reports `AlreadyExists`.
+        Err(e) => removal_error = Some(e),
     }
 
     #[cfg(unix)]
@@ -126,14 +136,41 @@ fn link_context(dst: &Path, what: &str, removal_error: &Option<std::io::Error>) 
 
 #[cfg(test)]
 mod tests {
-    // Every test below exercises symlink preservation, which only the unix
-    // arm of `copy_symlink` can be driven without elevated privileges, so the
-    // imports are gated too — otherwise a Windows build sees them unused and
-    // `-D warnings` turns that into a failure.
-    #[cfg(unix)]
     use super::*;
+    // The copy tests exercise symlink preservation, which only the unix arm of
+    // `copy_symlink` can drive without elevated privileges; the temp-dir helper
+    // is theirs alone, so it stays gated — otherwise a Windows build sees it
+    // unused and `-D warnings` turns that into a failure.
     #[cfg(unix)]
     use crate::util::unique_temp_dir;
+
+    #[test]
+    fn link_context_names_the_blocking_removal() {
+        // The removal cause is the whole point of the plumbing: without it the
+        // user sees a bare `AlreadyExists` and the real reason is gone.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = link_context(Path::new("/x/y"), "symlink", &Some(err));
+        assert!(
+            msg.contains("could not be removed first"),
+            "message must say the stale entry blocked the link: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("permission denied"),
+            "message must carry the removal error itself: {msg}"
+        );
+    }
+
+    #[test]
+    fn link_context_stays_quiet_when_nothing_blocked_it() {
+        // No removal failed, so there is nothing to blame — mentioning one
+        // would point the reader at a cause that does not exist.
+        let msg = link_context(Path::new("/x/y"), "symlink", &None);
+        assert!(
+            !msg.contains("removed first"),
+            "no removal failed, so none should be named: {msg}"
+        );
+        assert!(msg.contains("Failed to create symlink"));
+    }
 
     #[cfg(unix)]
     #[test]
