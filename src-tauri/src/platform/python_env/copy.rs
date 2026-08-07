@@ -26,13 +26,23 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     // successful return. Recursing through here means child directories are
     // covered by this one call too.
     clear_mismatched_dest(dst, true)?;
-    fs::create_dir_all(dst).context("Failed to create destination directory")?;
+    fs::create_dir_all(dst)
+        .with_context(|| format!("Failed to create destination directory {dst:?}"))?;
 
-    for entry in fs::read_dir(src).context("Failed to read source directory")? {
-        let entry = entry.context("Failed to read directory entry")?;
+    // Every failure below names the entry it happened on. A bundled Python tree
+    // is tens of thousands of files deep, so a bare "Failed to copy file: No
+    // such file or directory" leaves no way to tell which entry aborted the
+    // copy — the diagnosis this function exists to make possible.
+    for entry in
+        fs::read_dir(src).with_context(|| format!("Failed to read source directory {src:?}"))?
+    {
+        let entry =
+            entry.with_context(|| format!("Failed to read a directory entry in {src:?}"))?;
         let path = entry.path();
         let dest_path = dst.join(entry.file_name());
-        let file_type = entry.file_type().context("Failed to read file type")?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("Failed to read file type of {path:?}"))?;
 
         if file_type.is_symlink() {
             copy_symlink(&path, &dest_path)?;
@@ -40,7 +50,8 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_recursive(&path, &dest_path)?;
         } else {
             clear_mismatched_dest(&dest_path, false)?;
-            fs::copy(&path, &dest_path).context("Failed to copy file")?;
+            fs::copy(&path, &dest_path)
+                .with_context(|| format!("Failed to copy {path:?} to {dest_path:?}"))?;
         }
     }
 
