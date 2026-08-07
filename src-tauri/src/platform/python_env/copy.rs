@@ -19,9 +19,14 @@ use std::path::Path;
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     use std::fs;
 
-    if !dst.exists() {
-        fs::create_dir_all(dst).context("Failed to create destination directory")?;
-    }
+    // The destination itself gets the same guard as every entry written into it.
+    // `Path::exists`/`create_dir_all` follow symlinks, so a `dst` that is a link
+    // to a directory would read as an existing destination and the whole tree
+    // would land wherever the link points — outside the managed location, with a
+    // successful return. Recursing through here means child directories are
+    // covered by this one call too.
+    clear_mismatched_dest(dst, true)?;
+    fs::create_dir_all(dst).context("Failed to create destination directory")?;
 
     for entry in fs::read_dir(src).context("Failed to read source directory")? {
         let entry = entry.context("Failed to read directory entry")?;
@@ -32,7 +37,6 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if file_type.is_symlink() {
             copy_symlink(&path, &dest_path)?;
         } else if file_type.is_dir() {
-            clear_mismatched_dest(&dest_path, true)?;
             copy_dir_recursive(&path, &dest_path)?;
         } else {
             clear_mismatched_dest(&dest_path, false)?;
@@ -172,13 +176,13 @@ fn pick_removal_error(
 /// Clear a destination entry whose *kind* disagrees with the source entry about
 /// to be written there, so the write cannot follow a stale link out of the tree.
 ///
-/// [`copy_symlink`] already replaces whatever it finds, but the plain directory
-/// and file branches of [`copy_dir_recursive`] do not: `Path::exists`,
-/// `create_dir_all`, and [`std::fs::copy`] all follow symlinks, so a leftover
-/// link where the source now has a real directory or file would be written
-/// *through* — landing the bundled tree's contents wherever the link points and
-/// still returning `Ok(())`. A destination of the same kind is left alone; the
-/// copy overwrites it in place as before.
+/// [`copy_symlink`] already replaces whatever it finds, but the destination
+/// directory and the plain-file branch of [`copy_dir_recursive`] do not:
+/// `Path::exists`, `create_dir_all`, and [`std::fs::copy`] all follow symlinks,
+/// so a leftover link where the source now has a real directory or file would be
+/// written *through* — landing the bundled tree's contents wherever the link
+/// points and still returning `Ok(())`. A destination of the same kind is left
+/// alone; the copy overwrites it in place as before.
 fn clear_mismatched_dest(dst: &Path, want_dir: bool) -> Result<()> {
     let file_type = match dst.symlink_metadata() {
         Ok(meta) => meta.file_type(),
@@ -402,6 +406,40 @@ mod tests {
         assert_eq!(
             fs::read_to_string(outside.join("plain.txt")).unwrap(),
             "untouched"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_replaces_a_symlinked_destination_root() {
+        // The root gets the same guard as its children: a `dst` that is a link
+        // to a directory must not be written through, which would put the whole
+        // Python tree outside the managed location and still return `Ok(())`.
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let base = unique_temp_dir("linked-root");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let outside = base.join("outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("real.txt"), b"hello").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &dst).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert!(
+            !fs::symlink_metadata(&dst).unwrap().file_type().is_symlink(),
+            "a symlinked destination root must be replaced by a real directory"
+        );
+        assert_eq!(fs::read_to_string(dst.join("real.txt")).unwrap(), "hello");
+        assert!(
+            !outside.join("real.txt").exists(),
+            "nothing may be written through the destination link"
         );
 
         let _ = fs::remove_dir_all(&base);
