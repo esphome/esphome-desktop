@@ -9,7 +9,8 @@
 # Manager do, and require the backend to be gone.
 #
 # This has been observed to fail without the job object, rather than assumed to.
-# PR #332 disabled `daemon::start_inner`'s call to `assign_to_kill_on_close_job`
+# PR #332 disabled `daemon::spawn::start_inner`'s call to
+# `assign_to_kill_on_close_job`
 # and changed nothing else; this script then reported "the backend outlived the
 # force-killed desktop", with a dashboard still serving on 127.0.0.1:6052 after
 # its desktop was gone — the stranded install directory users reported. If you
@@ -56,8 +57,8 @@ function Get-BackendProcesses {
     #              report "backend up", kill the desktop before the backend
     #              existed, watch the detector exit on its own, and print PASS
     #              — with or without the job object. The backend is
-    #              `-m esphome_device_builder ...` (daemon::start_inner); the
-    #              detector is `-m esphome version`.
+    #              `-m esphome_device_builder ...` (daemon::spawn::start_inner);
+    #              the detector is `-m esphome version`.
     @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object {
         $_.ExecutablePath -and
         $_.ExecutablePath.StartsWith($TreePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
