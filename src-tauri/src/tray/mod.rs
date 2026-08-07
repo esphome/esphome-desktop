@@ -389,6 +389,15 @@ pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
     update_version(&version);
 }
 
+/// Re-detect the installed ESPHome version and update the tray display, off
+/// the async executor (the detection spawns a Python subprocess). Mirrors
+/// [`refresh_builder_version_display`], so both refresh callbacks the update
+/// flows take come from this module.
+pub(crate) async fn refresh_version_display_blocking(app_handle: &AppHandle) {
+    let app = app_handle.clone();
+    let _ = tokio::task::spawn_blocking(move || refresh_version_display(&app)).await;
+}
+
 /// Re-detect the installed `esphome-device-builder` package version and
 /// update the tray display. Runs the blocking Python call off the caller's
 /// thread, and distinguishes "package not installed" from "detection

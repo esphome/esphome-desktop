@@ -18,7 +18,10 @@ use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
 use super::ids;
-use super::{refresh_builder_version_display, update_backend_checks, update_channel_checks};
+use super::{
+    refresh_builder_version_display, refresh_version_display_blocking, update_backend_checks,
+    update_channel_checks,
+};
 
 pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<AppState>) {
     /// Acquire the `UpdateGuard` or log and `return` from the spawned task.
@@ -83,7 +86,7 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                         &state,
                         "ESPHome update",
                         || state.update_checker.update_to(&app, &version, channel),
-                        || ops::refresh_version_display_blocking(&app),
+                        || refresh_version_display_blocking(&app),
                     )
                     .await;
                     match outcome {

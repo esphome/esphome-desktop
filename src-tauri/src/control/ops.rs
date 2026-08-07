@@ -201,7 +201,7 @@ pub(crate) async fn switch_release_channel(
             })
             .await;
 
-            refresh_version_display_blocking(app).await;
+            tray::refresh_version_display_blocking(app).await;
 
             progress("start", "starting the dashboard");
             if let Err(e) = state.daemon.start().await {
@@ -487,7 +487,7 @@ async fn update_esphome_package(
             install: |target: String| async move {
                 state.update_checker.update_to(app, &target, channel).await
             },
-            refresh: || refresh_version_display_blocking(app),
+            refresh: || tray::refresh_version_display_blocking(app),
         },
     )
     .await;
@@ -729,13 +729,6 @@ async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
             false
         }
     }
-}
-
-/// Re-detect the installed ESPHome version and update the tray display, off
-/// the async executor (the detection spawns a Python subprocess).
-pub(crate) async fn refresh_version_display_blocking(app: &AppHandle) {
-    let app = app.clone();
-    let _ = tokio::task::spawn_blocking(move || tray::refresh_version_display(&app)).await;
 }
 
 #[cfg(test)]
