@@ -633,7 +633,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let bundle = fake_bundle(&base);
         let user = stubbed_user_tree(&base, PROBE_FAILS_BUT_USABLE);
-        bump_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER), MAX_REFRESH_DEFERS);
+        assert!(
+            bump_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER), MAX_REFRESH_DEFERS),
+            "the defer counter must persist to disk, or the run takes the \
+             unwritable-counter branch and this test stops exercising the bound"
+        );
 
         refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
 
@@ -667,12 +671,25 @@ mod tests {
         // it gets exactly one run. (Linux enforces ETXTBSY; macOS does not,
         // which is why only Linux CI flaked.)
         let interpreter = interpreter_in_tree(&user);
-        for _ in 0..20 {
+        const ATTEMPTS: usize = 20;
+        let mut answerable = false;
+        for attempt in 0..ATTEMPTS {
             if interpreter_is_usable(&interpreter).is_ok() {
+                answerable = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Don't sleep after the final attempt: nothing follows it, so it
+            // would only delay a genuine failure's assert.
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
+        assert!(
+            answerable,
+            "the usability check never became answerable after {ATTEMPTS} attempts \
+             (a real spawn failure, not the transient ETXTBSY this retry covers) — \
+             the refresh below would defer for that reason, not the one under test"
+        );
 
         refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
 

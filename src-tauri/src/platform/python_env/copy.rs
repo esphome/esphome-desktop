@@ -64,7 +64,8 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// On Windows the source-side target is inspected only to pick the link *type*
 /// (`symlink_dir` vs `symlink_file`); the stored target itself is left unchanged.
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
-    let target = std::fs::read_link(src).context("Failed to read symlink target")?;
+    let target = std::fs::read_link(src)
+        .with_context(|| format!("Failed to read symlink target of {src:?}"))?;
 
     // Make re-copies idempotent: drop any pre-existing entry at the destination.
     // A real directory needs `remove_dir_all`; a *directory symlink* needs
@@ -108,7 +109,7 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
         // directory link to a file link and still report a successful copy.
         let src_type = src
             .symlink_metadata()
-            .context("Failed to read source symlink type")?
+            .with_context(|| format!("Failed to read source symlink type of {src:?}"))?
             .file_type();
         if std::os::windows::fs::FileTypeExt::is_symlink_dir(&src_type) {
             std::os::windows::fs::symlink_dir(&target, dst)
