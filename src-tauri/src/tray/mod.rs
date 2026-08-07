@@ -375,7 +375,9 @@ pub(crate) fn update_startup_checks(enabled: bool) {
 }
 
 /// Re-detect the installed version and update the tray version display.
-pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
+/// Private: [`refresh_version_display_blocking`] is the only way in, so no
+/// `async` arm elsewhere can call this blocking detector directly.
+fn refresh_version_display(app_handle: &AppHandle) {
     // Mirror the device-builder display: keep "not installed" distinct from a
     // real detection failure ("unknown") instead of collapsing both.
     let version = match crate::update::installed_esphome_version(app_handle) {
