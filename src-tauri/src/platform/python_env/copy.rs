@@ -68,11 +68,13 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
                 // A directory symlink must be removed with `remove_dir` on Windows;
                 // `remove_file` works for file symlinks on all platforms. Try
                 // `remove_file` first, then fall back to `remove_dir`.
-                if let Err(file_err) = std::fs::remove_file(dst) {
-                    // Report the fallback's error, not the first attempt's: on a
-                    // directory symlink the `remove_file` failure is expected and
-                    // says nothing.
-                    removal_error = std::fs::remove_dir(dst).err().or(Some(file_err));
+                if std::fs::remove_file(dst).is_err() {
+                    // Only the fallback's error is worth keeping: on a directory
+                    // symlink the `remove_file` failure is expected and says
+                    // nothing, so recording it when `remove_dir` then *succeeds*
+                    // would blame a removal that worked for a later symlink
+                    // failure with an unrelated cause (EACCES, ENOSPC).
+                    removal_error = std::fs::remove_dir(dst).err();
                 }
             } else if file_type.is_dir() {
                 removal_error = std::fs::remove_dir_all(dst).err();
@@ -117,6 +119,17 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
                 .with_context(|| link_context(dst, "file symlink", &removal_error))?;
         }
     }
+
+    // Every target this app ships to is unix or windows. A third kind would fall
+    // through both arms to `Ok(())` above the removal that already happened —
+    // reporting a fully successful copy of a tree silently missing the framework
+    // `Current` and versioned `libpython*` links this function exists to
+    // preserve. Refuse to build instead of shipping that.
+    #[cfg(not(any(unix, windows)))]
+    compile_error!(
+        "copy_symlink has no symlink implementation for this target; a silent \
+         no-op would yield a Python tree missing every symlink"
+    );
 
     Ok(())
 }
@@ -228,6 +241,40 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dst.join("after.txt")).unwrap(),
             "copied anyway"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_is_idempotent_over_existing_symlinks() {
+        // Re-copying onto a populated destination drives the removal branch in
+        // `copy_symlink`. A removal that succeeds must leave nothing behind to
+        // blame: the second copy has to complete, not fail with `AlreadyExists`
+        // nor report a stale-entry cause for a removal that worked.
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let base = unique_temp_dir("idempotent");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(src.join("versions/3.13")).unwrap();
+        symlink("3.13", src.join("versions/Current")).unwrap();
+        fs::write(src.join("real.txt"), b"hello").unwrap();
+        symlink("real.txt", src.join("link.txt")).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+        copy_dir_recursive(&src, &dst).expect("a second copy must overwrite, not collide");
+
+        assert_eq!(
+            fs::read_link(dst.join("versions/Current")).unwrap(),
+            Path::new("3.13")
+        );
+        assert_eq!(
+            fs::read_link(dst.join("link.txt")).unwrap(),
+            Path::new("real.txt")
         );
 
         let _ = fs::remove_dir_all(&base);

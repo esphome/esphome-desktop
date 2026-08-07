@@ -24,12 +24,12 @@ use tracing::{info, warn};
 /// interpreter (wipe & recover). A bare `-c "pass"` is NOT enough here: a
 /// gutted stdlib still executes it cleanly while every import fails.
 ///
-/// This asks only about the interpreter, which is what makes it the right way to
-/// answer that question. [`crate::platform::esphome_config_probe`] asks a bigger one —
-/// "can this
-/// tree build?" — and fails for reasons that have nothing to do with the
-/// interpreter (an unwritable temp dir, a full disk). Inferring "the interpreter
-/// is broken" from *that* failing would condemn a healthy tree.
+/// This asks only about the interpreter, which is what makes it the right way
+/// to answer that question. [`crate::platform::esphome_config_probe`] asks a
+/// bigger one — "can this tree build?" — and fails for reasons that have
+/// nothing to do with the interpreter (an unwritable temp dir, a full disk).
+/// Inferring "the interpreter is broken" from *that* failing would condemn a
+/// healthy tree.
 ///
 /// Bounded, because both callers are on the launch path: an interpreter wedged
 /// rather than broken would otherwise hang the very startup this is meant to
