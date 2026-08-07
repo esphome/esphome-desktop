@@ -1,11 +1,17 @@
 //! Taking the backend down, and the contract both paths share.
 //!
-//! Neither path force-kills a live backend: the graceful signal is SIGTERM to
-//! the child's process group on Unix and `CTRL_BREAK_EVENT` on Windows,
-//! because killing the dashboard outright corrupts its state.
-//! `stop_inner` is the async path (signal, drain for up to 30 s, then report
-//! the failure rather than escalate); `terminate_blocking` is the synchronous
-//! one, for exit callbacks that cannot await.
+//! Both paths lead with a graceful signal — SIGTERM to the child's process
+//! group on Unix, `CTRL_BREAK_EVENT` on Windows — because killing the
+//! dashboard outright corrupts its state. `stop_inner` is the async path
+//! (signal, then drain for up to 30 s); `terminate_blocking` is the
+//! synchronous one, for exit callbacks that cannot await.
+//!
+//! What happens when the graceful signal doesn't take is platform-split. On
+//! Unix we never escalate: `stop_inner` restores the child and reports the
+//! failure, and `terminate_blocking` has no fallback. On Windows both escalate
+//! — `stop_inner` calls `kill()` after the drain window, `terminate_blocking`
+//! falls back to `TerminateProcess` when the break can't be delivered —
+//! because that hard kill is the only shutdown guarantee Windows offers.
 
 use anyhow::Result;
 use std::sync::atomic::Ordering;
