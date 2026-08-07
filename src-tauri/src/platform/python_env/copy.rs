@@ -126,7 +126,13 @@ fn link_context(dst: &Path, what: &str, removal_error: &Option<std::io::Error>) 
 
 #[cfg(test)]
 mod tests {
+    // Every test below exercises symlink preservation, which only the unix
+    // arm of `copy_symlink` can be driven without elevated privileges, so the
+    // imports are gated too — otherwise a Windows build sees them unused and
+    // `-D warnings` turns that into a failure.
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::util::unique_temp_dir;
 
     #[cfg(unix)]
