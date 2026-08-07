@@ -61,27 +61,30 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     // (file, file symlink) uses `remove_file`. Leaving a stale entry in place
     // would make the later symlink call fail with `AlreadyExists`.
     //
-    // A removal that fails is not fatal here — the symlink call below may still
-    // succeed — but it is the likely cause when that call then reports
-    // `AlreadyExists`, so keep it and name it there rather than letting the
-    // real reason (EACCES, a Windows handle held on the path, a half-deleted
-    // directory) be replaced by its symptom.
-    let removal_error: Option<std::io::Error> = match dst.symlink_metadata() {
-        Ok(meta) => remove_entry(dst, &meta.file_type()).err(),
+    // A failure here is not fatal — the symlink call below may still succeed —
+    // but it is the likely cause when that call then reports `AlreadyExists`,
+    // so keep it and name it there rather than letting the real reason (EACCES,
+    // a Windows handle held on the path, a half-deleted directory) be replaced
+    // by its symptom. Which step failed is kept with the error: a removal we
+    // attempted and a stat that never let us try are different stories, and
+    // reporting the second as the first sends the reader after a call that was
+    // never made.
+    let blocked: Option<Blocked> = match dst.symlink_metadata() {
+        Ok(meta) => remove_entry(dst, &meta.file_type())
+            .err()
+            .map(Blocked::Removal),
         // Nothing there is the common case and the good one: no removal needed.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         // Any other stat failure (EACCES on the parent, a Windows sharing
         // violation) means we could not even find out whether something is in
-        // the way, so no removal was attempted. Keep it for the same reason as
-        // a failed removal: it is the likely cause if the symlink call below
-        // then reports `AlreadyExists`.
-        Err(e) => Some(e),
+        // the way, so no removal was attempted.
+        Err(e) => Some(Blocked::Stat(e)),
     };
 
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&target, dst)
-            .with_context(|| link_context(dst, "symlink", &removal_error))?;
+            .with_context(|| link_context(dst, "symlink", &blocked))?;
     }
 
     #[cfg(windows)]
@@ -98,10 +101,10 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
             .file_type();
         if std::os::windows::fs::FileTypeExt::is_symlink_dir(&src_type) {
             std::os::windows::fs::symlink_dir(&target, dst)
-                .with_context(|| link_context(dst, "directory symlink", &removal_error))?;
+                .with_context(|| link_context(dst, "directory symlink", &blocked))?;
         } else {
             std::os::windows::fs::symlink_file(&target, dst)
-                .with_context(|| link_context(dst, "file symlink", &removal_error))?;
+                .with_context(|| link_context(dst, "file symlink", &blocked))?;
         }
     }
 
@@ -202,14 +205,29 @@ fn clear_mismatched_dest(dst: &Path, want_dir: bool) -> Result<()> {
         .with_context(|| format!("Failed to remove stale entry at {dst:?} before copying over it"))
 }
 
-/// Name the removal that most likely blocked the symlink call, so a stale entry
-/// we could not clear does not surface as a bare `AlreadyExists` with its actual
+/// Why a pre-existing entry at the destination is still there. Carried to
+/// [`link_context`] so the message names the step that actually failed: a
+/// removal we tried, or a stat that never let us try one.
+enum Blocked {
+    /// Something was there and [`remove_entry`] could not delete it.
+    Removal(std::io::Error),
+    /// `symlink_metadata` failed for a reason other than `NotFound`, so whether
+    /// anything is in the way is unknown and no removal was attempted.
+    Stat(std::io::Error),
+}
+
+/// Name the step that most likely blocked the symlink call, so a stale entry we
+/// could not clear does not surface as a bare `AlreadyExists` with its actual
 /// cause thrown away. `what` names the link kind for the platform that failed.
-fn link_context(dst: &Path, what: &str, removal_error: &Option<std::io::Error>) -> String {
-    match removal_error {
-        Some(e) => format!(
+fn link_context(dst: &Path, what: &str, blocked: &Option<Blocked>) -> String {
+    match blocked {
+        Some(Blocked::Removal(e)) => format!(
             "Failed to create {what} at {dst:?}; the existing entry there could not be \
              removed first: {e}"
+        ),
+        Some(Blocked::Stat(e)) => format!(
+            "Failed to create {what} at {dst:?}; whether anything was already there could \
+             not be inspected first, so no removal was attempted: {e}"
         ),
         None => format!("Failed to create {what} at {dst:?}"),
     }
@@ -230,7 +248,7 @@ mod tests {
         // The removal cause is the whole point of the plumbing: without it the
         // user sees a bare `AlreadyExists` and the real reason is gone.
         let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        let msg = link_context(Path::new("/x/y"), "symlink", &Some(err));
+        let msg = link_context(Path::new("/x/y"), "symlink", &Some(Blocked::Removal(err)));
         assert!(
             msg.contains("could not be removed first"),
             "message must say the stale entry blocked the link: {msg}"
@@ -238,6 +256,26 @@ mod tests {
         assert!(
             msg.to_lowercase().contains("permission denied"),
             "message must carry the removal error itself: {msg}"
+        );
+    }
+
+    #[test]
+    fn link_context_distinguishes_a_failed_inspection_from_a_failed_removal() {
+        // A stat that failed means no removal was ever attempted. Reporting it
+        // as "could not be removed" points the reader at a call that never ran.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = link_context(Path::new("/x/y"), "symlink", &Some(Blocked::Stat(err)));
+        assert!(
+            msg.contains("could not be inspected first"),
+            "message must name the inspection, not a removal: {msg}"
+        );
+        assert!(
+            !msg.contains("could not be removed first"),
+            "no removal was attempted, so none should be blamed: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("permission denied"),
+            "message must carry the stat error itself: {msg}"
         );
     }
 
