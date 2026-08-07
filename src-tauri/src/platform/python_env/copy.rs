@@ -32,8 +32,10 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if file_type.is_symlink() {
             copy_symlink(&path, &dest_path)?;
         } else if file_type.is_dir() {
+            clear_mismatched_dest(&dest_path, true)?;
             copy_dir_recursive(&path, &dest_path)?;
         } else {
+            clear_mismatched_dest(&dest_path, false)?;
             fs::copy(&path, &dest_path).context("Failed to copy file")?;
         }
     }
@@ -60,37 +62,17 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     // `AlreadyExists`, so keep it and name it there rather than letting the
     // real reason (EACCES, a Windows handle held on the path, a half-deleted
     // directory) be replaced by its symptom.
-    let mut removal_error: Option<std::io::Error> = None;
-    match dst.symlink_metadata() {
-        Ok(meta) => {
-            let file_type = meta.file_type();
-            if file_type.is_symlink() {
-                // A directory symlink must be removed with `remove_dir` on Windows;
-                // `remove_file` works for file symlinks on all platforms. Try
-                // `remove_file` first, then fall back to `remove_dir`.
-                if std::fs::remove_file(dst).is_err() {
-                    // Only the fallback's error is worth keeping: on a directory
-                    // symlink the `remove_file` failure is expected and says
-                    // nothing, so recording it when `remove_dir` then *succeeds*
-                    // would blame a removal that worked for a later symlink
-                    // failure with an unrelated cause (EACCES, ENOSPC).
-                    removal_error = std::fs::remove_dir(dst).err();
-                }
-            } else if file_type.is_dir() {
-                removal_error = std::fs::remove_dir_all(dst).err();
-            } else {
-                removal_error = std::fs::remove_file(dst).err();
-            }
-        }
+    let removal_error: Option<std::io::Error> = match dst.symlink_metadata() {
+        Ok(meta) => remove_entry(dst, &meta.file_type()).err(),
         // Nothing there is the common case and the good one: no removal needed.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         // Any other stat failure (EACCES on the parent, a Windows sharing
         // violation) means we could not even find out whether something is in
         // the way, so no removal was attempted. Keep it for the same reason as
         // a failed removal: it is the likely cause if the symlink call below
         // then reports `AlreadyExists`.
-        Err(e) => removal_error = Some(e),
-    }
+        Err(e) => Some(e),
+    };
 
     #[cfg(unix)]
     {
@@ -100,18 +82,17 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        // Windows requires the link type to match the target. Probe the *source*
-        // side, where the full tree exists and the target is guaranteed
-        // resolvable — probing the partially-populated destination could pick the
-        // wrong link type if the target dir hasn't been copied yet.
-        let probe = if target.is_absolute() {
-            target.clone()
-        } else {
-            src.parent()
-                .map(|p| p.join(&target))
-                .unwrap_or_else(|| target.clone())
-        };
-        if probe.is_dir() {
+        // Windows requires the link *type* to match the target. Take it from the
+        // source link itself rather than from stat-ing what it points at: a
+        // dangling or unreadable target — the very case this function exists to
+        // tolerate — makes `Path::is_dir()` answer `false` for "not a directory"
+        // and for "could not tell" alike, which would silently downgrade a
+        // directory link to a file link and still report a successful copy.
+        let src_type = src
+            .symlink_metadata()
+            .context("Failed to read source symlink type")?
+            .file_type();
+        if std::os::windows::fs::FileTypeExt::is_symlink_dir(&src_type) {
             std::os::windows::fs::symlink_dir(&target, dst)
                 .with_context(|| link_context(dst, "directory symlink", &removal_error))?;
         } else {
@@ -132,6 +113,89 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Delete whatever `file_type` says is sitting at `dst`, using the call that can
+/// actually remove it: `remove_dir_all` for a real directory, `remove_dir` for a
+/// *directory symlink* on Windows (where `remove_file` cannot delete one), and
+/// `remove_file` for everything else.
+fn remove_entry(dst: &Path, file_type: &std::fs::FileType) -> std::io::Result<()> {
+    if file_type.is_symlink() {
+        match std::fs::remove_file(dst) {
+            Ok(()) => Ok(()),
+            Err(first) => match std::fs::remove_dir(dst) {
+                // The fallback cleared it, so the first failure was the expected
+                // "this is a directory link" one and says nothing. Reporting it
+                // would blame a removal that ultimately worked.
+                Ok(()) => Ok(()),
+                Err(second) => Err(pick_removal_error(file_type, first, second)),
+            },
+        }
+    } else if file_type.is_dir() {
+        std::fs::remove_dir_all(dst)
+    } else {
+        std::fs::remove_file(dst)
+    }
+}
+
+/// Both removals of a symlink failed; pick the one that names the real cause.
+///
+/// Which call was ever going to succeed depends on the kind of link, so the
+/// other one's failure is noise that would misreport the reason.
+#[cfg(unix)]
+fn pick_removal_error(
+    _file_type: &std::fs::FileType,
+    remove_file_error: std::io::Error,
+    _remove_dir_error: std::io::Error,
+) -> std::io::Error {
+    // On unix `remove_file` unlinks every symlink, directory link included, so
+    // it is the call that mattered — `remove_dir` was only ever going to answer
+    // `ENOTDIR`, which would replace a real EACCES/EROFS with a red herring.
+    remove_file_error
+}
+
+/// See the unix twin above; on Windows the link type decides which call was the
+/// one that could have worked.
+#[cfg(windows)]
+fn pick_removal_error(
+    file_type: &std::fs::FileType,
+    remove_file_error: std::io::Error,
+    remove_dir_error: std::io::Error,
+) -> std::io::Error {
+    if std::os::windows::fs::FileTypeExt::is_symlink_dir(file_type) {
+        remove_dir_error
+    } else {
+        remove_file_error
+    }
+}
+
+/// Clear a destination entry whose *kind* disagrees with the source entry about
+/// to be written there, so the write cannot follow a stale link out of the tree.
+///
+/// [`copy_symlink`] already replaces whatever it finds, but the plain directory
+/// and file branches of [`copy_dir_recursive`] do not: `Path::exists`,
+/// `create_dir_all`, and [`std::fs::copy`] all follow symlinks, so a leftover
+/// link where the source now has a real directory or file would be written
+/// *through* — landing the bundled tree's contents wherever the link points and
+/// still returning `Ok(())`. A destination of the same kind is left alone; the
+/// copy overwrites it in place as before.
+fn clear_mismatched_dest(dst: &Path, want_dir: bool) -> Result<()> {
+    let file_type = match dst.symlink_metadata() {
+        Ok(meta) => meta.file_type(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to inspect existing entry at {dst:?}"))
+        }
+    };
+
+    // A symlink always goes: even one pointing at the right kind of thing would
+    // redirect the write. A real entry only goes when its kind differs.
+    if !file_type.is_symlink() && file_type.is_dir() == want_dir {
+        return Ok(());
+    }
+
+    remove_entry(dst, &file_type)
+        .with_context(|| format!("Failed to remove stale entry at {dst:?} before copying over it"))
 }
 
 /// Name the removal that most likely blocked the symlink call, so a stale entry
@@ -266,6 +330,17 @@ mod tests {
         symlink("real.txt", src.join("link.txt")).unwrap();
 
         copy_dir_recursive(&src, &dst).unwrap();
+
+        // A tree a previous crash left half-populated, or a bundle whose layout
+        // changed between releases, hands the second copy entries of the wrong
+        // kind: a real file and a real directory where the source has links.
+        // Both must be replaced by the source's links, not written into.
+        fs::remove_file(dst.join("link.txt")).unwrap();
+        fs::write(dst.join("link.txt"), b"stale regular file").unwrap();
+        fs::remove_file(dst.join("versions/Current")).unwrap();
+        fs::create_dir_all(dst.join("versions/Current")).unwrap();
+        fs::write(dst.join("versions/Current/stale"), b"x").unwrap();
+
         copy_dir_recursive(&src, &dst).expect("a second copy must overwrite, not collide");
 
         assert_eq!(
@@ -276,6 +351,82 @@ mod tests {
             fs::read_link(dst.join("link.txt")).unwrap(),
             Path::new("real.txt")
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_replaces_stale_links_instead_of_writing_through_them() {
+        // The mirror of the test above: the destination holds *links* where the
+        // source now has a real directory and a real file. Following them would
+        // write the bundled tree's contents outside the destination and still
+        // report success, so the link must be cleared first.
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let base = unique_temp_dir("stale-links");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let outside = base.join("outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(src.join("lib")).unwrap();
+        fs::write(src.join("lib/mod.py"), b"real").unwrap();
+        fs::write(src.join("plain.txt"), b"real").unwrap();
+        fs::create_dir_all(outside.join("lib")).unwrap();
+        fs::write(outside.join("plain.txt"), b"untouched").unwrap();
+
+        fs::create_dir_all(&dst).unwrap();
+        symlink(outside.join("lib"), dst.join("lib")).unwrap();
+        symlink(outside.join("plain.txt"), dst.join("plain.txt")).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert!(
+            !fs::symlink_metadata(dst.join("lib"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a stale directory link must be replaced by the real directory"
+        );
+        assert!(
+            !fs::symlink_metadata(dst.join("plain.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a stale file link must be replaced by the real file"
+        );
+        assert_eq!(fs::read_to_string(dst.join("lib/mod.py")).unwrap(), "real");
+        // Nothing was written through either link.
+        assert!(!outside.join("lib/mod.py").exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("plain.txt")).unwrap(),
+            "untouched"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_mismatched_dest_keeps_a_matching_real_entry() {
+        // Only mismatches are cleared — wiping a same-kind directory would turn
+        // every re-copy into a full delete-and-rewrite of the Python tree.
+        use std::fs;
+
+        let base = unique_temp_dir("keep-match");
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("dir");
+        fs::create_dir_all(dir.join("keep")).unwrap();
+        fs::write(base.join("file.txt"), b"keep").unwrap();
+
+        clear_mismatched_dest(&dir, true).unwrap();
+        clear_mismatched_dest(&base.join("file.txt"), false).unwrap();
+        // A path with nothing at it is not an error.
+        clear_mismatched_dest(&base.join("absent"), false).unwrap();
+
+        assert!(dir.join("keep").is_dir());
+        assert_eq!(fs::read_to_string(base.join("file.txt")).unwrap(), "keep");
 
         let _ = fs::remove_dir_all(&base);
     }

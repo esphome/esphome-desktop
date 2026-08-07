@@ -552,8 +552,20 @@ mod tests {
 
         let mut count = read_counter(&marker);
         let mut defers = 0;
-        while count < MAX_REFRESH_DEFERS {
-            bump_counter(&marker, count + 1);
+        // Bounded by construction rather than by the counter: a `bump_counter`
+        // that cannot persist leaves `count` where it was, and a `while count <
+        // MAX_REFRESH_DEFERS` loop would spin on that forever instead of
+        // failing. One iteration per allowed defer, each asserting the write
+        // landed, turns the same breakage into an immediate failure.
+        for _ in 0..MAX_REFRESH_DEFERS {
+            assert!(
+                count < MAX_REFRESH_DEFERS,
+                "the bound must not be reached before every defer is spent"
+            );
+            assert!(
+                bump_counter(&marker, count + 1),
+                "the defer counter must persist to disk"
+            );
             count = read_counter(&marker);
             defers += 1;
         }
