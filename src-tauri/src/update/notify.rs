@@ -127,16 +127,14 @@ fn update_notification_body(subject: &str, installed: &str, tray_available: bool
 
 #[cfg(test)]
 mod tests {
-    use super::super::DEVICE_BUILDER_WORDING;
+    use super::super::{PypiChannel, DEVICE_BUILDER_WORDING};
     use super::*;
 
-    /// The ESPHome wording as built by the check tails (channel label present).
+    /// The ESPHome wording exactly as the check tails build it. Going through
+    /// the real constructor is the point: a hand-built copy would keep these
+    /// assertions passing while production drifted away from them.
     fn esphome_wording() -> UpdateWording<'static> {
-        UpdateWording {
-            component: "ESPHome",
-            log_prefix: "Update",
-            channel_label: Some("stable"),
-        }
+        UpdateWording::esphome(PypiChannel::Stable)
     }
 
     #[test]
