@@ -374,19 +374,37 @@ pub(crate) fn update_startup_checks(enabled: bool) {
     STARTUP_DISABLE_ITEM.refresh(!enabled);
 }
 
-/// Re-detect the installed version and update the tray version display.
-pub(crate) fn refresh_version_display(app_handle: &AppHandle) {
+/// Detect the installed version and return the label to display. Private and
+/// blocking: [`refresh_version_display_blocking`] is the only way in, so no
+/// `async` arm elsewhere can call this detector directly.
+fn detect_version_label(app_handle: &AppHandle) -> String {
     // Mirror the device-builder display: keep "not installed" distinct from a
     // real detection failure ("unknown") instead of collapsing both.
-    let version = match crate::update::installed_esphome_version(app_handle) {
+    match crate::update::installed_esphome_version(app_handle) {
         Ok(Some(v)) => v,
         Ok(None) => t("version.not_installed"),
         Err(e) => {
             warn!("Could not detect ESPHome version: {}", e);
             t("version.unknown")
         }
-    };
-    update_version(&version);
+    }
+}
+
+/// Re-detect the installed ESPHome version and update the tray display, off
+/// the async executor (the detection spawns a Python subprocess). Mirrors
+/// [`refresh_builder_version_display`], so both of the refresh callbacks the
+/// update flows take come from this module — including its handling of a
+/// failed detection task, which falls back to "unknown" rather than leaving
+/// the previous version on screen with nothing in the log.
+pub(crate) async fn refresh_version_display_blocking(app_handle: &AppHandle) {
+    let app = app_handle.clone();
+    let label = tokio::task::spawn_blocking(move || detect_version_label(&app))
+        .await
+        .unwrap_or_else(|e| {
+            warn!("ESPHome version detection task failed: {}", e);
+            t("version.unknown")
+        });
+    update_version(&label);
 }
 
 /// Re-detect the installed `esphome-device-builder` package version and
