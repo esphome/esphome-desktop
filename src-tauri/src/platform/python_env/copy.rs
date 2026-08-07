@@ -54,25 +54,36 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     // `remove_dir` (on Windows `remove_file` cannot delete it); everything else
     // (file, file symlink) uses `remove_file`. Leaving a stale entry in place
     // would make the later symlink call fail with `AlreadyExists`.
+    //
+    // A removal that fails is not fatal here — the symlink call below may still
+    // succeed — but it is the likely cause when that call then reports
+    // `AlreadyExists`, so keep it and name it there rather than letting the
+    // real reason (EACCES, a Windows handle held on the path, a half-deleted
+    // directory) be replaced by its symptom.
+    let mut removal_error: Option<std::io::Error> = None;
     if let Ok(meta) = dst.symlink_metadata() {
         let file_type = meta.file_type();
         if file_type.is_symlink() {
             // A directory symlink must be removed with `remove_dir` on Windows;
             // `remove_file` works for file symlinks on all platforms. Try
             // `remove_file` first, then fall back to `remove_dir`.
-            if std::fs::remove_file(dst).is_err() {
-                let _ = std::fs::remove_dir(dst);
+            if let Err(file_err) = std::fs::remove_file(dst) {
+                // Report the fallback's error, not the first attempt's: on a
+                // directory symlink the `remove_file` failure is expected and
+                // says nothing.
+                removal_error = std::fs::remove_dir(dst).err().or(Some(file_err));
             }
         } else if file_type.is_dir() {
-            let _ = std::fs::remove_dir_all(dst);
+            removal_error = std::fs::remove_dir_all(dst).err();
         } else {
-            let _ = std::fs::remove_file(dst);
+            removal_error = std::fs::remove_file(dst).err();
         }
     }
 
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&target, dst).context("Failed to create symlink")?;
+        std::os::unix::fs::symlink(&target, dst)
+            .with_context(|| link_context(dst, "symlink", &removal_error))?;
     }
 
     #[cfg(windows)]
@@ -90,14 +101,27 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
         };
         if probe.is_dir() {
             std::os::windows::fs::symlink_dir(&target, dst)
-                .context("Failed to create directory symlink")?;
+                .with_context(|| link_context(dst, "directory symlink", &removal_error))?;
         } else {
             std::os::windows::fs::symlink_file(&target, dst)
-                .context("Failed to create file symlink")?;
+                .with_context(|| link_context(dst, "file symlink", &removal_error))?;
         }
     }
 
     Ok(())
+}
+
+/// Name the removal that most likely blocked the symlink call, so a stale entry
+/// we could not clear does not surface as a bare `AlreadyExists` with its actual
+/// cause thrown away. `what` names the link kind for the platform that failed.
+fn link_context(dst: &Path, what: &str, removal_error: &Option<std::io::Error>) -> String {
+    match removal_error {
+        Some(e) => format!(
+            "Failed to create {what} at {dst:?}; the existing entry there could not be \
+             removed first: {e}"
+        ),
+        None => format!("Failed to create {what} at {dst:?}"),
+    }
 }
 
 #[cfg(test)]

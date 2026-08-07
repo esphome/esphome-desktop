@@ -1,8 +1,8 @@
 //! Lifecycle of the user-writable bundled Python tree: the copy from the
 //! read-only bundle, the version marker and deferral bookkeeping that decide
-//! when to refresh it, preserving user-pinned package versions across a
-//! refresh, and the cheap "does the interpreter run at all" check the repair
-//! path uses to aim its diagnosis.
+//! when to refresh it, and preserving user-pinned package versions across a
+//! refresh. The interpreter and package probes it consults live in [`probe`];
+//! the tree copy itself in [`copy`].
 
 use super::health::{bump_counter, read_counter};
 use super::pip::pip_install_blocking;
@@ -647,6 +647,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let bundle = fake_bundle(&base);
         let user = stubbed_user_tree(&base, "exit 1");
+        // Ride out a transient ETXTBSY before driving the refresh: a concurrent
+        // fork in another test thread can hold the just-written stub open for
+        // writing, and an exec that fails for that reason makes the usability
+        // check *unanswerable*, which defers — the opposite of what this test
+        // asserts. Only the probe is retried; the refresh has side effects, so
+        // it gets exactly one run. (Linux enforces ETXTBSY; macOS does not,
+        // which is why only Linux CI flaked.)
+        let interpreter = interpreter_in_tree(&user);
+        for _ in 0..20 {
+            if interpreter_is_usable(&interpreter).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
 
         refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
 
@@ -654,6 +668,41 @@ mod tests {
             !user.join("sentinel.txt").exists(),
             "an interpreter that cannot run has no pinned version worth \
              protecting; deferring would leave a corrupt tree with no repair path"
+        );
+        assert_marker_current(&user);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_stops_deferring_when_the_counter_cannot_be_written() {
+        // The other "stop deferring" path: not a reached bound, but a counter
+        // that can never advance to one. Left deferring, an unwritable marker
+        // reintroduces the unbounded loop the bound exists to stop.
+        //
+        // Reached by pre-creating the marker as a *directory*: `read_counter`
+        // reads 0 (so the bound is nowhere near), while `atomic_write`'s rename
+        // cannot land a file on it, so `bump_counter` returns false. This makes
+        // only the counter path fail — chmod'ing the tree read-only would also
+        // block the `remove_dir_all` the wipe then performs.
+        let base = unique_temp_dir("refresh-defer-unwritable");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundle = fake_bundle(&base);
+        let user = stubbed_user_tree(&base, PROBE_FAILS_BUT_USABLE);
+        std::fs::create_dir_all(user.join(PYTHON_REFRESH_DEFER_MARKER)).unwrap();
+        assert_eq!(
+            read_counter(&user.join(PYTHON_REFRESH_DEFER_MARKER)),
+            0,
+            "the bound must be out of reach, so only the failed write can stop the defer"
+        );
+
+        refresh_python_tree(&user, || Ok(bundle.clone()), RefreshReason::Startup).unwrap();
+
+        assert!(
+            !user.join("sentinel.txt").exists(),
+            "a counter that can never advance must stop the defer now, not \
+             defer forever waiting for a bound it cannot reach"
         );
         assert_marker_current(&user);
 
