@@ -38,11 +38,20 @@ pub(super) fn bump_counter(marker_path: &Path, count: u32) -> bool {
     }
 }
 
-/// Hard upper bound on the health probe. Measured at ~0.2s against a real
-/// bundled tree, so this is not a budget — it is the line between "slow" and
-/// "never", on a path the user is waiting behind. Without it a wedged
-/// interpreter means the backend never starts and nothing says why.
-pub(super) const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Hard upper bound on a child interpreter a user is waiting behind.
+///
+/// Named for the health probe it was introduced with, but it is the crate's
+/// one answer to "how long may a probe take before we stop waiting": every
+/// caller here measures in fractions of a second against a real bundled tree
+/// (~0.2s for the `esphome config` probe, less for a metadata read), so this
+/// is not a budget — it is the line between "slow" and "never". Without it a
+/// wedged interpreter means the backend never starts and nothing says why.
+///
+/// Used by the `esphome config` health probe, [`super::interpreter_is_usable`],
+/// the two package-version probes in [`super::python_env`], and
+/// [`crate::update::installed_esphome_version`] — all of which run either
+/// inside the Tauri `setup` hook or under a held `UpdateGuard`.
+pub(crate) const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The config the health probe validates. Any valid config does the job; it
 /// only has to make ESPHome load its component tree.

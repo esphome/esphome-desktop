@@ -8,7 +8,7 @@
 //! does not produce them.
 
 use crate::platform::health::PROBE_TIMEOUT;
-use crate::platform::process::{run_python_capture, run_python_capture_bounded, tail_for_log};
+use crate::platform::process::{run_python_capture_bounded, tail_for_log};
 use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{info, warn};
@@ -166,8 +166,18 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
 pub(crate) fn detect_device_builder_version(python_bin: &Path) -> Result<Option<String>> {
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so detection only ever sees the managed bundled install.
-    let output = run_python_capture(python_bin, ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"])
-        .context("Failed to run python")?;
+    //
+    // Bounded for the same reason its `dedupe` sibling is: the tray's Check for
+    // Updates arm calls this while holding the `UpdateGuard`, so a wedged
+    // interpreter here pins `update_in_flight` for the rest of the session —
+    // every later update, switch and Quit arm then silently no-ops — and the
+    // arm itself never reaches a dialog, so nothing on screen says why.
+    let output = run_python_capture_bounded(
+        python_bin,
+        ["-I", "-c", DEVICE_BUILDER_MAINT_PY, "detect"],
+        PROBE_TIMEOUT,
+    )
+    .context("Failed to run python")?;
     if !output.status.success() {
         // `detect` exits 0 even when the package is absent (it prints nothing),
         // so a non-zero exit is a real execution failure.
@@ -213,7 +223,14 @@ pub(crate) fn read_package_version(python_bin: &Path, package: &str) -> Result<O
         "from importlib.metadata import version, PackageNotFoundError\ntry: print(version('{}'))\nexcept PackageNotFoundError: pass",
         package
     );
-    let output = run_python_capture(python_bin, ["-c", &script])
+    // Bounded: every caller is inside `ensure_user_python`, which the Tauri
+    // `setup` hook runs to completion before the daemon starts. An interpreter
+    // that hangs rather than fails would hold the launch open forever with no
+    // window, no tray and no log line — and a timeout reads as `Err`, which
+    // [`super::snapshot_preserved_versions`] already treats as "could not read,
+    // so do not wipe", the correct answer for a tree we never got an answer
+    // from.
+    let output = run_python_capture_bounded(python_bin, ["-c", &script], PROBE_TIMEOUT)
         .with_context(|| format!("Failed to run version probe for {package} via {python_bin:?}"))?;
     parse_probe_output(
         package,

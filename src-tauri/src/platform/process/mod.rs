@@ -65,12 +65,13 @@ pub(super) fn head_for_log(s: &str) -> String {
 /// Spawn the given Python interpreter with `args` and capture its output,
 /// killing it if it outlives `timeout`.
 ///
-/// The unbounded [`run_python_capture`] is right for callers who are already
-/// waiting on something else. It is wrong on the launch path: a child that never
-/// exits there means the backend never starts and the tray never says why. This
-/// module already draws that line for `pip install` — "bounding it prevents a
-/// stalled network from hanging app startup indefinitely" — and the same
-/// reasoning applies to anything else we make a user wait behind.
+/// The bound is not optional for anything a user waits behind: a child that
+/// never exits on the launch path means the backend never starts and the tray
+/// never says why, and one under a held `UpdateGuard` pins that guard for the
+/// session. This module already drew that line for `pip install` — "bounding it
+/// prevents a stalled network from hanging app startup indefinitely" — and
+/// every other production spawn now sits on the same side of it; the unbounded
+/// `run_python_capture` is `cfg(test)` so it stays that way.
 pub(super) fn run_python_capture_bounded<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
@@ -120,7 +121,17 @@ pub(super) fn python_command<S: AsRef<OsStr>>(
 /// and callers keep their own policy for exit status, logging, and
 /// stdout/stderr interpretation.
 ///
-/// Unbounded; see [`run_python_capture_bounded`] for callers on the launch path.
+/// Unbounded, and therefore **test-only**. Every production caller runs either
+/// inside the Tauri `setup` hook or under a held `UpdateGuard`, where a child
+/// that never exits is not a slow launch but a dead one, so they all go
+/// through [`run_python_capture_bounded`] (or [`run_python_capture_stdout`],
+/// which is built on it). The `cfg` is what keeps that a property of the code
+/// rather than a note someone has to remember: a new caller cannot reach for
+/// the unbounded spelling by accident. The e2e harness in [`super`] is the one
+/// legitimate user — it drives a real bundled tree with the same isolation
+/// production uses, and a hung interpreter there is the test suite's own
+/// timeout to enforce.
+#[cfg(test)]
 pub fn run_python_capture<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
@@ -128,15 +139,21 @@ pub fn run_python_capture<S: AsRef<OsStr>>(
     python_command(python, args).output()
 }
 
-/// [`run_python_capture`], returning the trimmed stdout on a successful exit
-/// and `None` on a non-zero exit. stderr is captured but not returned, so
-/// callers that need it (or the exit status) should use
-/// [`run_python_capture`] directly.
+/// [`run_python_capture_bounded`], returning the trimmed stdout on a
+/// successful exit and `None` on a non-zero exit. stderr is captured but not
+/// returned, so callers that need it (or the exit status) should use
+/// [`run_python_capture_bounded`] directly.
+///
+/// The `None` is reserved for a child that ran and said no: a child killed on
+/// `timeout` comes back as `Err(ErrorKind::TimedOut)`, never `Ok(None)`.
+/// Collapsing the two would report a probe that never answered as "the package
+/// is not installed", which is the one reading a caller must not be handed.
 pub fn run_python_capture_stdout<S: AsRef<OsStr>>(
     python: &Path,
     args: impl IntoIterator<Item = S>,
+    timeout: std::time::Duration,
 ) -> std::io::Result<Option<String>> {
-    let output = run_python_capture(python, args)?;
+    let output = run_python_capture_bounded(python, args, timeout)?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -1116,6 +1133,49 @@ mod tests {
              last attempt: {}",
             last_err.expect("the loop ran")
         );
+    }
+
+    #[test]
+    fn run_python_capture_stdout_returns_trimmed_stdout() {
+        let out = run_python_capture_stdout(
+            &test_python(),
+            ["-c", "import sys; sys.stdout.write('  2026.8.0\\n')"],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the child exits, so this must return");
+        assert_eq!(out.as_deref(), Some("2026.8.0"));
+    }
+
+    /// A non-zero exit is the child answering "no", which the `Ok(None)` arm
+    /// exists for -- `installed_esphome_version` reads it as "ESPHome is not
+    /// installed". Pinned alongside the timeout test below so the two readings
+    /// can't drift into each other.
+    #[test]
+    fn run_python_capture_stdout_reports_a_nonzero_exit_as_none() {
+        let out = run_python_capture_stdout(
+            &test_python(),
+            ["-c", "import sys; sys.stdout.write('ignored'); sys.exit(1)"],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("the child exits, so this must return");
+        assert_eq!(out, None);
+    }
+
+    /// A child killed on the bound answered nothing at all, so it must not
+    /// come back as `Ok(None)`: that is the "the interpreter ran and the
+    /// package is not there" arm, and handing it to
+    /// `installed_esphome_version`'s callers would report ESPHome as
+    /// uninstalled -- on the launch path, on the strength of a question that
+    /// timed out.
+    #[test]
+    fn run_python_capture_stdout_times_out_rather_than_reporting_not_installed() {
+        let err = run_python_capture_stdout(
+            &test_python(),
+            ["-c", "import time; time.sleep(600)"],
+            std::time::Duration::from_secs(2),
+        )
+        .expect_err("the child never exits, so this must time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]

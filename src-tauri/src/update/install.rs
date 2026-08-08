@@ -494,9 +494,18 @@ where
 pub fn installed_esphome_version(app_handle: &AppHandle) -> Result<Option<String>> {
     let python_path = platform::get_python_path(app_handle)?;
 
-    let Some(version) =
-        platform::run_python_capture_stdout(&python_path, ["-m", "esphome", "version"])
-            .context("Failed to run esphome version")?
+    // Bounded with the same line the tree probes use. `Settings::load` calls
+    // this from `AppState::new` inside the Tauri `setup` hook, so an
+    // interpreter that hangs on `import esphome` would hold the launch open
+    // with nothing on screen; the tray and update arms call it under a held
+    // `UpdateGuard`. A timeout arrives as `Err`, which every caller already
+    // keeps distinct from the `Ok(None)` that means "ESPHome is not installed".
+    let Some(version) = platform::run_python_capture_stdout(
+        &python_path,
+        ["-m", "esphome", "version"],
+        platform::PROBE_TIMEOUT,
+    )
+    .context("Failed to run esphome version")?
     else {
         return Ok(None);
     };
