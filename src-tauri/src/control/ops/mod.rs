@@ -22,7 +22,7 @@ mod full_update;
 mod startup;
 mod switch;
 
-pub(crate) use full_update::{run_full_update, UpdateReport};
+pub(crate) use full_update::run_full_update;
 pub(crate) use startup::{set_launch_at_startup, startup_enabled};
 pub(crate) use switch::{restart_daemon, switch_backend, switch_release_channel, SwitchOutcome};
 
