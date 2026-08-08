@@ -29,6 +29,10 @@ pub(crate) enum SwitchOutcome {
     /// dashboard came back up.
     InstallFailed { error: String, restarted: bool },
     /// The install succeeded but the dashboard failed to start afterwards.
+    /// The new channel/backend is installed *and* persisted by then, so the
+    /// tray reports this as a partial switch (a warning) while the control
+    /// server reports it as a failure — the same split
+    /// [`super::InstallOutcome::StartFailed`] documents.
     StartFailed(String),
 }
 
