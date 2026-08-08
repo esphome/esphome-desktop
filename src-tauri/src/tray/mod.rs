@@ -17,6 +17,7 @@ use crate::settings::{Backend, ReleaseChannel};
 use crate::AppState;
 
 mod events;
+pub(crate) mod icon;
 
 /// Menu item IDs
 mod ids {
