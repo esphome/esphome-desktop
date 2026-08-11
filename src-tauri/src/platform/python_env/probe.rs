@@ -160,9 +160,10 @@ pub(crate) fn dedupe_dist_info(python_bin: &Path, scope: DistInfoDedupeScope) ->
 /// - `Ok(None)` — `detect` ran successfully (exit 0) but printed no version:
 ///   the package is not installed, or duplicate dist-info dirs left it
 ///   undeterminable (#190).
-/// - `Err(_)` — detection itself failed: the spawn failed or the helper exited
-///   non-zero (a broken interpreter / import error). Callers should surface
-///   this rather than treat it as "not installed".
+/// - `Err(_)` — detection itself failed: the spawn failed, the helper exited
+///   non-zero (a broken interpreter / import error), or it outlived
+///   [`PROBE_TIMEOUT`] and was killed. Callers should surface this rather than
+///   treat it as "not installed".
 pub(crate) fn detect_device_builder_version(python_bin: &Path) -> Result<Option<String>> {
     // `-I` (isolated) keeps user site-packages, PYTHONPATH and sitecustomize off
     // sys.path so detection only ever sees the managed bundled install.
@@ -208,10 +209,11 @@ pub(crate) fn detect_device_builder_version(python_bin: &Path) -> Result<Option<
 /// Returns:
 /// - `Ok(Some(v))` — installed at version `v`.
 /// - `Ok(None)` — confirmed not installed (`PackageNotFoundError`).
-/// - `Err(_)` — the probe itself failed (couldn't spawn the interpreter, or it
-///   exited non-zero on an unexpected exception). This is deliberately distinct
-///   from "not installed": callers that snapshot versions before a destructive
-///   refresh must not treat a flaky probe as "absent" — see
+/// - `Err(_)` — the probe itself failed: couldn't spawn the interpreter, it
+///   exited non-zero on an unexpected exception, or it outlived
+///   [`PROBE_TIMEOUT`] and was killed. This is deliberately distinct from "not
+///   installed": callers that snapshot versions before a destructive refresh
+///   must not treat a flaky probe as "absent" — see
 ///   [`super::snapshot_preserved_versions`].
 pub(crate) fn read_package_version(python_bin: &Path, package: &str) -> Result<Option<String>> {
     // Written as a single-line literal with explicit `\n` so each Python

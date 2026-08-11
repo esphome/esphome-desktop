@@ -78,6 +78,12 @@ pub(super) fn run_python_capture_bounded<S: AsRef<OsStr>>(
     timeout: std::time::Duration,
 ) -> std::io::Result<std::process::Output> {
     let mut cmd = python_command(python, args);
+    // `Command::output()` nulls stdin; `run_bounded` spawns directly, so
+    // without this the child would inherit ours. Nulling it keeps the bounded
+    // spelling a strict superset of the unbounded one — a child that
+    // unexpectedly reads stdin sees EOF as it always did, rather than blocking
+    // on a terminal-launched build until `timeout` expires.
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 

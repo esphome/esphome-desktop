@@ -487,7 +487,8 @@ where
 /// Installed ESPHome version, distinguishing "not installed" from a real
 /// detection failure: `Ok(Some(v))` when installed, `Ok(None)` when the
 /// `esphome version` command runs but exits non-zero (ESPHome absent), and
-/// `Err` only when the check itself can't run (e.g. Python missing). Every
+/// `Err` only when the check itself can't run — Python missing, or the probe
+/// outliving [`platform::PROBE_TIMEOUT`] and being killed. Every
 /// caller handles `Ok(None)` explicitly, mirroring the device-builder
 /// `get_installed_device_builder_version` shape so "not installed" and
 /// "detection failed" never collapse into one state.
