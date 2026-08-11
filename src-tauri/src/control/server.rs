@@ -265,7 +265,7 @@ where
         Some(PostAction::Exit) => {
             info!("Quit requested via control channel");
             // Delegate cleanup to the RunEvent::ExitRequested handler in
-            // lib.rs so the shutdown sequence lives in exactly one place.
+            // shutdown.rs so the shutdown sequence lives in exactly one place.
             app.exit(0);
         }
         Some(PostAction::Relaunch) => {

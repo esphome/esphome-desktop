@@ -21,7 +21,7 @@ use crate::{open_dashboard, platform, AppState};
 /// platform has no StatusNotifier host and when creation fails or panics,
 /// which is what makes the app fall back to opening the dashboard and to
 /// the CLI update hint (issue #87).
-pub(crate) fn create(app: &mut tauri::App, state: &Arc<AppState>) -> bool {
+pub(crate) fn create(app: &tauri::App, state: &Arc<AppState>) -> bool {
     if platform::is_tray_supported() {
         // Create the tray icon programmatically.
         // We wrap this in catch_unwind as a safety net: on Linux the

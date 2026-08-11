@@ -451,7 +451,7 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
             info!("Quit requested");
             std::mem::forget(guard);
             // Delegate cleanup to the RunEvent::ExitRequested handler in
-            // lib.rs so the shutdown sequence lives in exactly one place.
+            // shutdown.rs so the shutdown sequence lives in exactly one place.
             app_handle.exit(0);
         }
         _ => {}
