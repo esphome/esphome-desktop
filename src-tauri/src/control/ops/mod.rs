@@ -10,9 +10,10 @@
 //!
 //! This module holds what the sequences share — the [`UpdateGuard`] that makes
 //! them mutually exclusive, the [`Progress`] sink they report through, and the
-//! [`stop_install_start`] skeleton two of them are built on. The sequences
-//! themselves live in the submodules and are re-exported here, so call sites
-//! keep addressing them as `ops::…`:
+//! [`stop_install_start`] skeleton the tray's Check for Updates arms and the
+//! CLI update flow are built on. The sequences themselves live in the
+//! submodules and are re-exported here, so call sites keep addressing them as
+//! `ops::…`:
 //!
 //! * [`switch`] — Switch Channel, Switch Backend, Restart Dashboard;
 //! * [`startup`] — the launch-at-login toggle;
@@ -101,7 +102,7 @@ pub(crate) fn not_ready_note() -> String {
 /// downgrading a save failure to a warning (the in-memory value still
 /// stands). `mutate` returns whether anything changed; an unchanged result
 /// skips the save.
-pub(super) async fn set_and_save<F>(app: &AppHandle, state: &Arc<AppState>, mutate: F)
+async fn set_and_save<F>(app: &AppHandle, state: &Arc<AppState>, mutate: F)
 where
     F: FnOnce(&mut crate::settings::Settings) -> bool,
 {
@@ -114,7 +115,7 @@ where
 }
 
 /// How a [`stop_install_start`] sequence ended. The tray maps these onto
-/// dialogs, [`run_package_phase`] onto the CLI report's lines.
+/// dialogs, the CLI update flow onto its report's lines.
 ///
 /// Deliberately not folded into a `Result<(), String>`: the surfaces disagree
 /// on what each failure means. A failed start is a warning to the tray (the
@@ -192,7 +193,7 @@ where
 
 /// Best-effort dashboard restart after a failed install, so the user isn't
 /// left without a backend. Returns whether the restart succeeded.
-pub(super) async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
+async fn restart_after_failure(state: &Arc<AppState>, context: &str) -> bool {
     match state.daemon.start().await {
         Ok(()) => true,
         Err(e) => {
