@@ -2,8 +2,9 @@
 //!
 //! The stop→install→persist→start sequences behind the tray's Switch Channel
 //! and Switch Backend radio arms and their CLI equivalents, plus the plain
-//! Restart Dashboard. Each reports through a [`Progress`] sink and hands back
-//! a [`SwitchOutcome`] the surfaces render themselves.
+//! Restart Dashboard. All three report through a [`Progress`] sink; the two
+//! switches hand back a [`SwitchOutcome`] the surfaces render themselves,
+//! while the restart reports whether the dashboard came back.
 
 use std::sync::Arc;
 use tauri::AppHandle;
