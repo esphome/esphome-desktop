@@ -23,6 +23,10 @@ mod full_update;
 mod startup;
 mod switch;
 
+// `full_update::UpdateReport` is deliberately not re-exported: the sole caller
+// (`control/server.rs`) binds it without naming the type and reads it by field
+// access, so a re-export here would be unused and trip `-D warnings`. Re-add it
+// the moment something needs to name the type.
 pub(crate) use full_update::run_full_update;
 pub(crate) use startup::{set_launch_at_startup, startup_enabled};
 pub(crate) use switch::{restart_daemon, switch_backend, switch_release_channel, SwitchOutcome};
