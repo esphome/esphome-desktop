@@ -140,9 +140,7 @@ fn interpreter_in_tree(root: &Path) -> PathBuf {
 /// env var that sharun always sets, and fall back to exe-relative
 /// resolution for deb/AUR installs where `APPDIR` is absent.
 ///
-/// On macOS and Windows, Tauri's `resource_dir()` points at the right place,
-/// but on Windows it comes back with the `\\?\` extended-length prefix (Tauri
-/// canonicalizes `current_exe()`), which [`without_verbatim_prefix`] removes.
+/// On macOS and Windows, Tauri's `resource_dir()` points at the right place.
 fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -180,40 +178,20 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let resource_dir = without_verbatim_prefix(
-            app_handle
-                .path()
-                .resource_dir()
-                .context("Failed to get resource directory")?,
-        );
+        let resource_dir = app_handle
+            .path()
+            .resource_dir()
+            .context("Failed to get resource directory")?;
+        // Tauri canonicalizes `current_exe()`, so on Windows this is a `\\?\`
+        // extended-length path. Everything derived from it (bundled Python,
+        // MinGit, ccache) reaches the ESPHome backend as an executable path or
+        // through `PATH`; `CreateProcess` accepts such paths but `cmd.exe`, which
+        // PlatformIO/SCons uses for every build step, does not, so a `\\?\` ccache
+        // on `PATH` fails every ESP8266 compile (esphome/esphome#18399). Strip
+        // it here so every derived path is plain; no-op on macOS.
+        let resource_dir = dunce::simplified(&resource_dir).to_path_buf();
         debug!("Bundled resource dir: {:?}", resource_dir);
         Ok(resource_dir)
-    }
-}
-
-/// Strip the Windows extended-length (`\\?\`) prefix from `path`.
-///
-/// Tauri's `resource_dir()` is derived from a canonicalized `current_exe()`,
-/// and `std::fs::canonicalize` on Windows returns verbatim paths such as
-/// `\\?\C:\Users\...\ESPHome Device Builder`. Everything we derive from the
-/// resource dir (the bundled Python, MinGit, ccache) is handed to the ESPHome
-/// backend either as an executable path or through `PATH`, and while
-/// `CreateProcess` accepts verbatim paths, `cmd.exe` does not: PlatformIO/SCons
-/// runs every build step through `cmd.exe`, so a `\\?\` ccache found on `PATH`
-/// fails each ESP8266 compile with "The system cannot find the path specified"
-/// (esphome/esphome#18399). Simplifying here keeps every derived path plain.
-///
-/// No-op on other platforms, and on Windows for paths without the prefix or
-/// ones `dunce` cannot safely express without it (verbatim UNC paths, reserved
-/// names, over-long paths); those are returned unchanged.
-fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        dunce::simplified(&path).to_path_buf()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        path
     }
 }
 
@@ -434,19 +412,15 @@ mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
 
-    #[test]
-    fn without_verbatim_prefix_leaves_plain_paths_alone() {
-        let plain = PathBuf::from("plain").join("resource dir");
-        assert_eq!(without_verbatim_prefix(plain.clone()), plain);
-    }
-
+    /// Pins the `dunce` behaviour `get_bundled_resource_dir` relies on for the
+    /// shape Tauri produces on Windows (drive letter, spaces in the name).
     #[cfg(target_os = "windows")]
     #[test]
-    fn without_verbatim_prefix_strips_extended_length_prefix() {
-        let verbatim = PathBuf::from(r"\\?\C:\Program Files\ESPHome Device Builder");
+    fn resource_dir_verbatim_prefix_is_stripped() {
+        let verbatim = Path::new(r"\\?\C:\Program Files\ESPHome Device Builder");
         assert_eq!(
-            without_verbatim_prefix(verbatim),
-            PathBuf::from(r"C:\Program Files\ESPHome Device Builder")
+            dunce::simplified(verbatim),
+            Path::new(r"C:\Program Files\ESPHome Device Builder")
         );
     }
 

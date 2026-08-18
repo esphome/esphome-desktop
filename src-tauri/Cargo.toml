@@ -57,6 +57,9 @@ open = "5"
 # Home directory detection
 dirs = "6"
 
+# Strips the Windows \\?\ prefix from Tauri's resource dir (no-op elsewhere)
+dunce = "1"
+
 # System locale detection for UI translations
 sys-locale = "0.3"
 
@@ -71,9 +74,6 @@ tauri = { version = "2.11.2", features = ["image-png"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_Console", "Win32_System_JobObjects", "Win32_Security", "Win32_System_SystemInformation"] }
-# Strips the \\?\ extended-length prefix from paths Tauri hands us; cmd.exe cannot
-# run such paths, see `platform::without_verbatim_prefix`.
-dunce = "1"
 
 # "Win32_System_Diagnostics_ToolHelp" is only needed to walk to the grandchild in
 # the job object test, so it stays out of the shipping binary's feature set.
