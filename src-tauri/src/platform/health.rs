@@ -41,14 +41,16 @@ pub(super) fn bump_counter(marker_path: &Path, count: u32) -> bool {
 /// Hard upper bound on a child interpreter a user is waiting behind.
 ///
 /// Named for the health probe it was introduced with, but it is the crate's
-/// one answer to "how long may a probe take before we stop waiting". Against a
-/// real bundled tree its callers span sub-second for a metadata read to
-/// several seconds for anything that imports `esphome` (~0.2s for the
-/// `esphome config` probe, and `installed_esphome_version_async` documents the
-/// `esphome` import as slow enough to need `spawn_blocking`). So this is not
-/// a budget, but nor is the headroom unlimited — it is the line between "slow"
-/// and "never", and a cold disk moves the slowest caller closer to it. Without
-/// it a wedged interpreter means the backend never starts and nothing says why.
+/// one answer to "how long may a probe take before we stop waiting". The one
+/// number we have measured is ~0.2s for the `esphome config` probe against a
+/// real bundled tree with the interpreter and `esphome` already warm in the
+/// page cache. Nothing else here is measured: a metadata read does strictly
+/// less work than that, while a cold first `import esphome` does strictly more
+/// — enough that `installed_esphome_version_async` runs it on `spawn_blocking`
+/// rather than the async runtime. So this is not a budget, but nor is the
+/// headroom unlimited — it is the line between "slow" and "never", and a cold
+/// disk moves the slowest caller closer to it. Without it a wedged interpreter
+/// means the backend never starts and nothing says why.
 ///
 /// The bound is **per child**, not per path: one launch can chain several
 /// probes (`snapshot_preserved_versions` → `interpreter_is_usable` → the
