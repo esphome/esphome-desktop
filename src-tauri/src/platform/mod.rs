@@ -24,6 +24,10 @@ pub use health::{
     clear_repair_count, esphome_config_probe, is_managed_python_tree, may_repair_tree,
     repair_budget_left,
 };
+// The shared "how long may a probe take" bound, so callers outside `platform`
+// (the ESPHome version probe in `update`) apply the same line the probes in
+// here do rather than picking their own.
+pub(crate) use health::PROBE_TIMEOUT;
 pub use pip::{pip_command, pip_output_report, run_pip};
 #[cfg(target_os = "windows")]
 pub use process::{assign_to_kill_on_close_job, send_ctrl_break};

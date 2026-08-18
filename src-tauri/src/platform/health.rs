@@ -38,11 +38,30 @@ pub(super) fn bump_counter(marker_path: &Path, count: u32) -> bool {
     }
 }
 
-/// Hard upper bound on the health probe. Measured at ~0.2s against a real
-/// bundled tree, so this is not a budget — it is the line between "slow" and
-/// "never", on a path the user is waiting behind. Without it a wedged
-/// interpreter means the backend never starts and nothing says why.
-pub(super) const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Hard upper bound on a child interpreter a user is waiting behind.
+///
+/// Named for the health probe it was introduced with, but it is the crate's
+/// one answer to "how long may a probe take before we stop waiting". The one
+/// number we have measured is ~0.2s for the `esphome config` probe against a
+/// real bundled tree with the interpreter and `esphome` already warm in the
+/// page cache. Nothing else here is measured: a metadata read does strictly
+/// less work than that, while a cold first `import esphome` does strictly more
+/// — enough that `installed_esphome_version_async` runs it on `spawn_blocking`
+/// rather than the async runtime. So this is not a budget, but nor is the
+/// headroom unlimited — it is the line between "slow" and "never", and a cold
+/// disk moves the slowest caller closer to it. Without it a wedged interpreter
+/// means the backend never starts and nothing says why.
+///
+/// The bound is **per child**, not per path: one launch can chain several
+/// probes (`snapshot_preserved_versions` → `interpreter_is_usable` → the
+/// `restore_preserved_versions` reads), so a wholly wedged tree costs minutes
+/// rather than 60s. Still bounded, which is the point.
+///
+/// Used by the `esphome config` health probe, [`super::interpreter_is_usable`],
+/// the two package-version probes in [`super::python_env`], and
+/// [`crate::update::installed_esphome_version`] — all of which run either
+/// inside the Tauri `setup` hook or under a held `UpdateGuard`.
+pub(crate) const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The config the health probe validates. Any valid config does the job; it
 /// only has to make ESPHome load its component tree.
