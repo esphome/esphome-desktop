@@ -141,6 +141,9 @@ fn interpreter_in_tree(root: &Path) -> PathBuf {
 /// resolution for deb/AUR installs where `APPDIR` is absent.
 ///
 /// On macOS and Windows, Tauri's `resource_dir()` points at the right place.
+/// On Windows the result is additionally normalized to a non-verbatim path
+/// (see [`simplified_resource_dir`]); the `env_path` callers that put derived
+/// dirs on `PATH` or into `GIT_SSL_CAINFO` rely on that guarantee.
 fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -178,21 +181,49 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let resource_dir = app_handle
-            .path()
-            .resource_dir()
-            .context("Failed to get resource directory")?;
-        // Tauri canonicalizes `current_exe()`, so on Windows this is a `\\?\`
-        // extended-length path. Everything derived from it (bundled Python,
-        // MinGit, ccache) reaches the ESPHome backend as an executable path or
-        // through `PATH`; `CreateProcess` accepts such paths but `cmd.exe`, which
-        // PlatformIO/SCons uses for every build step, does not, so a `\\?\` ccache
-        // on `PATH` fails every ESP8266 compile (esphome/esphome#18399). Strip
-        // it here so every derived path is plain; no-op on macOS.
-        let resource_dir = dunce::simplified(&resource_dir).to_path_buf();
+        let resource_dir = simplified_resource_dir(
+            app_handle
+                .path()
+                .resource_dir()
+                .context("Failed to get resource directory")?,
+        );
         debug!("Bundled resource dir: {:?}", resource_dir);
         Ok(resource_dir)
     }
+}
+
+/// Strip the Windows `\\?\` extended-length prefix from the resource dir.
+///
+/// Tauri canonicalizes `current_exe()`, so on Windows `resource_dir()` is a
+/// verbatim `\\?\C:\...` path. Everything derived from it (bundled Python,
+/// MinGit, ccache) reaches the ESPHome backend as an executable path or
+/// through `PATH`; `CreateProcess` accepts verbatim paths but `cmd.exe`, which
+/// PlatformIO/SCons uses for every build step, does not, so a `\\?\` ccache on
+/// `PATH` fails every ESP8266 compile (esphome/esphome#18399). Stripping here
+/// keeps every derived path plain; no-op on macOS and for plain paths.
+///
+/// `dunce` declines to strip when the plain form would not round-trip
+/// (verbatim UNC shares, over-`MAX_PATH` totals, reserved names, non-Unicode);
+/// those paths pass through unchanged with a warning, since `cmd.exe` build
+/// steps are then likely to fail with the same opaque error as #18399.
+// Split out of the `AppHandle` resolution so it can be unit-tested, like the
+// env_path helpers; only the non-Linux branch calls it (the Linux resource dir
+// never comes from Tauri).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn simplified_resource_dir(dir: PathBuf) -> PathBuf {
+    let simplified = dunce::simplified(&dir).to_path_buf();
+    #[cfg(target_os = "windows")]
+    if simplified
+        .as_os_str()
+        .as_encoded_bytes()
+        .starts_with(br"\?")
+    {
+        tracing::warn!(
+            "Resource dir stayed verbatim: {:?}; cmd.exe build steps may fail",
+            simplified
+        );
+    }
+    simplified
 }
 
 /// Root of the pristine Python tree inside the bundled resources.
@@ -412,15 +443,25 @@ mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
 
-    /// Pins the `dunce` behaviour `get_bundled_resource_dir` relies on for the
-    /// shape Tauri produces on Windows (drive letter, spaces in the name).
+    /// Identity on plain paths, on every platform; also guards the helper's
+    /// existence, so dropping the call from the resolver shows up in review as
+    /// a dead function rather than silently.
+    #[test]
+    fn simplified_resource_dir_leaves_plain_paths_alone() {
+        let plain = PathBuf::from("plain").join("resource dir");
+        assert_eq!(simplified_resource_dir(plain.clone()), plain);
+    }
+
+    /// The shape Tauri produces on Windows (verbatim drive letter, spaces in
+    /// the name) comes back plain.
     #[cfg(target_os = "windows")]
     #[test]
-    fn resource_dir_verbatim_prefix_is_stripped() {
-        let verbatim = Path::new(r"\\?\C:\Program Files\ESPHome Device Builder");
+    fn simplified_resource_dir_strips_verbatim_prefix() {
         assert_eq!(
-            dunce::simplified(verbatim),
-            Path::new(r"C:\Program Files\ESPHome Device Builder")
+            simplified_resource_dir(PathBuf::from(
+                r"\\?\C:\Program Files\ESPHome Device Builder"
+            )),
+            PathBuf::from(r"C:\Program Files\ESPHome Device Builder")
         );
     }
 
