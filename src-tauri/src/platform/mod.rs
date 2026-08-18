@@ -142,8 +142,9 @@ fn interpreter_in_tree(root: &Path) -> PathBuf {
 ///
 /// On macOS and Windows, Tauri's `resource_dir()` points at the right place.
 /// On Windows the result is additionally normalized to a non-verbatim path
-/// (see [`simplified_resource_dir`]); the `env_path` callers that put derived
-/// dirs on `PATH` or into `GIT_SSL_CAINFO` rely on that guarantee.
+/// where the plain form round-trips (see [`simplified_resource_dir`] for the
+/// shapes it cannot strip); the `env_path` callers that put derived dirs on
+/// `PATH` or into `GIT_SSL_CAINFO` rely on that normalization.
 fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -213,17 +214,23 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 fn simplified_resource_dir(dir: PathBuf) -> PathBuf {
     let simplified = dunce::simplified(&dir).to_path_buf();
     #[cfg(target_os = "windows")]
-    if simplified
-        .as_os_str()
-        .as_encoded_bytes()
-        .starts_with(br"\?")
-    {
+    if is_verbatim(&simplified) {
         tracing::warn!(
             "Resource dir stayed verbatim: {:?}; cmd.exe build steps may fail",
             simplified
         );
     }
     simplified
+}
+
+/// True when `path` still carries the Windows `\\?\` verbatim prefix.
+///
+/// A plain byte comparison so the predicate is testable on every platform;
+/// the warning branch it guards is log-only, so an inert predicate would
+/// break nothing a compiler or the strip tests could notice.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_verbatim(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().starts_with(br"\\?\")
 }
 
 /// Root of the pristine Python tree inside the bundled resources.
@@ -450,6 +457,28 @@ mod tests {
     fn simplified_resource_dir_leaves_plain_paths_alone() {
         let plain = PathBuf::from("plain").join("resource dir");
         assert_eq!(simplified_resource_dir(plain.clone()), plain);
+    }
+
+    /// Byte-level check of the warning predicate; the branch it guards is
+    /// log-only, so this test is the only thing that fails when the pattern
+    /// stops matching real verbatim paths.
+    #[test]
+    fn is_verbatim_detects_the_verbatim_prefix() {
+        assert!(is_verbatim(Path::new(r"\\?\C:\Program Files\x")));
+        assert!(is_verbatim(Path::new(r"\\?\UNC\server\share\x")));
+        assert!(!is_verbatim(Path::new(r"C:\Program Files\x")));
+        assert!(!is_verbatim(Path::new(r"\\server\share\x")));
+    }
+
+    /// A shape `dunce` declines to strip (verbatim UNC) passes through
+    /// unchanged and is still flagged verbatim, i.e. the warning would fire.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn simplified_resource_dir_keeps_verbatim_unc_and_flags_it() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share\ESPHome Device Builder");
+        let out = simplified_resource_dir(unc.clone());
+        assert_eq!(out, unc);
+        assert!(is_verbatim(&out));
     }
 
     /// The shape Tauri produces on Windows (verbatim drive letter, spaces in
