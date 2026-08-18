@@ -140,11 +140,9 @@ fn interpreter_in_tree(root: &Path) -> PathBuf {
 /// env var that sharun always sets, and fall back to exe-relative
 /// resolution for deb/AUR installs where `APPDIR` is absent.
 ///
-/// On macOS and Windows, Tauri's `resource_dir()` points at the right place.
-/// On Windows the result is additionally normalized to a non-verbatim path
-/// where the plain form round-trips (see [`simplified_resource_dir`] for the
-/// shapes it cannot strip); the `env_path` callers that put derived dirs on
-/// `PATH` or into `GIT_SSL_CAINFO` rely on that normalization.
+/// On macOS and Windows, Tauri's `resource_dir()` points at the right place;
+/// on Windows the verbatim prefix is stripped where possible (see
+/// [`simplified_resource_dir`]), which the `env_path` callers rely on.
 fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -193,23 +191,16 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     }
 }
 
-/// Strip the Windows `\\?\` extended-length prefix from the resource dir.
-///
-/// Tauri canonicalizes `current_exe()`, so on Windows `resource_dir()` is a
-/// verbatim `\\?\C:\...` path. Everything derived from it (bundled Python,
-/// MinGit, ccache) reaches the ESPHome backend as an executable path or
-/// through `PATH`; `CreateProcess` accepts verbatim paths but `cmd.exe`, which
-/// PlatformIO/SCons uses for every build step, does not, so a `\\?\` ccache on
-/// `PATH` fails every ESP8266 compile (esphome/esphome#18399). Stripping here
-/// keeps every derived path plain; no-op on macOS and for plain paths.
-///
-/// `dunce` declines to strip when the plain form would not round-trip
-/// (verbatim UNC shares, over-`MAX_PATH` totals, reserved names, non-Unicode);
-/// those paths pass through unchanged with a warning, since `cmd.exe` build
-/// steps are then likely to fail with the same opaque error as #18399.
-// Split out of the `AppHandle` resolution so it can be unit-tested, like the
-// env_path helpers; only the non-Linux branch calls it (the Linux resource dir
-// never comes from Tauri).
+/// Strip the Windows `\\?\` prefix Tauri's canonicalized `resource_dir()`
+/// carries: everything derived from it (bundled Python, MinGit, ccache)
+/// reaches the ESPHome backend through `PATH`, and `cmd.exe`, which
+/// PlatformIO/SCons uses for every build step, cannot run `\\?\` paths, so
+/// leaving it in fails every ESP8266 compile (esphome/esphome#18399).
+/// No-op on macOS and for plain paths. Shapes `dunce` cannot round-trip
+/// (verbatim UNC, over-`MAX_PATH`, reserved names, non-Unicode) pass through
+/// unchanged with a warning.
+// Split out of the `AppHandle` resolution so it can be unit-tested; only the
+// non-Linux branch calls it.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn simplified_resource_dir(dir: PathBuf) -> PathBuf {
     let simplified = dunce::simplified(&dir).to_path_buf();
@@ -224,10 +215,8 @@ fn simplified_resource_dir(dir: PathBuf) -> PathBuf {
 }
 
 /// True when `path` still carries the Windows `\\?\` verbatim prefix.
-///
-/// A plain byte comparison so the predicate is testable on every platform;
-/// the warning branch it guards is log-only, so an inert predicate would
-/// break nothing a compiler or the strip tests could notice.
+/// Byte comparison so the log-only warning branch is testable on every
+/// platform.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_verbatim(path: &Path) -> bool {
     path.as_os_str().as_encoded_bytes().starts_with(br"\\?\")
@@ -450,18 +439,16 @@ mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
 
-    /// Identity on plain paths, on every platform; also guards the helper's
-    /// existence, so dropping the call from the resolver shows up in review as
-    /// a dead function rather than silently.
+    /// Identity on plain paths, on every platform; dropping the resolver's
+    /// call then surfaces as dead code under `-D warnings`.
     #[test]
     fn simplified_resource_dir_leaves_plain_paths_alone() {
         let plain = PathBuf::from("plain").join("resource dir");
         assert_eq!(simplified_resource_dir(plain.clone()), plain);
     }
 
-    /// Byte-level check of the warning predicate; the branch it guards is
-    /// log-only, so this test is the only thing that fails when the pattern
-    /// stops matching real verbatim paths.
+    /// The warning branch is log-only, so only this test fails when the
+    /// predicate stops matching real verbatim paths.
     #[test]
     fn is_verbatim_detects_the_verbatim_prefix() {
         assert!(is_verbatim(Path::new(r"\\?\C:\Program Files\x")));
@@ -470,8 +457,8 @@ mod tests {
         assert!(!is_verbatim(Path::new(r"\\server\share\x")));
     }
 
-    /// A shape `dunce` declines to strip (verbatim UNC) passes through
-    /// unchanged and is still flagged verbatim, i.e. the warning would fire.
+    /// A shape `dunce` cannot strip (verbatim UNC) passes through unchanged
+    /// and still flags verbatim, so the warning would fire.
     #[cfg(target_os = "windows")]
     #[test]
     fn simplified_resource_dir_keeps_verbatim_unc_and_flags_it() {
@@ -481,8 +468,7 @@ mod tests {
         assert!(is_verbatim(&out));
     }
 
-    /// The shape Tauri produces on Windows (verbatim drive letter, spaces in
-    /// the name) comes back plain.
+    /// The shape Tauri produces on Windows comes back plain.
     #[cfg(target_os = "windows")]
     #[test]
     fn simplified_resource_dir_strips_verbatim_prefix() {
