@@ -413,10 +413,7 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                             &t("switch_backend.partial_title"),
                             t_with(
                                 "switch_backend.partial",
-                                &[
-                                    ("backend", &new_backend.to_string()),
-                                    ("error", &e.to_string()),
-                                ],
+                                &[("backend", &new_backend.to_string()), ("error", &e)],
                             ),
                             MessageDialogKind::Warning,
                         )
