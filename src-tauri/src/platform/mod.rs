@@ -61,7 +61,7 @@ pub fn get_data_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 /// The CLI client mode (`esphome-desktop <subcommand>`) runs without a Tauri
 /// app, so it cannot use `app_data_dir()`. Joining the bundle identifier onto
 /// the OS data dir is the same derivation Tauri uses, and the same one
-/// `app_log_appender` in `lib.rs` already relies on. Does not create the
+/// `app_log_appender` in `logging.rs` already relies on. Does not create the
 /// directory.
 pub fn data_dir_no_handle() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(BUNDLE_IDENTIFIER))

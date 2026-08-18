@@ -5,7 +5,7 @@
 //! the `PATH` this process carries. This module owns the resource-dir lookups
 //! for the tools we bundle, the pure `PATH` string builders, the single place
 //! that mutates the environment, and the `ensure_*_on_path` entry points
-//! `lib.rs` calls at startup.
+//! `startup/mod.rs` calls at startup.
 
 use anyhow::{Context, Result};
 use std::ffi::{OsStr, OsString};
