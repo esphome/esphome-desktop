@@ -112,6 +112,25 @@ fn interpolate(template: &str, args: &[(&str, &str)]) -> String {
     out
 }
 
+/// The set of `{name}` tokens a message carries.
+///
+/// Scanned exactly the way [`interpolate`] scans them — same `{`-then-`}`
+/// walk, same "unmatched `{` ends the scan" rule — so this reports the tokens
+/// interpolation would actually try to fill, not a stricter or looser idea of
+/// them. A set (not a count) because interpolation replaces every occurrence
+/// of a token, so a translation may repeat or reorder one freely.
+fn placeholders(message: &str) -> std::collections::BTreeSet<&str> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = message;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else { break };
+        out.insert(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out
+}
+
 /// Pick the locale to use: a non-empty env override wins, then the system
 /// locale. `None` means English.
 fn choose_locale(env_value: Option<String>, system_locale: Option<String>) -> Option<String> {
@@ -236,8 +255,19 @@ fn parse_locale(raw: &str) -> HashMap<String, String> {
 }
 
 /// Build the active table: the English base overlaid with the requested
-/// locale's non-empty messages (Lokalise exports untranslated keys as empty
+/// locale's usable messages (Lokalise exports untranslated keys as empty
 /// strings; those must fall back to English, not blank the UI).
+///
+/// "Usable" also means the message carries the same `{placeholder}` set as
+/// its English original. Translations arrive from Lokalise and are embedded
+/// by `build.rs`, whose only gate is that the file parses as JSON — and dev
+/// builds are English-only, so no test ever sees them. A translator who
+/// drops `{version}` or types `{versoin}` therefore ships a message that
+/// interpolation either silently strips a value from or renders with a raw
+/// brace token in the UI, and the overlay would install it *over* a correct
+/// English string. Falling back per key is the same remedy the empty-string
+/// case already gets, for the same reason: the translated value is unusable,
+/// and English is.
 fn build_table(requested: Option<&str>, embedded: &[(&str, &str)]) -> HashMap<String, String> {
     let base_raw = embedded
         .iter()
@@ -260,12 +290,20 @@ fn build_table(requested: Option<&str>, embedded: &[(&str, &str)]) -> HashMap<St
         .map(|(_, raw)| *raw)
         .unwrap_or("{}");
     for (key, message) in parse_locale(raw) {
+        if message.is_empty() {
+            continue;
+        }
         // Only overlay keys that exist in English: a stale Lokalise key must
         // not resurrect a string the code no longer uses (harmless) or, worse,
         // mask a typo'd lookup with a stale message.
-        if !message.is_empty() && table.contains_key(&key) {
-            table.insert(key, message);
+        let Some(english) = table.get(&key) else {
+            continue;
+        };
+        if placeholders(&message) != placeholders(english) {
+            warn!("{stem} translation of {key} has mismatched placeholders; using English");
+            continue;
         }
+        table.insert(key, message);
     }
     table
 }
@@ -469,6 +507,57 @@ mod tests {
         let table = build_table(Some("fr"), embedded);
         assert_eq!(table.get("a").map(String::as_str), Some("français"));
         assert!(!table.contains_key("gone"));
+    }
+
+    #[test]
+    fn build_table_rejects_placeholder_mismatched_translations() {
+        let embedded: &[(&str, &str)] = &[
+            (
+                "en",
+                r#"{"dropped": "v {version}", "typo": "v {version}", "extra": "plain"}"#,
+            ),
+            (
+                "fr",
+                r#"{"dropped": "version", "typo": "v {versoin}", "extra": "brut {oups}"}"#,
+            ),
+        ];
+        let table = build_table(Some("fr"), embedded);
+        // A dropped token would silently strip the value from the message.
+        assert_eq!(
+            table.get("dropped").map(String::as_str),
+            Some("v {version}")
+        );
+        // A typo'd or invented token would render a raw brace in the UI.
+        assert_eq!(table.get("typo").map(String::as_str), Some("v {version}"));
+        assert_eq!(table.get("extra").map(String::as_str), Some("plain"));
+    }
+
+    #[test]
+    fn build_table_keeps_reordered_and_repeated_placeholders() {
+        // Word order is exactly what a translation is allowed to change, and
+        // interpolation fills every occurrence, so neither reordering nor
+        // repeating a token makes a message unusable.
+        let embedded: &[(&str, &str)] = &[
+            ("en", r#"{"a": "{subject} is {installed}"}"#),
+            ("fr", r#"{"a": "{installed} : {subject} ({subject})"}"#),
+        ];
+        let table = build_table(Some("fr"), embedded);
+        assert_eq!(
+            table.get("a").map(String::as_str),
+            Some("{installed} : {subject} ({subject})")
+        );
+    }
+
+    #[test]
+    fn placeholders_reads_the_tokens_interpolate_would_fill() {
+        assert_eq!(
+            placeholders("{b} and {a} and {b}"),
+            ["a", "b"].into_iter().collect()
+        );
+        assert!(placeholders("no tokens").is_empty());
+        // An unmatched '{' ends interpolate's scan, so it ends this one too.
+        assert_eq!(placeholders("{a} then {oops"), ["a"].into_iter().collect());
+        assert_eq!(placeholders("}{a}").len(), 1);
     }
 
     #[test]
