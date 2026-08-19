@@ -263,6 +263,14 @@ pub async fn run_pip(cmd: tokio::process::Command) -> std::io::Result<std::proce
 
 /// [`run_pip`] with the bound passed in, so the timeout behaviour is testable
 /// without waiting out [`PIP_RUN_TIMEOUT`].
+///
+/// Both streams are drained into shared buffers by their own tasks rather than
+/// by `wait_with_output`, so the bytes pip had already written survive the
+/// deadline firing. A 30-minute bound only fires in pathological cases, which
+/// are exactly the ones that get reported, and "timed out" with nothing after
+/// it says nothing about which package pip was resolving, downloading, or
+/// building when it wedged. This is the parity [`run_bounded`]'s
+/// [`BoundedRun::TimedOut`] already gives the startup restore path.
 async fn run_pip_bounded(
     mut cmd: tokio::process::Command,
     timeout: std::time::Duration,
@@ -270,15 +278,15 @@ async fn run_pip_bounded(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    // The bound below owns the child through `wait_with_output`, so dropping
-    // that future is the only handle left on a pip that outlived it. Without
-    // this the child would keep running — and keep writing into
-    // `site-packages` — after the caller has already reported the failure and
-    // moved on. It reaches the direct child only; a PEP 517 build backend it
-    // spawned can still survive, bounded by the kill-on-close job on Windows
-    // and unbounded on Unix.
+    // The bound below owns the child, so dropping it on the way out is the
+    // only handle left on a pip that outlived the deadline. Without this the
+    // child would keep running — and keep writing into `site-packages` —
+    // after the caller has already reported the failure and moved on. It
+    // reaches the direct child only; a PEP 517 build backend it spawned can
+    // still survive, bounded by the kill-on-close job on Windows and unbounded
+    // on Unix.
     cmd.kill_on_drop(true);
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
 
     #[cfg(windows)]
     if !child
@@ -291,17 +299,96 @@ async fn run_pip_bounded(
         );
     }
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(output) => output,
-        // No partial output: unlike `run_bounded`, which drains a killed
-        // child's stderr off-thread, the streams here are owned by the future
-        // just dropped. The callers report this through `anyhow` context on
-        // the install they were running, which is the part that identifies it.
+    let stdout = drain_pipe("stdout", child.stdout.take());
+    let stderr = drain_pipe("stderr", child.stderr.take());
+
+    // The readers are joined *inside* the bound, not after it: a grandchild
+    // that inherited the pipes can hold them open past the child's own exit,
+    // and `wait_with_output` had the same exposure covered by the same
+    // deadline.
+    let waited = tokio::time::timeout(timeout, async {
+        let status = child.wait().await?;
+        join_pipe(stdout.task).await;
+        join_pipe(stderr.task).await;
+        Ok::<_, std::io::Error>(status)
+    })
+    .await;
+
+    match waited {
+        Ok(status) => Ok(std::process::Output {
+            status: status?,
+            stdout: take_buf(&stdout.buf),
+            stderr: take_buf(&stderr.buf),
+        }),
+        // Whatever the readers got before the deadline: the child is about to
+        // be killed by the `kill_on_drop` above, so this is the only evidence
+        // that survives. Callers wrap it in `anyhow` context naming the
+        // install they were running.
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!("pip install timed out after {timeout:?}"),
+            format!(
+                "pip install timed out after {timeout:?}; partial stderr: {}",
+                tail_for_log(&String::from_utf8_lossy(&take_buf(&stderr.buf)))
+            ),
         )),
     }
+}
+
+/// A pipe reader task, and the bytes it has accumulated so far.
+struct PipeDrain {
+    /// Shared rather than returned from the task, so the bytes are readable
+    /// while the reader is still running — which on the timeout path is the
+    /// only time they are readable at all.
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Read a child pipe to EOF into a shared buffer, off the caller's task.
+fn drain_pipe<R>(what: &'static str, handle: Option<R>) -> PipeDrain
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let task = handle.map(|mut h| {
+        let task_buf = std::sync::Arc::clone(&buf);
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match h.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => task_buf
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                    // Keep what arrived before the failure and say the read
+                    // broke, rather than reporting a short buffer as if the
+                    // child had printed nothing.
+                    Err(e) => {
+                        tracing::warn!("Lost part of pip's {what}: {e}");
+                        break;
+                    }
+                }
+            }
+        })
+    });
+    PipeDrain { buf, task }
+}
+
+/// Wait for a reader to finish. A panicking reader is ignored: it panics
+/// inside `extend_from_slice`, and [`take_buf`] recovers that lock, so the
+/// bytes it had already read still come back.
+async fn join_pipe(task: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(task) = task {
+        let _ = task.await;
+    }
+}
+
+/// Take the bytes read so far, recovering a poisoned lock rather than
+/// unwrapping it — a `Vec<u8>` has no invariant for the poison to protect, and
+/// panicking here would throw away the output the caller is about to report.
+fn take_buf(buf: &std::sync::Mutex<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut *buf.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 #[cfg(test)]
@@ -374,35 +461,108 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
+    /// The bound's error has to carry what pip had already said. It only fires
+    /// in pathological cases — the ones that get reported — and "timed out"
+    /// alone says nothing about which package pip was stuck on. Parity with
+    /// `run_bounded`'s `BoundedRun::TimedOut { stderr }`.
+    #[tokio::test]
+    async fn run_pip_bounded_reports_the_partial_stderr_of_a_child_it_gave_up_on() {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/c", "echo boom 1>&2& ping.exe -n 31 127.0.0.1"])
+        } else {
+            ("sh", &["-c", "echo boom 1>&2; sleep 30"])
+        };
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+
+        let err = run_pip_bounded(cmd, std::time::Duration::from_secs(1))
+            .await
+            .expect_err("the child never exits within the bound");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            err.to_string().contains("boom"),
+            "the stderr pip wrote before the bound was discarded: {err}"
+        );
+    }
+
     /// Giving up on the child has to also *end* it. The bound exists to free
     /// the `UpdateGuard`, and the next thing the user does with that freed
     /// guard is retry the install — into the same `site-packages` the
     /// abandoned pip would still be writing to.
     ///
-    /// Proven by side effect rather than by pid: the child touches a marker
-    /// only after it has outlived the bound, so the marker's absence is the
-    /// kill. Unix-only for the shell; the behaviour under test
+    /// Asserted on the child itself, not only on a side effect it skipped: the
+    /// stub reports its pid before sleeping, so "no marker" cannot pass for the
+    /// unrelated reason that a loaded runner never got the child that far. The
+    /// pid must stop existing (or be reaped to a zombie), which a surviving
+    /// child fails. Unix-only for the shell and `ps`; the behaviour under test
     /// (`kill_on_drop`) is tokio's and not platform-specific.
     #[cfg(unix)]
     #[tokio::test]
     async fn run_pip_bounded_kills_the_child_it_gave_up_on() {
-        let dir = crate::util::unique_temp_dir("pip-bound-kill");
-        let marker = dir.join("survived");
+        /// A pid that exists and has not yet been reaped. `ps` rather than
+        /// `kill -0`, which cannot tell a live process from the zombie the
+        /// child becomes between being killed and being reaped.
+        fn still_running(pid: &str) -> bool {
+            let Ok(out) = std::process::Command::new("ps")
+                .args(["-o", "state=", "-p", pid])
+                .output()
+            else {
+                return false;
+            };
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            out.status.success() && !state.is_empty() && !state.starts_with('Z')
+        }
 
-        let marker_arg = marker.to_string_lossy().into_owned();
+        let dir = crate::util::unique_temp_dir("pip-bound-kill");
+        let started = dir.join("started");
+        let survived = dir.join("survived");
+
         let mut cmd = tokio::process::Command::new("sh");
-        cmd.args(["-c", "sleep 2; : > \"$0\"", &marker_arg]);
+        cmd.args([
+            "-c",
+            "echo $$ > \"$0\"; sleep 1; : > \"$1\"",
+            &started.to_string_lossy(),
+            &survived.to_string_lossy(),
+        ]);
 
         let err = run_pip_bounded(cmd, std::time::Duration::from_millis(200))
             .await
             .expect_err("the child sleeps past the bound");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
 
-        // Past the point the survivor would have written, with headroom for a
-        // loaded runner.
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // The pid the child reported before it slept. Its absence would mean
+        // the child never ran, which is not what this test is about.
+        let mut pid = String::new();
+        for _ in 0..30 {
+            if let Ok(read) = std::fs::read_to_string(&started) {
+                if !read.trim().is_empty() {
+                    pid = read.trim().to_string();
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         assert!(
-            !marker.exists(),
+            !pid.is_empty(),
+            "the child never started, so nothing was killed"
+        );
+
+        for _ in 0..30 {
+            if !still_running(&pid) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            !still_running(&pid),
+            "the abandoned pip (pid {pid}) is still running past the bound"
+        );
+
+        // And it never reached the write on the far side of its sleep.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            !survived.exists(),
             "the abandoned pip kept running past the bound"
         );
 
