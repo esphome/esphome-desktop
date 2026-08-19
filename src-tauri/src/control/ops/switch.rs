@@ -32,7 +32,7 @@ pub(crate) enum SwitchOutcome {
     /// The new channel/backend is installed *and* persisted by then, so the
     /// tray reports this as a partial switch (a warning) while the control
     /// server reports it as a failure — the same split
-    /// [`super::InstallOutcome::StartFailed`] documents.
+    /// [`super::InstallOutcome`] documents.
     StartFailed(String),
 }
 
