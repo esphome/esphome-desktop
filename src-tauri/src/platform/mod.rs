@@ -144,7 +144,9 @@ fn interpreter_in_tree(root: &Path) -> PathBuf {
 /// env var that sharun always sets, and fall back to exe-relative
 /// resolution for deb/AUR installs where `APPDIR` is absent.
 ///
-/// On macOS and Windows, Tauri's `resource_dir()` works correctly.
+/// On macOS and Windows, Tauri's `resource_dir()` points at the right place;
+/// on Windows the verbatim prefix is stripped where possible (see
+/// [`simplified_resource_dir`]), which the `env_path` callers rely on.
 fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     #[cfg(target_os = "linux")]
     {
@@ -182,13 +184,46 @@ fn get_bundled_resource_dir(app_handle: &AppHandle) -> Result<PathBuf> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let resource_dir = app_handle
-            .path()
-            .resource_dir()
-            .context("Failed to get resource directory")?;
+        let resource_dir = simplified_resource_dir(
+            app_handle
+                .path()
+                .resource_dir()
+                .context("Failed to get resource directory")?,
+        );
         debug!("Bundled resource dir: {:?}", resource_dir);
         Ok(resource_dir)
     }
+}
+
+/// Strip the Windows `\\?\` prefix Tauri's canonicalized `resource_dir()`
+/// carries: everything derived from it (bundled Python, MinGit, ccache)
+/// reaches the ESPHome backend through `PATH`, and `cmd.exe`, which
+/// PlatformIO/SCons uses for every build step, cannot run `\\?\` paths, so
+/// leaving it in fails every ESP8266 compile (esphome/esphome#18399).
+/// No-op on macOS and for plain paths. Shapes `dunce` cannot round-trip
+/// (verbatim UNC, over-`MAX_PATH`, reserved names, non-Unicode) pass through
+/// unchanged with a warning.
+// Split out of the `AppHandle` resolution so it can be unit-tested; only the
+// non-Linux branch calls it.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn simplified_resource_dir(dir: PathBuf) -> PathBuf {
+    let simplified = dunce::simplified(&dir).to_path_buf();
+    #[cfg(target_os = "windows")]
+    if is_verbatim(&simplified) {
+        tracing::warn!(
+            "Resource dir stayed verbatim: {:?}; cmd.exe build steps may fail",
+            simplified
+        );
+    }
+    simplified
+}
+
+/// True when `path` still carries the Windows `\\?\` verbatim prefix.
+/// Byte comparison so the log-only warning branch is testable on every
+/// platform.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_verbatim(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().starts_with(br"\\?\")
 }
 
 /// Root of the pristine Python tree inside the bundled resources.
@@ -407,6 +442,47 @@ pub fn is_tray_supported() -> bool {
 mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
+
+    /// Identity on plain paths, on every platform; dropping the resolver's
+    /// call then surfaces as dead code under `-D warnings`.
+    #[test]
+    fn simplified_resource_dir_leaves_plain_paths_alone() {
+        let plain = PathBuf::from("plain").join("resource dir");
+        assert_eq!(simplified_resource_dir(plain.clone()), plain);
+    }
+
+    /// The warning branch is log-only, so only this test fails when the
+    /// predicate stops matching real verbatim paths.
+    #[test]
+    fn is_verbatim_detects_the_verbatim_prefix() {
+        assert!(is_verbatim(Path::new(r"\\?\C:\Program Files\x")));
+        assert!(is_verbatim(Path::new(r"\\?\UNC\server\share\x")));
+        assert!(!is_verbatim(Path::new(r"C:\Program Files\x")));
+        assert!(!is_verbatim(Path::new(r"\\server\share\x")));
+    }
+
+    /// A shape `dunce` cannot strip (verbatim UNC) passes through unchanged
+    /// and still flags verbatim, so the warning would fire.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn simplified_resource_dir_keeps_verbatim_unc_and_flags_it() {
+        let unc = PathBuf::from(r"\\?\UNC\server\share\ESPHome Device Builder");
+        let out = simplified_resource_dir(unc.clone());
+        assert_eq!(out, unc);
+        assert!(is_verbatim(&out));
+    }
+
+    /// The shape Tauri produces on Windows comes back plain.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn simplified_resource_dir_strips_verbatim_prefix() {
+        assert_eq!(
+            simplified_resource_dir(PathBuf::from(
+                r"\\?\C:\Program Files\ESPHome Device Builder"
+            )),
+            PathBuf::from(r"C:\Program Files\ESPHome Device Builder")
+        );
+    }
 
     /// Env var naming the real bundled Python tree the e2e test runs against.
     const E2E_TREE_ENV: &str = "ESPHOME_E2E_PYTHON_TREE";

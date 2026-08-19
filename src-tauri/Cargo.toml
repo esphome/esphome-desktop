@@ -57,6 +57,9 @@ open = "5"
 # Home directory detection
 dirs = "6"
 
+# Strips the Windows \\?\ prefix from Tauri's resource dir (no-op elsewhere)
+dunce = "1"
+
 # System locale detection for UI translations
 sys-locale = "0.3"
 
