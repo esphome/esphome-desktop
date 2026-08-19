@@ -300,7 +300,7 @@ def test_infer_name_agrees_with_metadata_for_a_dotted_package(
     # same group key, whichever of the two escaped spellings pip wrote.
     for stem in ("ruamel.yaml", "ruamel_yaml"):
         path = tmp_path / f"{stem}-0.18.6.dist-info"
-        assert maint._infer_name(path) == maint._norm("ruamel.yaml")
+        assert maint._infer_name(path) == "ruamel-yaml"
 
 
 def test_dedupe_all_groups_a_dotted_name_with_its_escaped_directory(
