@@ -19,6 +19,23 @@ use super::process::{
 /// from hanging app startup indefinitely.
 const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Hard upper bound on a single `pip install` driven by [`run_pip`] — the
+/// update, channel-switch, and first-run install flows.
+///
+/// Deliberately far looser than [`PIP_INSTALL_TIMEOUT`]. That bound guards the
+/// startup restore, which falls back to the bundled version when it fires, so
+/// cutting a slow install short costs the user nothing. These flows have no
+/// fallback: firing turns a slow-but-working install into a failed one. So
+/// this is not a latency budget, only a guarantee of *finiteness*.
+///
+/// Finiteness is the part that has to hold. Every caller runs under a held
+/// `UpdateGuard`, which is released on drop — a pip that never exits pins it
+/// for the life of the process, and every later update, switch, and repair is
+/// then rejected as "already in flight" with nothing actually in flight. Half
+/// an hour is beyond any real install on a connection this app is usable on,
+/// and still finite.
+const PIP_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
 /// needing `--pre`. On timeout the child is killed and an error is returned;
@@ -217,12 +234,12 @@ pub fn pip_command(python: &Path) -> tokio::process::Command {
 }
 
 /// Run a prepared bundled-interpreter command (e.g. from [`pip_command`]) to
-/// completion, capturing its output and — on Windows — tying the child to the
-/// desktop's lifetime via the kill-on-close job. Without this, an install-dir
-/// `python.exe` spawned during an update or channel switch is orphaned if the
-/// desktop is force-killed mid-run, holding the install tree open and leaving
-/// `site-packages` half-written (issue #333, the #320 failure by a route #320
-/// does not cover).
+/// completion under [`PIP_RUN_TIMEOUT`], capturing its output and — on
+/// Windows — tying the child to the desktop's lifetime via the kill-on-close
+/// job. Without that job, an install-dir `python.exe` spawned during an update
+/// or channel switch is orphaned if the desktop is force-killed mid-run,
+/// holding the install tree open and leaving `site-packages` half-written
+/// (issue #333, the #320 failure by a route #320 does not cover).
 ///
 /// Replicates [`tokio::process::Command::output`]'s capture (stdin closed,
 /// stdout/stderr piped) rather than calling it, because the child must be
@@ -234,10 +251,33 @@ pub fn pip_command(python: &Path) -> tokio::process::Command {
 /// apply, so a failed assignment warns and carries on rather than failing the
 /// install. Job membership is a per-child policy, which is why this is a named
 /// seam the pip sites opt into rather than something every spawn inherits.
-pub async fn run_pip(mut cmd: tokio::process::Command) -> std::io::Result<std::process::Output> {
+///
+/// Bounded for the same reason [`pip_install_blocking`] is, and for the same
+/// reason every production Python spawn in [`super::process`] is: this is a
+/// child a user waits behind. A `pip install` that never exits is not a slow
+/// update but a stuck one, and it holds the caller's `UpdateGuard` with it —
+/// see [`PIP_RUN_TIMEOUT`] for why the bound is loose rather than tight.
+pub async fn run_pip(cmd: tokio::process::Command) -> std::io::Result<std::process::Output> {
+    run_pip_bounded(cmd, PIP_RUN_TIMEOUT).await
+}
+
+/// [`run_pip`] with the bound passed in, so the timeout behaviour is testable
+/// without waiting out [`PIP_RUN_TIMEOUT`].
+async fn run_pip_bounded(
+    mut cmd: tokio::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // The bound below owns the child through `wait_with_output`, so dropping
+    // that future is the only handle left on a pip that outlived it. Without
+    // this the child would keep running — and keep writing into
+    // `site-packages` — after the caller has already reported the failure and
+    // moved on. It reaches the direct child only; a PEP 517 build backend it
+    // spawned can still survive, bounded by the kill-on-close job on Windows
+    // and unbounded on Unix.
+    cmd.kill_on_drop(true);
     let child = cmd.spawn()?;
 
     #[cfg(windows)]
@@ -251,7 +291,17 @@ pub async fn run_pip(mut cmd: tokio::process::Command) -> std::io::Result<std::p
         );
     }
 
-    child.wait_with_output().await
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(output) => output,
+        // No partial output: unlike `run_bounded`, which drains a killed
+        // child's stderr off-thread, the streams here are owned by the future
+        // just dropped. The callers report this through `anyhow` context on
+        // the install they were running, which is the part that identifies it.
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("pip install timed out after {timeout:?}"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +351,62 @@ mod tests {
             String::from_utf8_lossy(&output.stderr).contains("err"),
             "stderr was not captured"
         );
+    }
+
+    /// A child that outlives the bound must come back as an error rather than
+    /// hanging the call. Every `run_pip` caller holds the `UpdateGuard`, which
+    /// is released on drop, so a wedged pip that never returns leaves the guard
+    /// set for the life of the process and every later update, switch, and
+    /// repair is refused as "already in flight".
+    #[tokio::test]
+    async fn run_pip_bounded_reports_a_child_that_outlives_the_bound() {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("ping.exe", &["-n", "31", "127.0.0.1"])
+        } else {
+            ("sh", &["-c", "sleep 30"])
+        };
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(args);
+
+        let err = run_pip_bounded(cmd, std::time::Duration::from_millis(300))
+            .await
+            .expect_err("the child never exits within the bound");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// Giving up on the child has to also *end* it. The bound exists to free
+    /// the `UpdateGuard`, and the next thing the user does with that freed
+    /// guard is retry the install — into the same `site-packages` the
+    /// abandoned pip would still be writing to.
+    ///
+    /// Proven by side effect rather than by pid: the child touches a marker
+    /// only after it has outlived the bound, so the marker's absence is the
+    /// kill. Unix-only for the shell; the behaviour under test
+    /// (`kill_on_drop`) is tokio's and not platform-specific.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_pip_bounded_kills_the_child_it_gave_up_on() {
+        let dir = crate::util::unique_temp_dir("pip-bound-kill");
+        let marker = dir.join("survived");
+
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "sleep 2; : > \"$0\"", &marker_arg]);
+
+        let err = run_pip_bounded(cmd, std::time::Duration::from_millis(200))
+            .await
+            .expect_err("the child sleeps past the bound");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        // Past the point the survivor would have written, with headroom for a
+        // loaded runner.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !marker.exists(),
+            "the abandoned pip kept running past the bound"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// pip isolation is a superset of Python isolation: a pip install that
