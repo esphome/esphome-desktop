@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_updater::UpdaterExt;
@@ -31,6 +32,41 @@ pub enum NextStep {
     /// a Python-package update right now would just get overwritten by the new
     /// bundled Python on the next launch.
     Skip,
+}
+
+/// The package tool a deb/rpm-typed install needs for the updater's install
+/// step, when that tool is missing from `PATH` — i.e. the reason this binary
+/// must not attempt a self-update.
+///
+/// tauri-plugin-updater dispatches its install by the bundle type baked into
+/// the binary at packaging time: a deb runs `dpkg -i`, an rpm runs `rpm -U`,
+/// each behind a pkexec/zenity/sudo elevation chain. A binary repackaged onto
+/// a system without that tool — the AUR package extracts our amd64 `.deb`, and
+/// Arch has no `dpkg` — would download the full update and then fail every
+/// rung of that chain, showing an elevation prompt on the way down. Split from
+/// [`self_update_blocked`] so the decision is testable on every host.
+fn self_update_blocked_tool(
+    bundle: Option<BundleType>,
+    tool_present: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
+    let tool = match bundle {
+        Some(BundleType::Deb) => "dpkg",
+        Some(BundleType::Rpm) => "rpm",
+        // AppImage/Msi/Nsis/App install without a package tool, and `None`
+        // (an unpackaged dev build) keeps today's behavior.
+        _ => return None,
+    };
+    (!tool_present(tool)).then_some(tool)
+}
+
+/// [`self_update_blocked_tool`] for the running binary and the real `PATH`:
+/// `Some(tool)` names the missing package tool when a self-update must not be
+/// attempted, `None` means the updater may proceed.
+pub(crate) fn self_update_blocked() -> Option<&'static str> {
+    self_update_blocked_tool(
+        tauri::utils::platform::bundle_type(),
+        crate::platform::executable_on_path,
+    )
 }
 
 /// User-initiated app-update check. Always shows the "update available" dialog;
@@ -60,6 +96,27 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
                 "Desktop update available: {} (current: {})",
                 update.version, update.current_version
             );
+
+            if let Some(tool) = self_update_blocked() {
+                info!(
+                    "Not offering to install {}: this install has no `{}`",
+                    update.version, tool
+                );
+                crate::dialog::notice(
+                    app_handle,
+                    &t("app_update.available_title"),
+                    t_with(
+                        "app_update.package_manager_only",
+                        &[("new", &update.version), ("tool", tool)],
+                    ),
+                    MessageDialogKind::Info,
+                )
+                .await;
+                // The update exists but cannot be installed from here, so the
+                // bundled Python is not about to roll — keep going to the
+                // ESPHome checks, same as a declined update.
+                return NextStep::Continue;
+            }
 
             let new_version = update.version.clone();
             let current_version = update.current_version.clone();
@@ -148,7 +205,16 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
             ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
-            NextStep::Skip
+            if self_update_blocked().is_some() {
+                // The user was told an update exists, but it cannot be
+                // installed from this binary (a deb/rpm repackage without its
+                // package tool — the AUR case). The pip updates below won't be
+                // overwritten by an app install that can't happen here, so the
+                // loop must keep checking them rather than skipping forever.
+                NextStep::Continue
+            } else {
+                NextStep::Skip
+            }
         }
         Ok(None) => {
             debug!("Desktop app is up to date (background check)");
@@ -211,6 +277,16 @@ pub(crate) async fn apply_update_noninteractive(
     progress: crate::control::ops::Progress<'_>,
 ) -> Result<(), String> {
     let version = update.version.clone();
+
+    // Backstop behind the caller-side checks: nothing may reach the download
+    // when the install step's package tool is missing (see
+    // [`self_update_blocked`]) — the plugin would fetch the full payload and
+    // then fail its pkexec/sudo install chain.
+    if let Some(tool) = self_update_blocked() {
+        return Err(format!(
+            "this install updates through the system package manager ({tool} is not available)"
+        ));
+    }
 
     progress("desktop", &format!("downloading desktop update {version}"));
     let bytes = download_update_bytes(&update)
@@ -335,6 +411,51 @@ fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deb_and_rpm_without_their_tool_are_blocked_and_name_it() {
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Deb), |_| false),
+            Some("dpkg")
+        );
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Rpm), |_| false),
+            Some("rpm")
+        );
+    }
+
+    #[test]
+    fn deb_and_rpm_with_their_tool_are_allowed() {
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Deb), |t| t == "dpkg"),
+            None
+        );
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Rpm), |t| t == "rpm"),
+            None
+        );
+    }
+
+    #[test]
+    fn non_package_bundles_never_consult_path() {
+        // AppImage/Msi/Nsis/App/Dmg install without a package tool, and `None`
+        // is an unpackaged dev build; the panicking closure proves the PATH
+        // question is never even asked for these, so the guard cannot change
+        // their behavior.
+        for bundle in [
+            None,
+            Some(BundleType::AppImage),
+            Some(BundleType::Msi),
+            Some(BundleType::Nsis),
+            Some(BundleType::App),
+            Some(BundleType::Dmg),
+        ] {
+            assert_eq!(
+                self_update_blocked_tool(bundle, |tool| panic!("asked PATH about {tool}")),
+                None
+            );
+        }
+    }
 
     #[test]
     fn includes_both_versions() {

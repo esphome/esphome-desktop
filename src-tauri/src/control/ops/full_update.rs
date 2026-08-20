@@ -65,17 +65,28 @@ pub(crate) async fn run_full_update(
         Ok(updater) => match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
-                match crate::app_update::apply_update_noninteractive(app, update, progress).await {
-                    Ok(()) => {
-                        report.note(format!("desktop app updated to {version}"));
-                        report.app_update_installed = true;
+                if let Some(tool) = crate::app_update::self_update_blocked() {
+                    // A deb/rpm-typed binary without its package tool (the AUR
+                    // repackage) cannot install this. Say so and fall through
+                    // to the package phases: the pip updates won't be
+                    // overwritten by an app install that can't happen here.
+                    report.note(package_manager_note(&version, tool));
+                } else {
+                    match crate::app_update::apply_update_noninteractive(app, update, progress)
+                        .await
+                    {
+                        Ok(()) => {
+                            report.note(format!("desktop app updated to {version}"));
+                            report.app_update_installed = true;
+                        }
+                        Err(e) => {
+                            // Don't compound a failed self-update with pip
+                            // activity.
+                            report.fail(format!("desktop app update to {version} failed: {e}"));
+                        }
                     }
-                    Err(e) => {
-                        // Don't compound a failed self-update with pip activity.
-                        report.fail(format!("desktop app update to {version} failed: {e}"));
-                    }
+                    return report;
                 }
-                return report;
             }
             Ok(None) => report.note(format!(
                 "desktop app {} is up to date",
@@ -252,6 +263,19 @@ async fn run_package_phase<D, F, Fut, R, RFut>(
     record_outcome(report, component, &label, outcome);
 }
 
+/// Report line for a desktop update that exists but cannot be installed from
+/// this binary (`app_update::self_update_blocked` — a deb/rpm repackage
+/// without its package tool, e.g. the AUR package on Arch).
+///
+/// Split out like [`record_outcome`]: the wording is the CLI's user-facing
+/// contract, so it is unit-testable without an updater in the loop.
+fn package_manager_note(version: &str, tool: &str) -> String {
+    format!(
+        "desktop app {version} is available; this install has no {tool}, \
+         update it through your system package manager"
+    )
+}
+
 /// Record `outcome` as the report line for `component` updating to `label`.
 ///
 /// Split out of [`run_package_phase`] so the wording — which is the CLI's
@@ -301,6 +325,18 @@ mod tests {
         record_outcome(&mut report, "esphome", "2026.8.0", outcome);
         assert_eq!(report.lines.len(), 1, "exactly one line per component");
         (report.lines.remove(0), report.any_failed)
+    }
+
+    /// Not a failure: the CLI must exit 0 when the only "problem" is that the
+    /// desktop update belongs to the system package manager, otherwise every
+    /// AUR user's `esphome-desktop update` reads as broken forever.
+    #[test]
+    fn a_package_manager_update_is_a_note_naming_the_missing_tool() {
+        assert_eq!(
+            package_manager_note("1.2.0", "dpkg"),
+            "desktop app 1.2.0 is available; this install has no dpkg, \
+             update it through your system package manager"
+        );
     }
 
     #[test]

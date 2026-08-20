@@ -225,10 +225,9 @@ Linux `.deb` / `.rpm` installs self-update through the system package tool
 (`dpkg` / `rpm`, with an elevation prompt). Those tools install the downloaded
 package without resolving dependencies, so a release that changes the deb/rpm
 `Depends` set needs a "reinstall from the package" note in its release notes.
-AUR installs cannot self-update; the AUR binary is repackaged from the `.deb`,
-so until the AUR packaging grows its own updater story the in-app update
-downloads a `.deb` and fails on Arch, and those users should update through
-their system package manager.
+AUR installs cannot self-update; the AUR binary is repackaged from the `.deb`
+and Arch has no `dpkg`, so the app detects the missing tool, skips the
+download, and points those users at their system package manager instead.
 
 ## Configuration
 
