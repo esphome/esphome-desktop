@@ -86,14 +86,30 @@ def test_pub_date_from_release(manifest: dict[str, Any]) -> None:
     assert manifest["pub_date"] == "2026-05-22T14:31:08Z"
 
 
-def test_all_five_updater_platforms_present(manifest: dict[str, Any]) -> None:
+def test_all_updater_platforms_present(manifest: dict[str, Any]) -> None:
     assert set(manifest["platforms"]) == {
         "windows-x86_64",
         "linux-x86_64",
         "linux-aarch64",
+        "linux-x86_64-deb",
+        "linux-aarch64-deb",
+        "linux-x86_64-rpm",
+        "linux-aarch64-rpm",
         "darwin-aarch64",
         "darwin-x86_64",
     }
+
+
+def test_deb_and_rpm_targets_point_at_their_own_packages(
+    manifest: dict[str, Any],
+) -> None:
+    # Regression for #449: a deb/rpm-installed app resolves the
+    # `linux-<arch>-<installer>` key first; each must point at its own
+    # package format, never fall through to the AppImage.
+    assert manifest["platforms"]["linux-x86_64-deb"]["url"].endswith("_amd64.deb")
+    assert manifest["platforms"]["linux-aarch64-deb"]["url"].endswith("_arm64.deb")
+    assert manifest["platforms"]["linux-x86_64-rpm"]["url"].endswith(".x86_64.rpm")
+    assert manifest["platforms"]["linux-aarch64-rpm"]["url"].endswith(".aarch64.rpm")
 
 
 def test_platform_url_points_at_binary_not_sig(manifest: dict[str, Any]) -> None:
@@ -157,7 +173,7 @@ def test_build_platforms_reads_sig_nested_in_artifact_dir() -> None:
         ARTIFACTS_FIXTURE,
         f"https://github.com/{REPO}/releases/download/{TAG}",
     )
-    assert len(platforms) == 5
+    assert len(platforms) == len(gen.PLATFORM_SIG_MATCHERS)
     for plat, entry in platforms.items():
         assert entry["signature"].strip(), f"empty signature for {plat}"
 
@@ -169,7 +185,7 @@ def test_build_platforms_also_handles_flat_sig_layout() -> None:
         (tmpdir / "ESPHome Device Builder_0.10.0_amd64.AppImage.sig").write_text(
             "flat-sig-contents\n"
         )
-        # The other four platforms have no local .sig here and will warn;
+        # The other platforms have no local .sig here and will warn;
         # pytest swallows that noise by default — this test only asserts the
         # flat layout reads.
         platforms = gen.build_platforms(
@@ -350,3 +366,36 @@ def test_main_error_names_every_missing_platform(
     err = capsys.readouterr().err
     assert "darwin-aarch64" in err
     assert "darwin-x86_64" in err
+
+
+# --- schema drift ---------------------------------------------------------
+#
+# The full check-jsonschema validation only runs in the release job, after
+# every asset is already attached to the draft release, so a schema pattern
+# that drifts from the generator (a target list that grew, an alternation
+# missing a key) would burn a release run before anyone saw it. Pin the two
+# patterns the generator's output must satisfy here, where PR CI runs them.
+# Anchoring note: JSON Schema `pattern` uses search semantics, so `re.search`
+# is the faithful check; the schema's own `^...$` anchors do the anchoring.
+
+SCHEMA = json.loads((REPO_ROOT / ".github" / "latest.schema.json").read_text())
+
+
+def test_every_updater_target_matches_the_schema_key_pattern() -> None:
+    pattern = re.compile(SCHEMA["properties"]["platforms"]["propertyNames"]["pattern"])
+    for plat, _ in gen.PLATFORM_SIG_MATCHERS:
+        assert pattern.search(plat), f"{plat!r} rejected by the schema key pattern"
+
+
+def test_generated_platform_urls_match_the_schema_url_pattern(
+    manifest: dict[str, Any],
+) -> None:
+    pattern = re.compile(
+        SCHEMA["properties"]["platforms"]["additionalProperties"]["properties"]["url"][
+            "pattern"
+        ]
+    )
+    for plat, entry in manifest["platforms"].items():
+        assert pattern.search(entry["url"]), (
+            f"{plat} url rejected by the schema url pattern: {entry['url']}"
+        )

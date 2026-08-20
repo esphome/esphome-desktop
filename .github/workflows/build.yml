@@ -136,14 +136,12 @@ jobs:
             os: windows-latest
             target: windows-x64
             bundles: nsis
-            updater_target: windows-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
             bundles: appimage
             # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
             tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
-            updater_target: linux-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
@@ -154,7 +152,6 @@ jobs:
             bundles: appimage
             # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
             tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
-            updater_target: linux-aarch64
           - platform: linux
             os: ubuntu-22.04-arm
             target: linux-arm64
@@ -164,13 +161,11 @@ jobs:
             target: macos-arm64
             rust_target: aarch64-apple-darwin
             bundles: dmg
-            updater_target: darwin-aarch64
           - platform: macos
             os: macos-15
             target: macos-x64
             rust_target: x86_64-apple-darwin
             bundles: dmg
-            updater_target: darwin-x86_64
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
@@ -336,15 +331,16 @@ jobs:
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
+      # The release config turns on createUpdaterArtifacts for every Linux
+      # bundle: the AppImage legs need the .AppImage.sig (re-signed later after
+      # Python injection), and the deb/rpm legs need .deb.sig/.rpm.sig so
+      # latest.json can carry linux-*-deb / linux-*-rpm updater targets. A
+      # deb/rpm-installed app dispatches its self-update by the bundle type
+      # baked into the binary, so without those targets it falls back to the
+      # AppImage payload and fails with "invalid updater binary format" (#449).
       - name: Build (Linux Release)
         if: matrix.platform == 'linux' && github.event_name == 'workflow_run'
-        shell: bash
-        run: |
-          extra_args=""
-          if [[ -n "${{ matrix.updater_target || '' }}" ]]; then
-            extra_args="--config src-tauri/tauri.release.conf.json"
-          fi
-          cargo tauri build --verbose --bundles ${{ matrix.bundles }} $extra_args
+        run: cargo tauri build --verbose --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -662,11 +658,25 @@ jobs:
           path: src-tauri/target/release/bundle/deb/*.deb
           archive: false
 
+      - name: Upload deb updater signature
+        if: contains(matrix.bundles, 'deb') && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: src-tauri/target/release/bundle/deb/*.deb.sig
+          archive: false
+
       - name: Upload RPM
         if: contains(matrix.bundles, 'rpm')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           path: src-tauri/target/release/bundle/rpm/*.rpm
+          archive: false
+
+      - name: Upload RPM updater signature
+        if: contains(matrix.bundles, 'rpm') && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: src-tauri/target/release/bundle/rpm/*.rpm.sig
           archive: false
 
       - name: Upload DMG
@@ -813,8 +823,8 @@ jobs:
       # Build latest.json from the per-platform .sig files now attached to
       # the draft release. See .github/scripts/generate_latest_json.py for
       # the full manifest shape and the rationale around the `downloads`
-      # section (formats the Tauri updater doesn't ship — .deb, .rpm, .dmg)
-      # and the desktop.esphome.io schema reference.
+      # section (formats the Tauri updater doesn't ship — .dmg) and the
+      # desktop.esphome.io schema reference.
       - name: Generate latest.json for updater
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
