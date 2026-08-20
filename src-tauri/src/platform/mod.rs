@@ -560,9 +560,10 @@ mod tests {
     ];
 
     /// The whole repair lifecycle against a real bundled Python tree: the
-    /// first-run copy, detect the orphan, wipe and re-copy from the pristine
-    /// bundle, prove it is fixed, then prove a refresh from an older bundle
-    /// restores the newer version the user tree already had.
+    /// first-run copy, detect metadata-invisible damage (a truncated
+    /// component module), wipe and re-copy from the pristine bundle, prove it
+    /// is fixed, then prove a refresh from an older bundle restores the newer
+    /// version the user tree already had.
     ///
     /// Ignored by default because it needs the genuine article — the
     /// python-build-standalone tree with esphome in it that
@@ -650,23 +651,52 @@ mod tests {
             "a fresh copy of the bundle must pass the health probe"
         );
 
-        // 4. Orphan a component directory exactly the way --ignore-installed
-        //    did: `rp2` declares `rp2040` as a legacy alias, so a leftover
-        //    `rp2040` package from the previous version collides with it.
+        // 4. Damage the tree the way a mixed-version install does, twice over,
+        //    both invisible to metadata:
+        //
+        //    a. Orphan a component directory exactly the way --ignore-installed
+        //       did. On ESPHome 2026.7 this alone broke every compile: the
+        //       loader AST-scanned the components directory and the leftover
+        //       `rp2040` collided with `rp2`'s legacy alias (#330). 2026.8
+        //       moved aliases to a checked-in registry with an import-compat
+        //       finder, so the orphan is now *tolerated by design* — it no
+        //       longer fails anything, but a stale tree still carries it, and
+        //       step 7 asserts the repair removes it.
         let orphan = purelib.join("esphome").join("components").join("rp2040");
         std::fs::create_dir_all(&orphan).unwrap();
         std::fs::write(orphan.join("__init__.py"), "").unwrap();
 
+        //    b. Truncate a component module the probe's own config loads —
+        //       the stale-file half of the same damage class, and one no
+        //       registry can absorb: validating an `esp32:` config must read
+        //       this module's schema on any ESPHome version.
+        let esp32_init = purelib
+            .join("esphome")
+            .join("components")
+            .join("esp32")
+            .join("__init__.py");
+        assert!(
+            esp32_init.is_file(),
+            "the bundle has no esp32 component at {esp32_init:?}"
+        );
+        std::fs::write(&esp32_init, "").unwrap();
+
         // 5. The probe must catch it. This is the assertion the whole design
-        //    rests on: no metadata check sees this, because the orphan has no
-        //    RECORD and no dist-info, and importlib still reports a healthy
+        //    rests on: no metadata check sees this — the RECORD is not
+        //    consulted at run time, and importlib still reports a healthy
         //    esphome. Only running a real command finds it.
         let detail = esphome_config_probe(&python)
             .expect("probe could not run")
-            .expect("the orphaned rp2040 component must fail the health probe");
+            .expect("the truncated esp32 component must fail the health probe");
+        // A weak discriminator by necessity: the probe config itself names
+        // `esp32`, so most validation failures would mention it too. The exact
+        // wording for an empty component module is ESPHome's to change (today
+        // it is an AttributeError in the import chain), so nothing stronger is
+        // stable to match on. Step 3's clean probe of the undamaged copy is
+        // what actually pins the failure on the fabricated damage.
         assert!(
-            detail.contains("rp2040"),
-            "probe failed for some other reason: {detail}"
+            detail.contains("esp32"),
+            "probe failure does not mention esp32: {detail}"
         );
 
         // 6. The repair: wipe the damaged copy and re-copy the pristine
@@ -676,8 +706,17 @@ mod tests {
         python_env::refresh_python_tree(&user_tree, || Ok(bundle.clone()), RefreshReason::Repair)
             .expect("repair failed");
 
-        // 7. Healthy again, orphan gone, and still answering from the copy.
+        // 7. Healthy again: orphan gone, the truncated module restored, and
+        //    still answering from the copy.
         assert!(!orphan.exists(), "the orphan survived the repair");
+        assert!(
+            esp32_init.is_file(),
+            "the repair did not restore the esp32 component at {esp32_init:?}"
+        );
+        assert!(
+            std::fs::metadata(&esp32_init).unwrap().len() > 0,
+            "the repair left the truncated esp32 component empty"
+        );
         assert_eq!(
             esphome_config_probe(&python).expect("probe could not run"),
             None,
