@@ -366,3 +366,36 @@ def test_main_error_names_every_missing_platform(
     err = capsys.readouterr().err
     assert "darwin-aarch64" in err
     assert "darwin-x86_64" in err
+
+
+# --- schema drift ---------------------------------------------------------
+#
+# The full check-jsonschema validation only runs in the release job, after
+# every asset is already attached to the draft release, so a schema pattern
+# that drifts from the generator (a target list that grew, an alternation
+# missing a key) would burn a release run before anyone saw it. Pin the two
+# patterns the generator's output must satisfy here, where PR CI runs them.
+# Anchoring note: JSON Schema `pattern` uses search semantics, so `re.search`
+# is the faithful check; the schema's own `^...$` anchors do the anchoring.
+
+SCHEMA = json.loads((REPO_ROOT / ".github" / "latest.schema.json").read_text())
+
+
+def test_every_updater_target_matches_the_schema_key_pattern() -> None:
+    pattern = re.compile(SCHEMA["properties"]["platforms"]["propertyNames"]["pattern"])
+    for plat, _ in gen.PLATFORM_SIG_MATCHERS:
+        assert pattern.search(plat), f"{plat!r} rejected by the schema key pattern"
+
+
+def test_generated_platform_urls_match_the_schema_url_pattern(
+    manifest: dict[str, Any],
+) -> None:
+    pattern = re.compile(
+        SCHEMA["properties"]["platforms"]["additionalProperties"]["properties"]["url"][
+            "pattern"
+        ]
+    )
+    for plat, entry in manifest["platforms"].items():
+        assert pattern.search(entry["url"]), (
+            f"{plat} url rejected by the schema url pattern: {entry['url']}"
+        )

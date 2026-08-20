@@ -823,8 +823,8 @@ jobs:
       # Build latest.json from the per-platform .sig files now attached to
       # the draft release. See .github/scripts/generate_latest_json.py for
       # the full manifest shape and the rationale around the `downloads`
-      # section (formats the Tauri updater doesn't ship — .deb, .rpm, .dmg)
-      # and the desktop.esphome.io schema reference.
+      # section (formats the Tauri updater doesn't ship — .dmg) and the
+      # desktop.esphome.io schema reference.
       - name: Generate latest.json for updater
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
