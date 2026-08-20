@@ -91,40 +91,55 @@ fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     Ok(resource_dir.join("ccache"))
 }
 
-/// Whether `name` resolves to an executable regular file on the given
-/// PATH-style value.
+/// Iterate over every executable named in `names` found on a PATH-style
+/// value, in left-to-right order.
 ///
-/// The self-update backstop asks this about `dpkg`/`rpm` before letting the
-/// updater dispatch to them (`app_update::self_update_blocked`), mirroring the
-/// spawn tauri-plugin-updater's install step will actually attempt. Pure apart
-/// from filesystem checks — the PATH value is a parameter, the same
-/// split-the-logic pattern as `git_check::git_executables_in_path`, so the
-/// lookup is unit-testable with a synthetic value and a tempdir.
-fn executable_in_path(path_var: &OsStr, name: &str) -> bool {
+/// The crate's one PATH-search mechanism. `git_check` scans with it — all
+/// candidates are yielded rather than stopping at the first match, so a
+/// caller can keep looking past an unusable one (the macOS `/usr/bin/git`
+/// stub shadowing a later real git) — and the self-update backstop asks it
+/// about `dpkg`/`rpm` (`app_update::self_update_blocked`), mirroring the
+/// spawn tauri-plugin-updater's install step will actually attempt. Pure
+/// apart from filesystem checks — the PATH value is a parameter, so the scan
+/// is unit-testable with a synthetic value and a tempdir.
+pub fn executables_in_path<'a>(
+    path_var: &'a OsStr,
+    names: &'a [&'a str],
+) -> impl Iterator<Item = PathBuf> + 'a {
     std::env::split_paths(path_var)
         // Skip empty entries (e.g. a trailing separator), which would
         // otherwise resolve to the current working directory.
         .filter(|dir| !dir.as_os_str().is_empty())
-        .any(|dir| is_executable_file(&dir.join(name)))
+        .flat_map(move |dir| names.iter().map(move |name| dir.join(name)))
+        .filter(|candidate| is_executable_file(candidate))
+}
+
+/// Whether `name` resolves to an executable regular file on the given
+/// PATH-style value.
+fn executable_in_path(path_var: &OsStr, name: &str) -> bool {
+    executables_in_path(path_var, std::slice::from_ref(&name))
+        .next()
+        .is_some()
 }
 
 /// Whether `path` is a regular file this process could execute.
 ///
-/// `is_file()` rejects a directory of the same name. On Unix an execute bit is
-/// additionally required: a non-executable file named `dpkg` is not a tool the
-/// updater could actually run, so it must not read as "present". On Windows
-/// presence is the signal (the extension conveys executability), matching
-/// `git_check::is_git_executable`.
+/// One `metadata` call answers both questions: a directory of the same name
+/// is rejected, and on Unix an execute bit is additionally required — a
+/// non-executable file named `dpkg` (or `git`) is not a tool anything here
+/// could actually run, so it must not read as "present". On Windows presence
+/// is the signal; the extension conveys executability.
 fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
         return false;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        meta.permissions().mode() & 0o111 != 0
     }
     #[cfg(not(unix))]
     {

@@ -62,7 +62,7 @@ fn self_update_blocked_tool(
 /// [`self_update_blocked_tool`] for the running binary and the real `PATH`:
 /// `Some(tool)` names the missing package tool when a self-update must not be
 /// attempted, `None` means the updater may proceed.
-pub(crate) fn self_update_blocked() -> Option<&'static str> {
+fn self_update_blocked() -> Option<&'static str> {
     self_update_blocked_tool(
         tauri::utils::platform::bundle_type(),
         crate::platform::executable_on_path,
@@ -205,15 +205,13 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
             ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
-            if self_update_blocked().is_some() {
-                // The user was told an update exists, but it cannot be
-                // installed from this binary (a deb/rpm repackage without its
-                // package tool — the AUR case). The pip updates below won't be
-                // overwritten by an app install that can't happen here, so the
-                // loop must keep checking them rather than skipping forever.
-                NextStep::Continue
-            } else {
-                NextStep::Skip
+            // A blocked update (a deb/rpm repackage without its package tool —
+            // the AUR case) cannot be installed from this binary, so the pip
+            // updates won't be overwritten by it; the loop must keep checking
+            // them rather than skipping forever.
+            match self_update_blocked() {
+                Some(_) => NextStep::Continue,
+                None => NextStep::Skip,
             }
         }
         Ok(None) => {
@@ -235,7 +233,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     let new_version = update.version.clone();
 
     match apply_update_noninteractive(app_handle, update, &|_, _| {}).await {
-        Ok(()) => {
+        Ok(AppUpdateOutcome::Installed) => {
             // Always relaunch after a successful install rather than offering to
             // defer: the install replaced the .app bundle, and the running
             // process must be replaced by a fresh instance of it. On macOS the
@@ -255,6 +253,22 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             info!("Relaunching to apply desktop update");
             crate::platform::relaunch_for_update(app_handle);
         }
+        Ok(AppUpdateOutcome::ExternallyManaged(tool)) => {
+            // Only reachable when the tool disappeared between
+            // `check_for_user`'s guard and the user confirming — still a
+            // normal condition, so the same informational notice as the
+            // guard, never the red failure dialog.
+            crate::dialog::notice(
+                app_handle,
+                &t("app_update.available_title"),
+                t_with(
+                    "app_update.package_manager_only",
+                    &[("new", &new_version), ("tool", tool)],
+                ),
+                MessageDialogKind::Info,
+            )
+            .await;
+        }
         Err(e) => {
             show_error(
                 app_handle,
@@ -263,6 +277,22 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             .await;
         }
     }
+}
+
+/// How [`apply_update_noninteractive`] finished, short of an actual failure.
+///
+/// `ExternallyManaged` is a normal condition, not an error — carrying it in
+/// `Err` would force every caller to parse a failure back into a note, and
+/// would render a red "Failed to update" dialog for something that is merely
+/// "not ours to install". `Err` stays reserved for downloads and installs
+/// that actually broke.
+pub(crate) enum AppUpdateOutcome {
+    /// Downloaded and installed; the caller must relaunch the app.
+    Installed,
+    /// Not attempted: this install updates through the system package manager
+    /// and the named tool is missing ([`self_update_blocked`]). Nothing was
+    /// downloaded and the backend was never stopped.
+    ExternallyManaged(&'static str),
 }
 
 /// Non-interactive variant for the CLI `update` flow: the same
@@ -275,17 +305,15 @@ pub(crate) async fn apply_update_noninteractive(
     app_handle: &AppHandle,
     update: tauri_plugin_updater::Update,
     progress: crate::control::ops::Progress<'_>,
-) -> Result<(), String> {
+) -> Result<AppUpdateOutcome, String> {
     let version = update.version.clone();
 
-    // Backstop behind the caller-side checks: nothing may reach the download
-    // when the install step's package tool is missing (see
-    // [`self_update_blocked`]) — the plugin would fetch the full payload and
-    // then fail its pkexec/sudo install chain.
+    // The one decision point for "can this binary install its own update":
+    // nothing may reach the download when the install step's package tool is
+    // missing (see [`self_update_blocked`]) — the plugin would fetch the full
+    // payload and then fail its pkexec/sudo install chain.
     if let Some(tool) = self_update_blocked() {
-        return Err(format!(
-            "this install updates through the system package manager ({tool} is not available)"
-        ));
+        return Ok(AppUpdateOutcome::ExternallyManaged(tool));
     }
 
     progress("desktop", &format!("downloading desktop update {version}"));
@@ -300,7 +328,7 @@ pub(crate) async fn apply_update_noninteractive(
     match install_update_bytes(update, bytes).await {
         Ok(()) => {
             info!("Desktop update {} installed", version);
-            Ok(())
+            Ok(AppUpdateOutcome::Installed)
         }
         Err(e) => {
             error!("Desktop update install failed: {}", e);

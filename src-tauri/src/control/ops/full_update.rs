@@ -10,6 +10,7 @@ use tauri::AppHandle;
 use tauri_plugin_updater::UpdaterExt;
 
 use super::{stop_install_start, InstallOutcome, Progress, UpdateGuard};
+use crate::app_update::AppUpdateOutcome;
 use crate::control::update_check::{
     device_builder_update_available, esphome_install_action, esphome_update_available,
     install_action, InstallAction,
@@ -65,27 +66,25 @@ pub(crate) async fn run_full_update(
         Ok(updater) => match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
-                if let Some(tool) = crate::app_update::self_update_blocked() {
-                    // A deb/rpm-typed binary without its package tool (the AUR
-                    // repackage) cannot install this. Say so and fall through
-                    // to the package phases: the pip updates won't be
-                    // overwritten by an app install that can't happen here.
-                    report.note(package_manager_note(&version, tool));
-                } else {
-                    match crate::app_update::apply_update_noninteractive(app, update, progress)
-                        .await
-                    {
-                        Ok(()) => {
-                            report.note(format!("desktop app updated to {version}"));
-                            report.app_update_installed = true;
-                        }
-                        Err(e) => {
-                            // Don't compound a failed self-update with pip
-                            // activity.
-                            report.fail(format!("desktop app update to {version} failed: {e}"));
-                        }
+                match crate::app_update::apply_update_noninteractive(app, update, progress).await {
+                    Ok(AppUpdateOutcome::Installed) => {
+                        report.note(format!("desktop app updated to {version}"));
+                        report.app_update_installed = true;
+                        return report;
                     }
-                    return report;
+                    // A deb/rpm-typed binary without its package tool (the
+                    // AUR repackage) cannot install this. A note, not a fail
+                    // — and fall through to the package phases: the pip
+                    // updates won't be overwritten by an app install that
+                    // can't happen here.
+                    Ok(AppUpdateOutcome::ExternallyManaged(tool)) => {
+                        report.note(package_manager_note(&version, tool));
+                    }
+                    Err(e) => {
+                        // Don't compound a failed self-update with pip activity.
+                        report.fail(format!("desktop app update to {version} failed: {e}"));
+                        return report;
+                    }
                 }
             }
             Ok(None) => report.note(format!(
