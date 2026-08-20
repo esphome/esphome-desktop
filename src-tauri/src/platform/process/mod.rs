@@ -1231,74 +1231,31 @@ mod tests {
                 // cause it never saw would misdirect exactly the way the
                 // original failure did.
                 let mut evidence: Vec<String> = Vec::new();
-                for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
-                    // Bounded with the module's own primitive: a hung
-                    // candidate (a misbehaving shim) must not stall the
-                    // whole suite before any bounded machinery is even
-                    // under test. UTF-8 bytes straight to the pipe:
-                    // `print()` would encode with the console codepage
-                    // when stdout is a pipe, and can even raise
-                    // UnicodeEncodeError for an install path under a
-                    // non-ASCII user profile — either way a valid
-                    // interpreter would be skipped or garbled.
-                    let out = match run_python_capture_bounded(
-                        std::path::Path::new(program),
-                        version_args.iter().copied().chain([
-                            "-c",
-                            "import sys; sys.stdout.buffer.write('\\n'.join([sys.executable, \
-                             getattr(sys, '_base_executable', '') or '', sys.base_prefix])\
-                             .encode('utf-8'))",
-                        ]),
-                        std::time::Duration::from_secs(30),
-                    ) {
-                        Ok(out) => out,
-                        Err(e) => {
-                            evidence.push(format!("`{program}` did not run: {e}"));
-                            continue;
+                // A timed-out candidate is retried; nothing else is. A
+                // saturated CI host can stall a spawn past any single bound —
+                // one run watched both candidates time out at 30s in the first
+                // caller's probe while the re-probe moments later succeeded
+                // instantly (a panicking OnceLock initializer leaves the cell
+                // empty, so the next caller asked again and got the answer the
+                // first was denied). A timeout is evidence of contention, not
+                // absence; the other failures — no such program, a Store
+                // alias, a broken shim — are properties of the host that
+                // asking again cannot change, so they still fail on the first
+                // attempt.
+                for attempt in 1..=3 {
+                    let mut timed_out = false;
+                    for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
+                        match probe_python_candidate(program, version_args) {
+                            Ok(exe) => return exe,
+                            Err(failure) => {
+                                timed_out |= failure.timed_out;
+                                evidence.push(format!("attempt {attempt}: {}", failure.report));
+                            }
                         }
-                    };
-                    if !out.status.success() {
-                        evidence.push(format!(
-                            "`{program}` exited with {}: {}",
-                            out.status,
-                            tail_for_log(&String::from_utf8_lossy(&out.stderr))
-                        ));
-                        continue;
                     }
-                    let Ok(report) = std::str::from_utf8(&out.stdout) else {
-                        evidence.push(format!("`{program}` printed a non-UTF-8 sys.executable"));
-                        continue;
-                    };
-                    let mut paths = report.lines().map(str::trim);
-                    let exe = paths.next().unwrap_or("");
-                    if exe.is_empty() {
-                        evidence.push(format!("`{program}` printed an empty sys.executable"));
-                        continue;
+                    if !timed_out {
+                        break;
                     }
-                    // A component check, not a substring one: a user dir
-                    // that merely contains the word must not be rejected.
-                    let in_windows_apps = |p: &str| {
-                        std::path::Path::new(p)
-                            .components()
-                            .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
-                    };
-                    // The base paths matter too: inside a venv,
-                    // sys.executable is the venv's own exe, so a venv
-                    // created from the packaged interpreter would slip a
-                    // WindowsApps-free path past a sys.executable-only
-                    // check while its base still carries the packaged
-                    // identity.
-                    if let Some(packaged) = std::iter::once(exe)
-                        .chain(paths)
-                        .find(|p| !p.is_empty() && in_windows_apps(p))
-                    {
-                        evidence.push(format!(
-                            "`{program}` is (or wraps) the Microsoft Store interpreter at \
-                             {packaged}"
-                        ));
-                        continue;
-                    }
-                    return std::path::PathBuf::from(exe);
                 }
                 panic!(
                     "no usable Python found for the reaper tests ({}). The Microsoft \
@@ -1310,6 +1267,96 @@ mod tests {
                 )
             })
             .clone()
+    }
+
+    /// One candidate's verdict when it did not yield a usable interpreter:
+    /// what happened, and whether asking again might get a different answer
+    /// (only a timeout qualifies — see the retry loop in [`test_python`]).
+    #[cfg(target_os = "windows")]
+    struct ProbeFailure {
+        report: String,
+        timed_out: bool,
+    }
+
+    /// Ask one candidate interpreter for its identity, rejecting anything
+    /// that is (or wraps) the Microsoft Store Python. One candidate per call
+    /// so [`test_python`]'s retry loop can tell a timed-out candidate from a
+    /// deterministically unusable one.
+    #[cfg(target_os = "windows")]
+    fn probe_python_candidate(
+        program: &str,
+        version_args: &[&str],
+    ) -> Result<std::path::PathBuf, ProbeFailure> {
+        let fail = |report: String| ProbeFailure {
+            report,
+            timed_out: false,
+        };
+        // Bounded with the module's own primitive: a hung
+        // candidate (a misbehaving shim) must not stall the
+        // whole suite before any bounded machinery is even
+        // under test. UTF-8 bytes straight to the pipe:
+        // `print()` would encode with the console codepage
+        // when stdout is a pipe, and can even raise
+        // UnicodeEncodeError for an install path under a
+        // non-ASCII user profile — either way a valid
+        // interpreter would be skipped or garbled.
+        let out = match run_python_capture_bounded(
+            std::path::Path::new(program),
+            version_args.iter().copied().chain([
+                "-c",
+                "import sys; sys.stdout.buffer.write('\\n'.join([sys.executable, \
+                 getattr(sys, '_base_executable', '') or '', sys.base_prefix])\
+                 .encode('utf-8'))",
+            ]),
+            std::time::Duration::from_secs(30),
+        ) {
+            Ok(out) => out,
+            Err(e) => {
+                return Err(ProbeFailure {
+                    report: format!("`{program}` did not run: {e}"),
+                    timed_out: e.kind() == std::io::ErrorKind::TimedOut,
+                });
+            }
+        };
+        if !out.status.success() {
+            return Err(fail(format!(
+                "`{program}` exited with {}: {}",
+                out.status,
+                tail_for_log(&String::from_utf8_lossy(&out.stderr))
+            )));
+        }
+        let Ok(identity) = std::str::from_utf8(&out.stdout) else {
+            return Err(fail(format!(
+                "`{program}` printed a non-UTF-8 sys.executable"
+            )));
+        };
+        let mut paths = identity.lines().map(str::trim);
+        let exe = paths.next().unwrap_or("");
+        if exe.is_empty() {
+            return Err(fail(format!("`{program}` printed an empty sys.executable")));
+        }
+        // A component check, not a substring one: a user dir
+        // that merely contains the word must not be rejected.
+        let in_windows_apps = |p: &str| {
+            std::path::Path::new(p)
+                .components()
+                .any(|c| c.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+        };
+        // The base paths matter too: inside a venv,
+        // sys.executable is the venv's own exe, so a venv
+        // created from the packaged interpreter would slip a
+        // WindowsApps-free path past a sys.executable-only
+        // check while its base still carries the packaged
+        // identity.
+        if let Some(packaged) = std::iter::once(exe)
+            .chain(paths)
+            .find(|p| !p.is_empty() && in_windows_apps(p))
+        {
+            return Err(fail(format!(
+                "`{program}` is (or wraps) the Microsoft Store interpreter at {packaged}"
+            )));
+        }
+        Ok(std::path::PathBuf::from(exe))
     }
 
     #[test]
