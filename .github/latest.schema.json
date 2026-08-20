@@ -38,7 +38,7 @@
       "description": "Per-platform updater bundles (Tauri updater format). At least one platform must be present.",
       "minProperties": 1,
       "propertyNames": {
-        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)(-(deb|rpm|appimage))?$"
+        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$|^linux-(x86_64|aarch64|armv7|i686)-(deb|rpm)$"
       },
       "additionalProperties": {
         "type": "object",
@@ -61,7 +61,7 @@
     },
     "downloads": {
       "type": "object",
-      "description": "All distributable installer URLs grouped by Tauri platform target. Includes formats not covered by the in-app updater (.deb, .rpm, .dmg) so download pages can offer the right installer per OS/arch.",
+      "description": "All distributable installer URLs grouped by Tauri platform target. Includes formats not covered by the in-app updater (.dmg) so download pages can offer the right installer per OS/arch.",
       "propertyNames": {
         "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$"
       },

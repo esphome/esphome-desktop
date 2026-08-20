@@ -173,7 +173,7 @@ def test_build_platforms_reads_sig_nested_in_artifact_dir() -> None:
         ARTIFACTS_FIXTURE,
         f"https://github.com/{REPO}/releases/download/{TAG}",
     )
-    assert len(platforms) == 9
+    assert len(platforms) == len(gen.PLATFORM_SIG_MATCHERS)
     for plat, entry in platforms.items():
         assert entry["signature"].strip(), f"empty signature for {plat}"
 
@@ -185,7 +185,7 @@ def test_build_platforms_also_handles_flat_sig_layout() -> None:
         (tmpdir / "ESPHome Device Builder_0.10.0_amd64.AppImage.sig").write_text(
             "flat-sig-contents\n"
         )
-        # The other four platforms have no local .sig here and will warn;
+        # The other platforms have no local .sig here and will warn;
         # pytest swallows that noise by default — this test only asserts the
         # flat layout reads.
         platforms = gen.build_platforms(

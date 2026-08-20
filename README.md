@@ -221,8 +221,10 @@ Tauri Ed25519 key and a `latest.json` manifest is uploaded to the draft
 release. Once the release is published, existing installs pick it up on their
 next update check.
 
-Linux `.deb` / `.rpm` and AUR installs do **not** self-update — those users
-update through their system package manager.
+Linux `.deb` / `.rpm` installs self-update through the system package tool
+(`dpkg` / `rpm`, with an elevation prompt). AUR installs do **not**
+self-update — Arch has no `dpkg`, so those users update through their system
+package manager.
 
 ## Configuration
 

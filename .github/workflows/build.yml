@@ -136,14 +136,12 @@ jobs:
             os: windows-latest
             target: windows-x64
             bundles: nsis
-            updater_target: windows-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
             bundles: appimage
             # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
             tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
-            updater_target: linux-x86_64
           - platform: linux
             os: ubuntu-22.04
             target: linux-x64
@@ -154,7 +152,6 @@ jobs:
             bundles: appimage
             # Pinned commit of tauri-apps/tauri feat/truly-portable-appimage.
             tauri_rev: 105550cf9986a1a752eafb288baa562d6a564cce
-            updater_target: linux-aarch64
           - platform: linux
             os: ubuntu-22.04-arm
             target: linux-arm64
@@ -164,13 +161,11 @@ jobs:
             target: macos-arm64
             rust_target: aarch64-apple-darwin
             bundles: dmg
-            updater_target: darwin-aarch64
           - platform: macos
             os: macos-15
             target: macos-x64
             rust_target: x86_64-apple-darwin
             bundles: dmg
-            updater_target: darwin-x86_64
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
