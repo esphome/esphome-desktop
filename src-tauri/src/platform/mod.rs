@@ -703,7 +703,11 @@ mod tests {
         //    still answering from the copy.
         assert!(!orphan.exists(), "the orphan survived the repair");
         assert!(
-            std::fs::metadata(&esp32_init).map_or(0, |m| m.len()) > 0,
+            esp32_init.is_file(),
+            "the repair did not restore the esp32 component at {esp32_init:?}"
+        );
+        assert!(
+            std::fs::metadata(&esp32_init).unwrap().len() > 0,
             "the repair left the truncated esp32 component empty"
         );
         assert_eq!(
