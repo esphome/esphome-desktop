@@ -9,9 +9,11 @@ name: Python Tree Repair
 # ship — on every OS we ship it on.
 #
 # What it proves, in one pass: the first-run copy of a freshly built bundle is
-# self-contained and healthy; an orphaned component directory (exactly what the
-# removed `--ignore-installed` fallback left behind, and what broke every
-# compile on 2026.7) fails the health probe; the repair re-copy removes it with
+# self-contained and healthy; metadata-invisible damage in the class the
+# removed `--ignore-installed` fallback left behind (a truncated component
+# module the probe's config loads; the 2026.7 rp2040 orphan collision is
+# tolerated since ESPHome 2026.8's checked-in alias registry) fails the health
+# probe; the repair re-copy removes it, orphan directory included, with
 # no network; a tree carrying a RECORD-less frontend dist-info makes the real
 # updater pip command abort with uninstall-no-record-file and a repair from a
 # source carrying the same corruption recovers it (the "Cannot uninstall
