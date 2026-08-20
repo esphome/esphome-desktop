@@ -398,12 +398,24 @@ pub(super) fn handle_menu_event(app_handle: &AppHandle, id: &str, state: &Arc<Ap
                         )
                         .await;
                     }
+                    // Partial, not failed: the package is installed and the
+                    // new backend is already persisted (and shown in the tray
+                    // radio) by the time the start is attempted, so only the
+                    // dashboard is missing. Calling this "Backend Switch
+                    // Failed" contradicts the tray's own state and invites a
+                    // switch back that reinstalls for nothing. Matches the
+                    // channel switch and both update arms, and `InstallOutcome`
+                    // records the split: a failed start is a warning to the
+                    // tray, an error to the CLI.
                     SwitchOutcome::StartFailed(e) => {
                         crate::dialog::notice(
                             &app,
-                            &t("switch_backend.failed_title"),
-                            t_with("switch_backend.start_failed", &[("error", &e.to_string())]),
-                            MessageDialogKind::Error,
+                            &t("switch_backend.partial_title"),
+                            t_with(
+                                "switch_backend.partial",
+                                &[("backend", &new_backend.to_string()), ("error", &e)],
+                            ),
+                            MessageDialogKind::Warning,
                         )
                         .await;
                     }

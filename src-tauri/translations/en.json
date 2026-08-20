@@ -95,7 +95,8 @@
     "not_ready": "Switched to {backend}, but it didn't become ready in time. Check the logs.",
     "failed_title": "Backend Switch Failed",
     "install_failed": "Failed to install esphome-device-builder: {error}",
-    "start_failed": "Failed to start backend: {error}"
+    "partial_title": "Backend Switch Partially Complete",
+    "partial": "Switched to {backend}, but it failed to start: {error}"
   },
   "daemon": {
     "stopped_title": "{backend} stopped",
