@@ -193,10 +193,10 @@ pub fn is_managed_python_tree(python_bin: &Path) -> bool {
 /// class survives: stale or truncated module files from a mixed-version tree
 /// still break real commands while metadata stays green.)
 ///
-/// `config` is the cheapest command that gets there: the alias map is built at
-/// the top of config validation, and a trivial config validates in ~0.2s.
-/// `esphome version` never loads the component tree and reports a broken install
-/// as fine.
+/// `config` is the cheapest command that gets there: validation imports and
+/// schema-checks every component the config names, and a trivial config
+/// validates in ~0.2s. `esphome version` never loads the component tree and
+/// reports a broken install as fine.
 pub fn esphome_config_probe(python_bin: &Path) -> Result<Option<String>> {
     use std::fs;
 

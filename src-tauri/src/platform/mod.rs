@@ -560,9 +560,10 @@ mod tests {
     ];
 
     /// The whole repair lifecycle against a real bundled Python tree: the
-    /// first-run copy, detect the orphan, wipe and re-copy from the pristine
-    /// bundle, prove it is fixed, then prove a refresh from an older bundle
-    /// restores the newer version the user tree already had.
+    /// first-run copy, detect metadata-invisible damage (a truncated
+    /// component module), wipe and re-copy from the pristine bundle, prove it
+    /// is fixed, then prove a refresh from an older bundle restores the newer
+    /// version the user tree already had.
     ///
     /// Ignored by default because it needs the genuine article — the
     /// python-build-standalone tree with esphome in it that
@@ -687,9 +688,15 @@ mod tests {
         let detail = esphome_config_probe(&python)
             .expect("probe could not run")
             .expect("the truncated esp32 component must fail the health probe");
+        // A weak discriminator by necessity: the probe config itself names
+        // `esp32`, so most validation failures would mention it too. The exact
+        // wording for an empty component module is ESPHome's to change (today
+        // it is an AttributeError in the import chain), so nothing stronger is
+        // stable to match on. Step 3's clean probe of the undamaged copy is
+        // what actually pins the failure on the fabricated damage.
         assert!(
             detail.contains("esp32"),
-            "probe failed for some other reason: {detail}"
+            "probe failure does not mention esp32: {detail}"
         );
 
         // 6. The repair: wipe the damaged copy and re-copy the pristine
