@@ -122,6 +122,7 @@
   },
   "hint": {
     "updates_menu": "Open the tray menu and choose \"Check for Updates\" to update.",
-    "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update."
+    "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update.",
+    "updates_package_manager": "Update it through your system package manager."
   }
 }

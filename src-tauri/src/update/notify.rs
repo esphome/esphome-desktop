@@ -88,39 +88,64 @@ pub(super) fn notify_if_newer(
         &wording.notification_title(),
         &wording.subject(latest),
         installed,
-        tray_available,
+        NotificationHint::InApp { tray_available },
     ) {
         error!("Failed to show notification: {}", e);
     }
 }
 
+/// Which follow-through the "update available" notification's trailing hint
+/// points at. The hint exists so the notification never instructs a route
+/// that cannot perform the update: no tray means "open the tray menu" is
+/// pointing at nothing (issue #87), and an externally managed desktop update
+/// means the in-app flow — tray or CLI — cannot install it either.
+#[derive(Clone, Copy)]
+pub(crate) enum NotificationHint {
+    /// The in-app flow: the tray's Check for Updates, or the CLI when no
+    /// tray is available.
+    InApp { tray_available: bool },
+    /// Only the system package manager can install this update — a deb/rpm
+    /// repackage without its package tool (`app_update`'s externally-managed
+    /// case).
+    PackageManager,
+}
+
+impl NotificationHint {
+    fn text(self) -> String {
+        match self {
+            NotificationHint::InApp { tray_available } => crate::updates_menu_hint(tray_available),
+            NotificationHint::PackageManager => crate::i18n::t("hint.updates_package_manager"),
+        }
+    }
+}
+
 /// Build and show the standard "update available" notification:
-/// "<subject> is available (you have <installed>). <updates menu hint>".
+/// "<subject> is available (you have <installed>). <hint>".
 /// Returns the show error so each caller keeps its own failure log wording.
 pub(crate) fn notify_update_available(
     app_handle: &AppHandle,
     title: &str,
     subject: &str,
     installed: &str,
-    tray_available: bool,
+    hint: NotificationHint,
 ) -> tauri_plugin_notification::Result<()> {
     app_handle
         .notification()
         .builder()
         .title(title)
-        .body(update_notification_body(subject, installed, tray_available))
+        .body(update_notification_body(subject, installed, hint))
         .show()
 }
 
 /// Body of the standard "update available" notification, shared by every
 /// caller of [`notify_update_available`].
-fn update_notification_body(subject: &str, installed: &str, tray_available: bool) -> String {
+fn update_notification_body(subject: &str, installed: &str, hint: NotificationHint) -> String {
     t_with(
         "update.notification_body",
         &[
             ("subject", subject),
             ("installed", installed),
-            ("hint", &crate::updates_menu_hint(tray_available)),
+            ("hint", &hint.text()),
         ],
     )
 }
@@ -179,29 +204,52 @@ mod tests {
 
     #[test]
     fn notification_body_pins_exact_text_for_both_tray_states() {
+        let with_tray = NotificationHint::InApp {
+            tray_available: true,
+        };
+        let no_tray = NotificationHint::InApp {
+            tray_available: false,
+        };
         // With a tray, the hint points at the tray menu.
         assert_eq!(
-            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", true),
+            update_notification_body(
+                &esphome_wording().subject("2025.1.0"),
+                "2024.12.2",
+                with_tray
+            ),
             "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
              Open the tray menu and choose \"Check for Updates\" to update."
         );
         assert_eq!(
-            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", true),
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", with_tray),
             "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
              Open the tray menu and choose \"Check for Updates\" to update."
         );
         // Without a tray, the hint falls back to the CLI.
         assert_eq!(
-            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", false),
+            update_notification_body(&esphome_wording().subject("2025.1.0"), "2024.12.2", no_tray),
             "ESPHome 2025.1.0 (stable) is available (you have 2024.12.2). \
              No system tray was detected. Run `esphome-desktop update` from a \
              terminal to update."
         );
         assert_eq!(
-            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", false),
+            update_notification_body(&DEVICE_BUILDER_WORDING.subject("1.2.3"), "1.2.2", no_tray),
             "ESPHome Device Builder 1.2.3 is available (you have 1.2.2). \
              No system tray was detected. Run `esphome-desktop update` from a \
              terminal to update."
+        );
+    }
+
+    /// The externally-managed hint must never point at the in-app flow: for a
+    /// deb/rpm repackage without its package tool, neither the tray's Check
+    /// for Updates nor the CLI can install the desktop update, so the daily
+    /// notification instructs the package manager instead.
+    #[test]
+    fn notification_body_pins_package_manager_hint() {
+        assert_eq!(
+            update_notification_body("Version 1.2.0", "1.1.2", NotificationHint::PackageManager),
+            "Version 1.2.0 is available (you have 1.1.2). \
+             Update it through your system package manager."
         );
     }
 }

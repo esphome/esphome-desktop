@@ -190,6 +190,18 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                 "Desktop update available in background: {} (current: {})",
                 update.version, update.current_version
             );
+            // A blocked update (a deb/rpm repackage without its package tool —
+            // the AUR case) cannot be installed from this binary: the
+            // notification's hint must point at the package manager rather
+            // than an in-app flow that cannot perform the update, and the pip
+            // updates won't be overwritten by it, so the loop must keep
+            // checking them rather than skipping forever.
+            let blocked = self_update_blocked().is_some();
+            let hint = if blocked {
+                crate::update::NotificationHint::PackageManager
+            } else {
+                crate::update::NotificationHint::InApp { tray_available }
+            };
             if let Err(e) = crate::update::notify_update_available(
                 app_handle,
                 &t_with(
@@ -201,17 +213,14 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                     &[("version", &update.version)],
                 ),
                 &update.current_version,
-                tray_available,
+                hint,
             ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
-            // A blocked update (a deb/rpm repackage without its package tool —
-            // the AUR case) cannot be installed from this binary, so the pip
-            // updates won't be overwritten by it; the loop must keep checking
-            // them rather than skipping forever.
-            match self_update_blocked() {
-                Some(_) => NextStep::Continue,
-                None => NextStep::Skip,
+            if blocked {
+                NextStep::Continue
+            } else {
+                NextStep::Skip
             }
         }
         Ok(None) => {

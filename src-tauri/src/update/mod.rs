@@ -27,7 +27,7 @@ mod version;
 #[cfg(test)]
 pub(crate) use install::is_missing_record_error;
 pub use install::{get_installed_device_builder_version, installed_esphome_version};
-pub(crate) use notify::notify_update_available;
+pub(crate) use notify::{notify_update_available, NotificationHint};
 pub(crate) use version::is_newer_version;
 
 /// PyPI package info response (used for stable channel)
