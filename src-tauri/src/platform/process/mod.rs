@@ -1245,6 +1245,7 @@ mod tests {
                 // carry into the next attempt.
                 let mut candidates: Vec<(&str, &[&str])> =
                     vec![("python", &[][..]), ("py", &["-3"][..])];
+                let started = std::time::Instant::now();
                 for attempt in 1..=3 {
                     let mut retry = Vec::new();
                     for (program, version_args) in candidates {
@@ -1262,6 +1263,21 @@ mod tests {
                     if retry.is_empty() {
                         break;
                     }
+                    // Wall-clock budget across attempts, so a host where the
+                    // candidates genuinely hang (a wedged Store shim) fails in
+                    // bounded time instead of paying attempts × candidates ×
+                    // 30s — a cost every caller would then re-pay, since a
+                    // panicking initializer leaves the OnceLock empty. Above
+                    // 60s, deliberately: the observed incident spent 60s on
+                    // both candidates timing out once and was then answered
+                    // instantly, and that retry must stay affordable.
+                    if started.elapsed() >= std::time::Duration::from_secs(90) {
+                        break;
+                    }
+                    // Breathing room before re-spawning: the timeout means the
+                    // host is saturated, and an immediate retry just re-learns
+                    // that. Never reached by a successful probe.
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                     candidates = retry;
                 }
                 panic!(
