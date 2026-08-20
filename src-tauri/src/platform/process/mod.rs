@@ -1270,13 +1270,21 @@ mod tests {
                     // panicking initializer leaves the OnceLock empty. Above
                     // 60s, deliberately: the observed incident spent 60s on
                     // both candidates timing out once and was then answered
-                    // instantly, and that retry must stay affordable.
+                    // instantly, and that retry must stay affordable. The 90s
+                    // gates the *start* of an attempt, not the whole probe, so
+                    // the run tops out near 122s (60 + 2 + 60) when both
+                    // candidates hang through two attempts.
                     if started.elapsed() >= std::time::Duration::from_secs(90) {
                         break;
                     }
                     // Breathing room before re-spawning: the timeout means the
                     // host is saturated, and an immediate retry just re-learns
-                    // that. Never reached by a successful probe.
+                    // that. Never reached by a successful probe, and never paid
+                    // fruitlessly before the panic either — but only because
+                    // 3 × 30s + 2 × 2s ≥ 90s means attempt 3 always trips the
+                    // budget check first. Keep that inequality in mind if the
+                    // budget, the per-candidate bound, or the attempt count
+                    // moves.
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     candidates = retry;
                 }
