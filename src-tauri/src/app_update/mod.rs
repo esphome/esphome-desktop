@@ -59,6 +59,29 @@ fn self_update_blocked_tool(
     (!tool_present(tool)).then_some(tool)
 }
 
+/// Pure decision for [`check_and_notify`]'s update-available arm: which hint
+/// the notification carries and whether the loop may skip the Python-package
+/// checks afterwards. One function so the two cannot drift apart — a blocked
+/// update must never pair the in-app hint with `Skip`: the hint would
+/// instruct a flow that cannot install, and the skip would starve the pip
+/// checks forever behind an app install that is not coming.
+fn background_notify_plan(
+    blocked: bool,
+    tray_available: bool,
+) -> (crate::update::NotificationHint, NextStep) {
+    if blocked {
+        (
+            crate::update::NotificationHint::PackageManager,
+            NextStep::Continue,
+        )
+    } else {
+        (
+            crate::update::NotificationHint::InApp { tray_available },
+            NextStep::Skip,
+        )
+    }
+}
+
 /// [`self_update_blocked_tool`] for the running binary and the real `PATH`:
 /// `Some(tool)` names the missing package tool when a self-update must not be
 /// attempted, `None` means the updater may proceed.
@@ -190,18 +213,8 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                 "Desktop update available in background: {} (current: {})",
                 update.version, update.current_version
             );
-            // A blocked update (a deb/rpm repackage without its package tool —
-            // the AUR case) cannot be installed from this binary: the
-            // notification's hint must point at the package manager rather
-            // than an in-app flow that cannot perform the update, and the pip
-            // updates won't be overwritten by it, so the loop must keep
-            // checking them rather than skipping forever.
-            let blocked = self_update_blocked().is_some();
-            let hint = if blocked {
-                crate::update::NotificationHint::PackageManager
-            } else {
-                crate::update::NotificationHint::InApp { tray_available }
-            };
+            let (hint, next) =
+                background_notify_plan(self_update_blocked().is_some(), tray_available);
             if let Err(e) = crate::update::notify_update_available(
                 app_handle,
                 &t_with(
@@ -217,11 +230,7 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
             ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
-            if blocked {
-                NextStep::Continue
-            } else {
-                NextStep::Skip
-            }
+            next
         }
         Ok(None) => {
             debug!("Desktop app is up to date (background check)");
@@ -491,6 +500,26 @@ mod tests {
                 self_update_blocked_tool(bundle, |tool| panic!("asked PATH about {tool}")),
                 None
             );
+        }
+    }
+
+    /// The pairing invariant [`background_notify_plan`] exists for: a blocked
+    /// update carries the package-manager hint AND keeps the loop checking the
+    /// Python packages; a normal update carries the in-app hint (preserving
+    /// the tray state) AND may skip them until it installs.
+    #[test]
+    fn background_plan_pairs_hint_and_next_step() {
+        use crate::update::NotificationHint;
+        for tray in [true, false] {
+            let (hint, next) = background_notify_plan(true, tray);
+            assert!(matches!(hint, NotificationHint::PackageManager));
+            assert_eq!(next, NextStep::Continue);
+
+            let (hint, next) = background_notify_plan(false, tray);
+            assert!(
+                matches!(hint, NotificationHint::InApp { tray_available } if tray_available == tray)
+            );
+            assert_eq!(next, NextStep::Skip);
         }
     }
 

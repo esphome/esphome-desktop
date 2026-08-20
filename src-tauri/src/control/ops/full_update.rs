@@ -66,25 +66,11 @@ pub(crate) async fn run_full_update(
         Ok(updater) => match updater.check().await {
             Ok(Some(update)) => {
                 let version = update.version.clone();
-                match crate::app_update::apply_update_noninteractive(app, update, progress).await {
-                    Ok(AppUpdateOutcome::Installed) => {
-                        report.note(format!("desktop app updated to {version}"));
-                        report.app_update_installed = true;
-                        return report;
-                    }
-                    // A deb/rpm-typed binary without its package tool (the
-                    // AUR repackage) cannot install this. A note, not a fail
-                    // — and fall through to the package phases: the pip
-                    // updates won't be overwritten by an app install that
-                    // can't happen here.
-                    Ok(AppUpdateOutcome::ExternallyManaged(tool)) => {
-                        report.note(package_manager_note(&version, tool));
-                    }
-                    Err(e) => {
-                        // Don't compound a failed self-update with pip activity.
-                        report.fail(format!("desktop app update to {version} failed: {e}"));
-                        return report;
-                    }
+                let outcome =
+                    crate::app_update::apply_update_noninteractive(app, update, progress).await;
+                match record_desktop_outcome(&mut report, &version, outcome) {
+                    DesktopPhase::Done => return report,
+                    DesktopPhase::ContinueToPackages => {}
                 }
             }
             Ok(None) => report.note(format!(
@@ -275,6 +261,45 @@ fn package_manager_note(version: &str, tool: &str) -> String {
     )
 }
 
+/// What the desktop phase decided about the rest of [`run_full_update`].
+#[derive(Debug, PartialEq, Eq)]
+enum DesktopPhase {
+    /// The update flow is over — an install succeeded (relaunch pending) or
+    /// failed (don't compound with pip activity); return the report as-is.
+    Done,
+    /// No install happened or will happen here; the package phases still run.
+    ContinueToPackages,
+}
+
+/// Record the desktop phase's outcome on the report and say whether the
+/// package phases still run.
+///
+/// Split out like [`record_outcome`]: which outcomes end the flow and which
+/// fall through — an externally managed update is a *note* (exit 0) and the
+/// pip updates still happen, since no app install is coming to overwrite
+/// them — is the CLI's contract, so it is unit-testable without an updater.
+fn record_desktop_outcome(
+    report: &mut UpdateReport,
+    version: &str,
+    outcome: Result<AppUpdateOutcome, String>,
+) -> DesktopPhase {
+    match outcome {
+        Ok(AppUpdateOutcome::Installed) => {
+            report.note(format!("desktop app updated to {version}"));
+            report.app_update_installed = true;
+            DesktopPhase::Done
+        }
+        Ok(AppUpdateOutcome::ExternallyManaged(tool)) => {
+            report.note(package_manager_note(version, tool));
+            DesktopPhase::ContinueToPackages
+        }
+        Err(e) => {
+            report.fail(format!("desktop app update to {version} failed: {e}"));
+            DesktopPhase::Done
+        }
+    }
+}
+
 /// Record `outcome` as the report line for `component` updating to `label`.
 ///
 /// Split out of [`run_package_phase`] so the wording — which is the CLI's
@@ -326,15 +351,71 @@ mod tests {
         (report.lines.remove(0), report.any_failed)
     }
 
-    /// Not a failure: the CLI must exit 0 when the only "problem" is that the
-    /// desktop update belongs to the system package manager, otherwise every
-    /// AUR user's `esphome-desktop update` reads as broken forever.
+    /// The desktop phase through the real recorder: the report line, the
+    /// failed flag, the relaunch-pending flag, and whether the package
+    /// phases still run.
+    fn desktop_recorded(
+        outcome: Result<AppUpdateOutcome, String>,
+    ) -> (String, bool, bool, DesktopPhase) {
+        let mut report = UpdateReport {
+            app_update_installed: false,
+            lines: Vec::new(),
+            any_failed: false,
+        };
+        let phase = record_desktop_outcome(&mut report, "1.2.0", outcome);
+        assert_eq!(report.lines.len(), 1, "exactly one desktop line");
+        (
+            report.lines.remove(0),
+            report.any_failed,
+            report.app_update_installed,
+            phase,
+        )
+    }
+
     #[test]
-    fn a_package_manager_update_is_a_note_naming_the_missing_tool() {
+    fn an_installed_desktop_update_ends_the_flow_pending_relaunch() {
         assert_eq!(
-            package_manager_note("1.2.0", "dpkg"),
-            "desktop app 1.2.0 is available; this install has no dpkg, \
-             update it through your system package manager"
+            desktop_recorded(Ok(AppUpdateOutcome::Installed)),
+            (
+                "desktop app updated to 1.2.0".to_string(),
+                false,
+                true,
+                DesktopPhase::Done
+            )
+        );
+    }
+
+    /// Not a failure, and not the end of the flow: the CLI must exit 0 and
+    /// still run the pip phases when the only "problem" is that the desktop
+    /// update belongs to the system package manager — otherwise every AUR
+    /// user's `esphome-desktop update` reads as broken forever and their
+    /// ESPHome never updates.
+    #[test]
+    fn an_externally_managed_update_notes_and_continues_to_packages() {
+        assert_eq!(
+            desktop_recorded(Ok(AppUpdateOutcome::ExternallyManaged("dpkg"))),
+            (
+                "desktop app 1.2.0 is available; this install has no dpkg, \
+                 update it through your system package manager"
+                    .to_string(),
+                false,
+                false,
+                DesktopPhase::ContinueToPackages
+            )
+        );
+    }
+
+    /// A failed install ends the flow: don't compound it with pip activity.
+    #[test]
+    fn a_failed_desktop_update_ends_the_flow() {
+        assert_eq!(
+            desktop_recorded(Err("download failed: boom".into())),
+            (
+                "desktop app update to 1.2.0 failed: download failed: boom".to_string(),
+                true,
+                false,
+                DesktopPhase::Done
+            )
         );
     }
 
