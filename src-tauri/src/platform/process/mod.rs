@@ -1240,22 +1240,29 @@ mod tests {
                 // first was denied). A timeout is evidence of contention, not
                 // absence; the other failures — no such program, a Store
                 // alias, a broken shim — are properties of the host that
-                // asking again cannot change, so they still fail on the first
-                // attempt.
+                // asking again cannot change, so each candidate is dropped on
+                // its first deterministic failure and only the timed-out ones
+                // carry into the next attempt.
+                let mut candidates: Vec<(&str, &[&str])> =
+                    vec![("python", &[][..]), ("py", &["-3"][..])];
                 for attempt in 1..=3 {
-                    let mut timed_out = false;
-                    for (program, version_args) in [("python", &[][..]), ("py", &["-3"][..])] {
+                    let mut retry = Vec::new();
+                    for (program, version_args) in candidates {
                         match probe_python_candidate(program, version_args) {
                             Ok(exe) => return exe,
                             Err(failure) => {
-                                timed_out |= failure.timed_out;
-                                evidence.push(format!("attempt {attempt}: {}", failure.report));
+                                if matches!(failure, ProbeFailure::TimedOut(_)) {
+                                    retry.push((program, version_args));
+                                }
+                                evidence
+                                    .push(format!("attempt {attempt}: {}", failure.into_report()));
                             }
                         }
                     }
-                    if !timed_out {
+                    if retry.is_empty() {
                         break;
                     }
+                    candidates = retry;
                 }
                 panic!(
                     "no usable Python found for the reaper tests ({}). The Microsoft \
@@ -1269,13 +1276,23 @@ mod tests {
             .clone()
     }
 
-    /// One candidate's verdict when it did not yield a usable interpreter:
-    /// what happened, and whether asking again might get a different answer
-    /// (only a timeout qualifies — see the retry loop in [`test_python`]).
+    /// One candidate's verdict when it did not yield a usable interpreter,
+    /// split by whether asking again might get a different answer: only a
+    /// timeout qualifies — see the retry loop in [`test_python`]. Both
+    /// variants carry the human-readable report for the panic evidence.
     #[cfg(target_os = "windows")]
-    struct ProbeFailure {
-        report: String,
-        timed_out: bool,
+    enum ProbeFailure {
+        TimedOut(String),
+        Unusable(String),
+    }
+
+    #[cfg(target_os = "windows")]
+    impl ProbeFailure {
+        fn into_report(self) -> String {
+            match self {
+                ProbeFailure::TimedOut(report) | ProbeFailure::Unusable(report) => report,
+            }
+        }
     }
 
     /// Ask one candidate interpreter for its identity, rejecting anything
@@ -1287,10 +1304,6 @@ mod tests {
         program: &str,
         version_args: &[&str],
     ) -> Result<std::path::PathBuf, ProbeFailure> {
-        let fail = |report: String| ProbeFailure {
-            report,
-            timed_out: false,
-        };
         // Bounded with the module's own primitive: a hung
         // candidate (a misbehaving shim) must not stall the
         // whole suite before any bounded machinery is even
@@ -1312,28 +1325,32 @@ mod tests {
         ) {
             Ok(out) => out,
             Err(e) => {
-                return Err(ProbeFailure {
-                    report: format!("`{program}` did not run: {e}"),
-                    timed_out: e.kind() == std::io::ErrorKind::TimedOut,
+                let report = format!("`{program}` did not run: {e}");
+                return Err(if e.kind() == std::io::ErrorKind::TimedOut {
+                    ProbeFailure::TimedOut(report)
+                } else {
+                    ProbeFailure::Unusable(report)
                 });
             }
         };
         if !out.status.success() {
-            return Err(fail(format!(
+            return Err(ProbeFailure::Unusable(format!(
                 "`{program}` exited with {}: {}",
                 out.status,
                 tail_for_log(&String::from_utf8_lossy(&out.stderr))
             )));
         }
         let Ok(identity) = std::str::from_utf8(&out.stdout) else {
-            return Err(fail(format!(
+            return Err(ProbeFailure::Unusable(format!(
                 "`{program}` printed a non-UTF-8 sys.executable"
             )));
         };
         let mut paths = identity.lines().map(str::trim);
         let exe = paths.next().unwrap_or("");
         if exe.is_empty() {
-            return Err(fail(format!("`{program}` printed an empty sys.executable")));
+            return Err(ProbeFailure::Unusable(format!(
+                "`{program}` printed an empty sys.executable"
+            )));
         }
         // A component check, not a substring one: a user dir
         // that merely contains the word must not be rejected.
@@ -1352,7 +1369,7 @@ mod tests {
             .chain(paths)
             .find(|p| !p.is_empty() && in_windows_apps(p))
         {
-            return Err(fail(format!(
+            return Err(ProbeFailure::Unusable(format!(
                 "`{program}` is (or wraps) the Microsoft Store interpreter at {packaged}"
             )));
         }
