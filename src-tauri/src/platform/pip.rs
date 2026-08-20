@@ -36,6 +36,16 @@ const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// and still finite.
 const PIP_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// How long [`run_pip_bounded`] waits for a pipe reader after the child it
+/// belongs to is done with it.
+///
+/// Normally instant: pip closed its end, so the reader sees EOF and returns.
+/// This bounds the case where it does not — a PEP 517 build backend that
+/// inherited the pipe and outlived pip — where waiting inside
+/// [`PIP_RUN_TIMEOUT`] would report a successful install as a timeout half an
+/// hour later. Matches `run_bounded`'s `DRAIN_GRACE`, for the same reason.
+const PIP_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
 /// needing `--pre`. On timeout the child is killed and an error is returned;
@@ -266,11 +276,13 @@ pub async fn run_pip(cmd: tokio::process::Command) -> std::io::Result<std::proce
 ///
 /// Both streams are drained into shared buffers by their own tasks rather than
 /// by `wait_with_output`, so the bytes pip had already written survive the
-/// deadline firing. A 30-minute bound only fires in pathological cases, which
-/// are exactly the ones that get reported, and "timed out" with nothing after
-/// it says nothing about which package pip was resolving, downloading, or
-/// building when it wedged. This is the parity [`run_bounded`]'s
-/// [`BoundedRun::TimedOut`] already gives the startup restore path.
+/// deadline firing, and a reader still stuck on a pipe a grandchild holds open
+/// cannot keep them hostage. A 30-minute bound only fires in pathological
+/// cases, which are exactly the ones that get reported, and "timed out" with
+/// nothing after it says nothing about which package pip was resolving,
+/// downloading, or building when it wedged. This is the parity
+/// [`run_bounded`]'s [`BoundedRun::TimedOut`] already gives the startup restore
+/// path — both streams here, since that progress goes to stdout.
 async fn run_pip_bounded(
     mut cmd: tokio::process::Command,
     timeout: std::time::Duration,
@@ -302,35 +314,52 @@ async fn run_pip_bounded(
     let stdout = drain_pipe("stdout", child.stdout.take());
     let stderr = drain_pipe("stderr", child.stderr.take());
 
-    // The readers are joined *inside* the bound, not after it: a grandchild
-    // that inherited the pipes can hold them open past the child's own exit,
-    // and `wait_with_output` had the same exposure covered by the same
-    // deadline.
-    let waited = tokio::time::timeout(timeout, async {
-        let status = child.wait().await?;
-        join_pipe(stdout.task).await;
-        join_pipe(stderr.task).await;
-        Ok::<_, std::io::Error>(status)
-    })
-    .await;
+    // Only the child is under `timeout`. The readers are joined after it, under
+    // their own short grace: a pipe reaches EOF only when *every* writer closes
+    // it, and a PEP 517 build backend that inherited pip's pipes can outlive
+    // pip itself. Joining them inside the bound would turn a successful install
+    // into a stall for the remaining balance of the 30 minutes and then a
+    // timeout error, with pip's own output already sitting in the buffers. This
+    // is the split `run_bounded` draws with its own `DRAIN_GRACE`, and the
+    // reason `PipeDrain`'s buffer is shared rather than returned by the task.
+    let waited = tokio::time::timeout(timeout, child.wait()).await;
 
     match waited {
-        Ok(status) => Ok(std::process::Output {
-            status: status?,
-            stdout: take_buf(&stdout.buf),
-            stderr: take_buf(&stderr.buf),
-        }),
+        Ok(status) => {
+            join_pipe("stdout", stdout.task).await;
+            join_pipe("stderr", stderr.task).await;
+            Ok(std::process::Output {
+                status: status?,
+                stdout: take_buf(&stdout.buf),
+                stderr: take_buf(&stderr.buf),
+            })
+        }
         // Whatever the readers got before the deadline: the child is about to
         // be killed by the `kill_on_drop` above, so this is the only evidence
-        // that survives. Callers wrap it in `anyhow` context naming the
-        // install they were running.
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!(
-                "pip install timed out after {timeout:?}; partial stderr: {}",
-                tail_for_log(&String::from_utf8_lossy(&take_buf(&stderr.buf)))
-            ),
-        )),
+        // that survives. Both streams, because pip logs `Collecting …` and
+        // `Downloading …` at INFO to *stdout* and only the CRITICAL headline to
+        // stderr (#327, #339) — a pip that wedges mid-download has typically
+        // written nothing at all to stderr. Tails, not heads: the last
+        // `Downloading …` line is the one it stuck on. Callers wrap this in
+        // `anyhow` context naming the install they were running.
+        Err(_) => {
+            let out = take_buf(&stdout.buf);
+            let errs = take_buf(&stderr.buf);
+            // The bytes are in hand, so the readers have nothing left to
+            // contribute — and one stuck on a pipe a grandchild still holds
+            // open would otherwise stay resident for the life of the process,
+            // appending to a buffer nobody will read.
+            abort_pipe(stdout.task);
+            abort_pipe(stderr.task);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "pip install timed out after {timeout:?}; partial stdout: {}; partial stderr: {}",
+                    tail_for_log(&String::from_utf8_lossy(&out)),
+                    tail_for_log(&String::from_utf8_lossy(&errs))
+                ),
+            ))
+        }
     }
 }
 
@@ -375,12 +404,30 @@ where
     PipeDrain { buf, task }
 }
 
-/// Wait for a reader to finish. A panicking reader is ignored: it panics
-/// inside `extend_from_slice`, and [`take_buf`] recovers that lock, so the
-/// bytes it had already read still come back.
-async fn join_pipe(task: Option<tokio::task::JoinHandle<()>>) {
+/// Wait for a reader to finish, for at most [`PIP_DRAIN_GRACE`], then give up
+/// on it and take what it has. A panicking reader is ignored: it panics inside
+/// `extend_from_slice`, and [`take_buf`] recovers that lock, so the bytes it
+/// had already read still come back.
+async fn join_pipe(what: &str, task: Option<tokio::task::JoinHandle<()>>) {
+    let Some(task) = task else { return };
+    if tokio::time::timeout(PIP_DRAIN_GRACE, task)
+        .await
+        .map_err(|_| ())
+        .is_err()
+    {
+        tracing::warn!(
+            "pip's {what} reader did not finish within {PIP_DRAIN_GRACE:?}; something that \
+             inherited the pipe is still holding it open. Returning what arrived."
+        );
+    }
+}
+
+/// Stop a reader without waiting for it. Cancellation lands at the `read`
+/// await, never while the buffer lock is held, so the bytes already taken from
+/// it are unaffected.
+fn abort_pipe(task: Option<tokio::task::JoinHandle<()>>) {
     if let Some(task) = task {
-        let _ = task.await;
+        task.abort();
     }
 }
 
@@ -461,16 +508,25 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
-    /// The bound's error has to carry what pip had already said. It only fires
-    /// in pathological cases — the ones that get reported — and "timed out"
-    /// alone says nothing about which package pip was stuck on. Parity with
-    /// `run_bounded`'s `BoundedRun::TimedOut { stderr }`.
+    /// The bound's error has to carry what pip had already said, on *both*
+    /// streams. It only fires in pathological cases — the ones that get
+    /// reported — and "timed out" alone says nothing about which package pip
+    /// was stuck on. stdout is the half that usually answers that: pip logs
+    /// `Collecting`/`Downloading` at INFO to stdout and only the CRITICAL
+    /// headline to stderr, so a pip wedged mid-download has written nothing to
+    /// stderr at all.
     #[tokio::test]
-    async fn run_pip_bounded_reports_the_partial_stderr_of_a_child_it_gave_up_on() {
+    async fn run_pip_bounded_reports_the_partial_output_of_a_child_it_gave_up_on() {
         let (program, args): (&str, &[&str]) = if cfg!(windows) {
-            ("cmd", &["/c", "echo boom 1>&2& ping.exe -n 31 127.0.0.1"])
+            (
+                "cmd",
+                &[
+                    "/c",
+                    "echo downloading& echo boom 1>&2& ping.exe -n 31 127.0.0.1",
+                ],
+            )
         } else {
-            ("sh", &["-c", "echo boom 1>&2; sleep 30"])
+            ("sh", &["-c", "echo downloading; echo boom 1>&2; sleep 30"])
         };
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(args);
@@ -479,9 +535,14 @@ mod tests {
             .await
             .expect_err("the child never exits within the bound");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("boom"),
-            "the stderr pip wrote before the bound was discarded: {err}"
+            msg.contains("downloading"),
+            "the stdout pip wrote before the bound was discarded: {msg}"
+        );
+        assert!(
+            msg.contains("boom"),
+            "the stderr pip wrote before the bound was discarded: {msg}"
         );
     }
 
@@ -490,12 +551,17 @@ mod tests {
     /// guard is retry the install — into the same `site-packages` the
     /// abandoned pip would still be writing to.
     ///
-    /// Asserted on the child itself, not only on a side effect it skipped: the
-    /// stub reports its pid before sleeping, so "no marker" cannot pass for the
+    /// Asserted on the child itself, not on a side effect it skipped: the stub
+    /// reports its pid before sleeping, so a missing marker cannot pass for the
     /// unrelated reason that a loaded runner never got the child that far. The
     /// pid must stop existing (or be reaped to a zombie), which a surviving
-    /// child fails. Unix-only for the shell and `ps`; the behaviour under test
-    /// (`kill_on_drop`) is tokio's and not platform-specific.
+    /// child fails.
+    ///
+    /// The 2s bound against a 30s sleep is margin in both directions: 10x what
+    /// forking `sh` and writing one line needs even on a loaded runner, and
+    /// still nowhere near the sleep it has to cut short. Unix-only for the
+    /// shell and `ps`; the behaviour under test (`kill_on_drop`) is tokio's and
+    /// not platform-specific.
     #[cfg(unix)]
     #[tokio::test]
     async fn run_pip_bounded_kills_the_child_it_gave_up_on() {
@@ -516,17 +582,15 @@ mod tests {
 
         let dir = crate::util::unique_temp_dir("pip-bound-kill");
         let started = dir.join("started");
-        let survived = dir.join("survived");
 
         let mut cmd = tokio::process::Command::new("sh");
         cmd.args([
             "-c",
-            "echo $$ > \"$0\"; sleep 1; : > \"$1\"",
+            "echo $$ > \"$0\"; sleep 30",
             &started.to_string_lossy(),
-            &survived.to_string_lossy(),
         ]);
 
-        let err = run_pip_bounded(cmd, std::time::Duration::from_millis(200))
+        let err = run_pip_bounded(cmd, std::time::Duration::from_secs(2))
             .await
             .expect_err("the child sleeps past the bound");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
@@ -559,14 +623,33 @@ mod tests {
             "the abandoned pip (pid {pid}) is still running past the bound"
         );
 
-        // And it never reached the write on the far side of its sleep.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        assert!(
-            !survived.exists(),
-            "the abandoned pip kept running past the bound"
-        );
-
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A build backend that inherited pip's pipes and outlived it must not
+    /// hold the call open. Only the child is under the bound; the readers get
+    /// their own short grace, so pip exiting 0 is reported as pip exiting 0
+    /// with the output it wrote — not as a timeout half an hour later.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_pip_bounded_does_not_wait_on_a_grandchild_holding_the_pipe() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo Downloading foo; sh -c 'sleep 30' & exit 0"]);
+
+        let started = std::time::Instant::now();
+        let output = run_pip_bounded(cmd, std::time::Duration::from_secs(60))
+            .await
+            .expect("the child exits on its own");
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Downloading foo"),
+            "the output pip wrote before exiting was lost"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the call waited on the grandchild rather than on pip: {:?}",
+            started.elapsed()
+        );
     }
 
     /// pip isolation is a superset of Python isolation: a pip install that
