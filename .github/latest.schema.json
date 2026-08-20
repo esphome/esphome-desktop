@@ -38,7 +38,7 @@
       "description": "Per-platform updater bundles (Tauri updater format). At least one platform must be present.",
       "minProperties": 1,
       "propertyNames": {
-        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)$"
+        "pattern": "^(linux|windows|darwin)-(x86_64|aarch64|armv7|i686|universal)(-(deb|rpm|appimage))?$"
       },
       "additionalProperties": {
         "type": "object",
@@ -49,7 +49,7 @@
             "type": "string",
             "format": "uri",
             "description": "Download URL for the platform's updater bundle. Must point at a GitHub release asset on this repo and end in a supported updater bundle extension.",
-            "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?/.+\\.(exe|AppImage|app\\.tar\\.gz)$"
+            "pattern": "^https://github\\.com/esphome/esphome-desktop/releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?/.+\\.(exe|AppImage|app\\.tar\\.gz|deb|rpm)$"
           },
           "signature": {
             "type": "string",

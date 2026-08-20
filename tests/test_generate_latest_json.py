@@ -86,14 +86,30 @@ def test_pub_date_from_release(manifest: dict[str, Any]) -> None:
     assert manifest["pub_date"] == "2026-05-22T14:31:08Z"
 
 
-def test_all_five_updater_platforms_present(manifest: dict[str, Any]) -> None:
+def test_all_updater_platforms_present(manifest: dict[str, Any]) -> None:
     assert set(manifest["platforms"]) == {
         "windows-x86_64",
         "linux-x86_64",
         "linux-aarch64",
+        "linux-x86_64-deb",
+        "linux-aarch64-deb",
+        "linux-x86_64-rpm",
+        "linux-aarch64-rpm",
         "darwin-aarch64",
         "darwin-x86_64",
     }
+
+
+def test_deb_and_rpm_targets_point_at_their_own_packages(
+    manifest: dict[str, Any],
+) -> None:
+    # Regression for #449: a deb/rpm-installed app resolves the
+    # `linux-<arch>-<installer>` key first; each must point at its own
+    # package format, never fall through to the AppImage.
+    assert manifest["platforms"]["linux-x86_64-deb"]["url"].endswith("_amd64.deb")
+    assert manifest["platforms"]["linux-aarch64-deb"]["url"].endswith("_arm64.deb")
+    assert manifest["platforms"]["linux-x86_64-rpm"]["url"].endswith(".x86_64.rpm")
+    assert manifest["platforms"]["linux-aarch64-rpm"]["url"].endswith(".aarch64.rpm")
 
 
 def test_platform_url_points_at_binary_not_sig(manifest: dict[str, Any]) -> None:
@@ -157,7 +173,7 @@ def test_build_platforms_reads_sig_nested_in_artifact_dir() -> None:
         ARTIFACTS_FIXTURE,
         f"https://github.com/{REPO}/releases/download/{TAG}",
     )
-    assert len(platforms) == 5
+    assert len(platforms) == 9
     for plat, entry in platforms.items():
         assert entry["signature"].strip(), f"empty signature for {plat}"
 

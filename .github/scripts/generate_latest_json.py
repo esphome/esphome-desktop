@@ -68,6 +68,14 @@ PLATFORM_SIG_MATCHERS: list[tuple[str, re.Pattern[str]]] = [
     ("windows-x86_64", re.compile(r".+-setup\.exe\.sig$")),
     ("linux-x86_64",   re.compile(r".+_amd64\.AppImage\.sig$")),
     ("linux-aarch64",  re.compile(r".+_aarch64\.AppImage\.sig$")),
+    # deb/rpm installs carry their bundle type baked into the binary, so the
+    # updater looks up `linux-<arch>-<installer>` before the bare
+    # `linux-<arch>` key. Without these entries it falls back to the AppImage
+    # payload and rejects it with "invalid updater binary format" (#449).
+    ("linux-x86_64-deb",  re.compile(r".+_amd64\.deb\.sig$")),
+    ("linux-aarch64-deb", re.compile(r".+_arm64\.deb\.sig$")),
+    ("linux-x86_64-rpm",  re.compile(r".+\.x86_64\.rpm\.sig$")),
+    ("linux-aarch64-rpm", re.compile(r".+\.aarch64\.rpm\.sig$")),
     ("darwin-aarch64", re.compile(r".+_aarch64\.app\.tar\.gz\.sig$")),
     ("darwin-x86_64",  re.compile(r".+_x64\.app\.tar\.gz\.sig$")),
 ]
