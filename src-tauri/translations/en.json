@@ -69,6 +69,7 @@
     "available_title": "Desktop Update Available",
     "prompt": "ESPHome Device Builder {new} is available.\n\nYou currently have version {current}.\n\nWould you like to download and install it now?",
     "prompt_with_notes": "ESPHome Device Builder {new} is available.\n\nYou currently have version {current}.\n\nRelease notes:\n{notes}\n\nWould you like to download and install it now?",
+    "package_manager_only": "ESPHome Device Builder {new} is available.\n\nThis install cannot update itself because {tool} is not available on this system.\n\nPlease update it through your system package manager.",
     "latest": "ESPHome Device Builder {version} is the latest version.",
     "updater_unavailable": "Updater not available: {error}",
     "update_failed": "Failed to update: {error}",
@@ -121,6 +122,7 @@
   },
   "hint": {
     "updates_menu": "Open the tray menu and choose \"Check for Updates\" to update.",
-    "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update."
+    "updates_cli": "No system tray was detected. Run `esphome-desktop update` from a terminal to update.",
+    "updates_package_manager": "Update it through your system package manager."
   }
 }

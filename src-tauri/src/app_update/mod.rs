@@ -13,6 +13,7 @@
 
 use std::time::Duration;
 
+use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_updater::UpdaterExt;
@@ -31,6 +32,64 @@ pub enum NextStep {
     /// a Python-package update right now would just get overwritten by the new
     /// bundled Python on the next launch.
     Skip,
+}
+
+/// The package tool a deb/rpm-typed install needs for the updater's install
+/// step, when that tool is missing from `PATH` — i.e. the reason this binary
+/// must not attempt a self-update.
+///
+/// tauri-plugin-updater dispatches its install by the bundle type baked into
+/// the binary at packaging time: a deb runs `dpkg -i`, an rpm runs `rpm -U`,
+/// each behind a pkexec/zenity/sudo elevation chain. A binary repackaged onto
+/// a system without that tool — the AUR package extracts our amd64 `.deb`, and
+/// Arch has no `dpkg` — would download the full update and then fail every
+/// rung of that chain, showing an elevation prompt on the way down. Split from
+/// [`self_update_blocked`] so the decision is testable on every host.
+fn self_update_blocked_tool(
+    bundle: Option<BundleType>,
+    tool_present: impl Fn(&str) -> bool,
+) -> Option<&'static str> {
+    let tool = match bundle {
+        Some(BundleType::Deb) => "dpkg",
+        Some(BundleType::Rpm) => "rpm",
+        // AppImage/Msi/Nsis/App install without a package tool, and `None`
+        // (an unpackaged dev build) keeps today's behavior.
+        _ => return None,
+    };
+    (!tool_present(tool)).then_some(tool)
+}
+
+/// Pure decision for [`check_and_notify`]'s update-available arm: which hint
+/// the notification carries and whether the loop may skip the Python-package
+/// checks afterwards. One function so the two cannot drift apart — a blocked
+/// update must never pair the in-app hint with `Skip`: the hint would
+/// instruct a flow that cannot install, and the skip would starve the pip
+/// checks forever behind an app install that is not coming.
+fn background_notify_plan(
+    blocked: bool,
+    tray_available: bool,
+) -> (crate::update::NotificationHint, NextStep) {
+    if blocked {
+        (
+            crate::update::NotificationHint::PackageManager,
+            NextStep::Continue,
+        )
+    } else {
+        (
+            crate::update::NotificationHint::InApp { tray_available },
+            NextStep::Skip,
+        )
+    }
+}
+
+/// [`self_update_blocked_tool`] for the running binary and the real `PATH`:
+/// `Some(tool)` names the missing package tool when a self-update must not be
+/// attempted, `None` means the updater may proceed.
+fn self_update_blocked() -> Option<&'static str> {
+    self_update_blocked_tool(
+        tauri::utils::platform::bundle_type(),
+        crate::platform::executable_on_path,
+    )
 }
 
 /// User-initiated app-update check. Always shows the "update available" dialog;
@@ -60,6 +119,27 @@ pub async fn check_for_user(app_handle: &AppHandle, show_no_update_dialog: bool)
                 "Desktop update available: {} (current: {})",
                 update.version, update.current_version
             );
+
+            if let Some(tool) = self_update_blocked() {
+                info!(
+                    "Not offering to install {}: this install has no `{}`",
+                    update.version, tool
+                );
+                crate::dialog::notice(
+                    app_handle,
+                    &t("app_update.available_title"),
+                    t_with(
+                        "app_update.package_manager_only",
+                        &[("new", &update.version), ("tool", tool)],
+                    ),
+                    MessageDialogKind::Info,
+                )
+                .await;
+                // The update exists but cannot be installed from here, so the
+                // bundled Python is not about to roll — keep going to the
+                // ESPHome checks, same as a declined update.
+                return NextStep::Continue;
+            }
 
             let new_version = update.version.clone();
             let current_version = update.current_version.clone();
@@ -133,6 +213,8 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                 "Desktop update available in background: {} (current: {})",
                 update.version, update.current_version
             );
+            let (hint, next) =
+                background_notify_plan(self_update_blocked().is_some(), tray_available);
             if let Err(e) = crate::update::notify_update_available(
                 app_handle,
                 &t_with(
@@ -144,11 +226,11 @@ pub async fn check_and_notify(app_handle: &AppHandle, tray_available: bool) -> N
                     &[("version", &update.version)],
                 ),
                 &update.current_version,
-                tray_available,
+                hint,
             ) {
                 error!("Failed to show desktop-update notification: {}", e);
             }
-            NextStep::Skip
+            next
         }
         Ok(None) => {
             debug!("Desktop app is up to date (background check)");
@@ -169,7 +251,7 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
     let new_version = update.version.clone();
 
     match apply_update_noninteractive(app_handle, update, &|_, _| {}).await {
-        Ok(()) => {
+        Ok(AppUpdateOutcome::Installed) => {
             // Always relaunch after a successful install rather than offering to
             // defer: the install replaced the .app bundle, and the running
             // process must be replaced by a fresh instance of it. On macOS the
@@ -189,6 +271,22 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             info!("Relaunching to apply desktop update");
             crate::platform::relaunch_for_update(app_handle);
         }
+        Ok(AppUpdateOutcome::ExternallyManaged(tool)) => {
+            // Only reachable when the tool disappeared between
+            // `check_for_user`'s guard and the user confirming — still a
+            // normal condition, so the same informational notice as the
+            // guard, never the red failure dialog.
+            crate::dialog::notice(
+                app_handle,
+                &t("app_update.available_title"),
+                t_with(
+                    "app_update.package_manager_only",
+                    &[("new", &new_version), ("tool", tool)],
+                ),
+                MessageDialogKind::Info,
+            )
+            .await;
+        }
         Err(e) => {
             show_error(
                 app_handle,
@@ -197,6 +295,22 @@ async fn apply_update(app_handle: &AppHandle, update: tauri_plugin_updater::Upda
             .await;
         }
     }
+}
+
+/// How [`apply_update_noninteractive`] finished, short of an actual failure.
+///
+/// `ExternallyManaged` is a normal condition, not an error — carrying it in
+/// `Err` would force every caller to parse a failure back into a note, and
+/// would render a red "Failed to update" dialog for something that is merely
+/// "not ours to install". `Err` stays reserved for downloads and installs
+/// that actually broke.
+pub(crate) enum AppUpdateOutcome {
+    /// Downloaded and installed; the caller must relaunch the app.
+    Installed,
+    /// Not attempted: this install updates through the system package manager
+    /// and the named tool is missing ([`self_update_blocked`]). Nothing was
+    /// downloaded and the backend was never stopped.
+    ExternallyManaged(&'static str),
 }
 
 /// Non-interactive variant for the CLI `update` flow: the same
@@ -209,8 +323,16 @@ pub(crate) async fn apply_update_noninteractive(
     app_handle: &AppHandle,
     update: tauri_plugin_updater::Update,
     progress: crate::control::ops::Progress<'_>,
-) -> Result<(), String> {
+) -> Result<AppUpdateOutcome, String> {
     let version = update.version.clone();
+
+    // The one decision point for "can this binary install its own update":
+    // nothing may reach the download when the install step's package tool is
+    // missing (see [`self_update_blocked`]) — the plugin would fetch the full
+    // payload and then fail its pkexec/sudo install chain.
+    if let Some(tool) = self_update_blocked() {
+        return Ok(AppUpdateOutcome::ExternallyManaged(tool));
+    }
 
     progress("desktop", &format!("downloading desktop update {version}"));
     let bytes = download_update_bytes(&update)
@@ -224,7 +346,7 @@ pub(crate) async fn apply_update_noninteractive(
     match install_update_bytes(update, bytes).await {
         Ok(()) => {
             info!("Desktop update {} installed", version);
-            Ok(())
+            Ok(AppUpdateOutcome::Installed)
         }
         Err(e) => {
             error!("Desktop update install failed: {}", e);
@@ -335,6 +457,71 @@ fn format_update_prompt(current: &str, new: &str, notes: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deb_and_rpm_without_their_tool_are_blocked_and_name_it() {
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Deb), |_| false),
+            Some("dpkg")
+        );
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Rpm), |_| false),
+            Some("rpm")
+        );
+    }
+
+    #[test]
+    fn deb_and_rpm_with_their_tool_are_allowed() {
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Deb), |t| t == "dpkg"),
+            None
+        );
+        assert_eq!(
+            self_update_blocked_tool(Some(BundleType::Rpm), |t| t == "rpm"),
+            None
+        );
+    }
+
+    #[test]
+    fn non_package_bundles_never_consult_path() {
+        // AppImage/Msi/Nsis/App/Dmg install without a package tool, and `None`
+        // is an unpackaged dev build; the panicking closure proves the PATH
+        // question is never even asked for these, so the guard cannot change
+        // their behavior.
+        for bundle in [
+            None,
+            Some(BundleType::AppImage),
+            Some(BundleType::Msi),
+            Some(BundleType::Nsis),
+            Some(BundleType::App),
+            Some(BundleType::Dmg),
+        ] {
+            assert_eq!(
+                self_update_blocked_tool(bundle, |tool| panic!("asked PATH about {tool}")),
+                None
+            );
+        }
+    }
+
+    /// The pairing invariant [`background_notify_plan`] exists for: a blocked
+    /// update carries the package-manager hint AND keeps the loop checking the
+    /// Python packages; a normal update carries the in-app hint (preserving
+    /// the tray state) AND may skip them until it installs.
+    #[test]
+    fn background_plan_pairs_hint_and_next_step() {
+        use crate::update::NotificationHint;
+        for tray in [true, false] {
+            let (hint, next) = background_notify_plan(true, tray);
+            assert!(matches!(hint, NotificationHint::PackageManager));
+            assert_eq!(next, NextStep::Continue);
+
+            let (hint, next) = background_notify_plan(false, tray);
+            assert!(
+                matches!(hint, NotificationHint::InApp { tray_available } if tray_available == tray)
+            );
+            assert_eq!(next, NextStep::Skip);
+        }
+    }
 
     #[test]
     fn includes_both_versions() {

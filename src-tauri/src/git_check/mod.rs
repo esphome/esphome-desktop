@@ -30,53 +30,14 @@ const GIT_EXECUTABLES: &[&str] = &["git.exe", "git.cmd"];
 const GIT_EXECUTABLES: &[&str] = &["git"];
 
 /// Iterate over every git executable found on a PATH-style value, in
-/// left-to-right order.
-///
-/// `path_var` is the raw value of the `PATH` environment variable, with
-/// entries separated by the platform path separator (`:` on Unix, `;` on
-/// Windows). It is an `OsStr` rather than a `str` so a non-Unicode `PATH`
-/// (legal on both Unix and Windows) is handled instead of being treated as
-/// "git missing".
-///
-/// All candidates are yielded (rather than stopping at the first match) so
+/// left-to-right order: the crate-wide PATH scan
+/// (`platform::executables_in_path`, which owns the empty-entry and
+/// executability rules) applied to this module's candidate names. All
+/// candidates are yielded (rather than stopping at the first match) so
 /// callers can keep scanning past an unusable one — e.g. the macOS
 /// `/usr/bin/git` stub shadowing a later real git.
-///
-/// This is intentionally pure apart from filesystem existence checks, so it
-/// can be unit-tested by passing a synthetic PATH rather than mutating the
-/// process environment.
 fn git_executables_in_path(path_var: &OsStr) -> impl Iterator<Item = PathBuf> + '_ {
-    std::env::split_paths(path_var)
-        // Skip empty entries (e.g. a trailing separator), which would
-        // otherwise resolve to the current working directory.
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .flat_map(|dir| GIT_EXECUTABLES.iter().map(move |name| dir.join(name)))
-        .filter(|candidate| is_git_executable(candidate))
-}
-
-/// Whether `path` is a usable git executable.
-///
-/// `is_file()` is false for a directory, so a directory named `git` (or
-/// `git.exe`) is correctly rejected. On Unix we additionally require an
-/// execute bit: a non-executable regular file named `git` on `PATH` is not a
-/// binary ESPHome could actually run, so it shouldn't suppress the warning. On
-/// Windows the file extension (`git.exe` / `git.cmd`) is the executability
-/// signal, so presence is enough.
-fn is_git_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    crate::platform::executables_in_path(path_var, GIT_EXECUTABLES)
 }
 
 /// Whether a usable `git` executable can be found on the current `PATH`.
@@ -96,7 +57,7 @@ fn is_git_available() -> bool {
 /// Whether a git executable found on `PATH` is actually runnable.
 ///
 /// On most platforms, presence on `PATH` (with an execute bit, checked by
-/// [`is_git_executable`]) is sufficient. macOS is the exception: a Mac without
+/// `platform::executables_in_path`) is sufficient. macOS is the exception: a Mac without
 /// the Xcode Command Line Tools still ships `/usr/bin/git` as a **stub** whose
 /// only job is to pop the CLT installer when invoked. That stub is a real,
 /// executable file, so it satisfies the PATH + execute-bit checks and makes

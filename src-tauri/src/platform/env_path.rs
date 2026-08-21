@@ -4,7 +4,9 @@
 //! so every tool it shells out to (git, patch, ccache) has to be reachable from
 //! the `PATH` this process carries. This module owns the resource-dir lookups
 //! for the tools we bundle, the pure `PATH` string builders, the single place
-//! that mutates the environment, and the `ensure_*_on_path` entry points
+//! that mutates the environment, the crate's one `PATH` *search*
+//! ([`executables_in_path`] / [`executable_on_path`], consumed by `git_check`
+//! and the self-update backstop), and the `ensure_*_on_path` entry points
 //! `startup/mod.rs` calls at startup.
 
 use anyhow::{Context, Result};
@@ -89,6 +91,70 @@ fn bundled_git_ca_bundle(app_handle: &AppHandle) -> Result<Option<PathBuf>> {
 fn get_bundled_ccache_dir(app_handle: &AppHandle) -> Result<PathBuf> {
     let resource_dir = super::get_bundled_resource_dir(app_handle)?;
     Ok(resource_dir.join("ccache"))
+}
+
+/// Iterate over every executable named in `names` found on a PATH-style
+/// value, in left-to-right order.
+///
+/// The crate's one PATH-search mechanism. `git_check` scans with it — all
+/// candidates are yielded rather than stopping at the first match, so a
+/// caller can keep looking past an unusable one (the macOS `/usr/bin/git`
+/// stub shadowing a later real git) — and the self-update backstop asks it
+/// about `dpkg`/`rpm` (`app_update::self_update_blocked`), mirroring the
+/// spawn tauri-plugin-updater's install step will actually attempt. Pure
+/// apart from filesystem checks — the PATH value is a parameter, so the scan
+/// is unit-testable with a synthetic value and a tempdir.
+pub fn executables_in_path<'a>(
+    path_var: &'a OsStr,
+    names: &'a [&'a str],
+) -> impl Iterator<Item = PathBuf> + 'a {
+    std::env::split_paths(path_var)
+        // Skip empty entries (e.g. a trailing separator), which would
+        // otherwise resolve to the current working directory.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(move |dir| names.iter().map(move |name| dir.join(name)))
+        .filter(|candidate| is_executable_file(candidate))
+}
+
+/// Whether `name` resolves to an executable regular file on the given
+/// PATH-style value.
+fn executable_in_path(path_var: &OsStr, name: &str) -> bool {
+    executables_in_path(path_var, std::slice::from_ref(&name))
+        .next()
+        .is_some()
+}
+
+/// Whether `path` is a regular file this process could execute.
+///
+/// One `metadata` call answers both questions: a directory of the same name
+/// is rejected, and on Unix an execute bit is additionally required — a
+/// non-executable file named `dpkg` (or `git`) is not a tool anything here
+/// could actually run, so it must not read as "present". On Windows presence
+/// is the signal; the extension conveys executability.
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// [`executable_in_path`] against this process's real `PATH`.
+///
+/// `var_os` (not `var`) so a non-Unicode `PATH` is searched rather than read
+/// as "tool missing".
+pub fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| executable_in_path(&path, name))
 }
 
 /// Build a `PATH` value with `dir` prepended to `existing`.
@@ -392,6 +458,49 @@ pub fn ensure_ccache_on_path(app_handle: &AppHandle) -> Result<()> {
 mod tests {
     use super::*;
     use crate::util::unique_temp_dir;
+
+    /// Create `name` as an executable file in `dir` (mode 0755 on Unix, where
+    /// the execute bit is what [`is_executable_file`] requires).
+    fn create_executable(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn executable_in_path_finds_the_tool_and_skips_empty_entries() {
+        let dir = unique_temp_dir("exe-on-path");
+        create_executable(&dir, "dpkg");
+        // A leading empty entry (a stray separator) must be skipped, not
+        // resolved against the current directory; the real entry still hits.
+        let joined = std::env::join_paths([PathBuf::new(), dir]).unwrap();
+        assert!(executable_in_path(&joined, "dpkg"));
+        assert!(!executable_in_path(&joined, "rpm"), "absent tool found");
+    }
+
+    #[test]
+    fn executable_in_path_rejects_a_directory_of_the_same_name() {
+        let dir = unique_temp_dir("exe-dir-shadow");
+        std::fs::create_dir_all(dir.join("dpkg")).unwrap();
+        let joined = std::env::join_paths([dir]).unwrap();
+        assert!(!executable_in_path(&joined, "dpkg"));
+    }
+
+    /// A non-executable file named like the tool is not something the updater
+    /// could spawn, so it must not read as "present" (Unix only — on Windows
+    /// the extension is the executability signal).
+    #[cfg(unix)]
+    #[test]
+    fn executable_in_path_requires_the_execute_bit() {
+        let dir = unique_temp_dir("exe-no-x-bit");
+        std::fs::write(dir.join("dpkg"), b"").unwrap();
+        let joined = std::env::join_paths([dir]).unwrap();
+        assert!(!executable_in_path(&joined, "dpkg"));
+    }
 
     #[test]
     fn path_with_prepended_puts_dir_first() {

@@ -19,7 +19,10 @@ mod python_env;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub use env_path::{ensure_ccache_on_path, ensure_git_on_path, ensure_homebrew_on_path};
+pub use env_path::{
+    ensure_ccache_on_path, ensure_git_on_path, ensure_homebrew_on_path, executable_on_path,
+    executables_in_path,
+};
 pub use health::{
     clear_repair_count, esphome_config_probe, is_managed_python_tree, may_repair_tree,
     repair_budget_left,
