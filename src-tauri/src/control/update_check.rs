@@ -51,9 +51,15 @@ where
 /// [`ComponentUpdate`] the check reply carries. The install sequences derive
 /// their decision from this same result via [`install_action`], so on the
 /// stable and beta channels the `available` flag never disagrees with what an
-/// actual `update` installs. The one deliberate exception is the ESPHome dev
+/// actual `update` installs. Two deliberate exceptions: the ESPHome dev
 /// channel, where the check reports "current" but `update` always reinstalls
-/// (see [`esphome_install_action`]).
+/// (see [`esphome_install_action`]); and an externally managed desktop
+/// install (a deb/rpm repackage without its package tool — the AUR case),
+/// where the check reports "upgradable" but `update` records a
+/// use-your-package-manager note instead of installing. The update genuinely
+/// exists, the reply just cannot yet say who installs it — carrying that
+/// through [`ComponentUpdate`] is an additive `API_SCHEMA_VERSION` change
+/// deferred to its own PR.
 fn compare(installed: String, latest: String) -> ComponentUpdate {
     if crate::update::is_newer_version(&latest, &installed) {
         ComponentUpdate::upgradable(installed, latest)

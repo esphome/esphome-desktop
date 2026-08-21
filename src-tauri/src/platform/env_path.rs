@@ -4,7 +4,9 @@
 //! so every tool it shells out to (git, patch, ccache) has to be reachable from
 //! the `PATH` this process carries. This module owns the resource-dir lookups
 //! for the tools we bundle, the pure `PATH` string builders, the single place
-//! that mutates the environment, and the `ensure_*_on_path` entry points
+//! that mutates the environment, the crate's one `PATH` *search*
+//! ([`executables_in_path`] / [`executable_on_path`], consumed by `git_check`
+//! and the self-update backstop), and the `ensure_*_on_path` entry points
 //! `startup/mod.rs` calls at startup.
 
 use anyhow::{Context, Result};
