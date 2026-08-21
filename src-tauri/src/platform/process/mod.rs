@@ -14,9 +14,10 @@ use ::windows::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WI
 
 mod bounded;
 
-/// The bounded-child primitive and its tree reaper. Re-exported so `super::pip`
-/// keeps importing them from `platform::process` as before.
-pub(super) use bounded::{run_bounded, BoundedRun};
+/// The bounded-child primitive, its tree reaper, and the async pipe drain its
+/// `tokio`-side callers use. Re-exported so `super::pip` keeps importing them
+/// from `platform::process` as before.
+pub(super) use bounded::{drain_pipe, run_bounded, BoundedRun};
 
 /// Maximum length of a child's output included in a failure error message.
 /// pip's resolver and progress output can run to many kilobytes; the

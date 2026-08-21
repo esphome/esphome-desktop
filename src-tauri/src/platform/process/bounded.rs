@@ -284,3 +284,156 @@ impl Drop for Reaper {
         }
     }
 }
+
+/// A pipe reader task, and the bytes it has accumulated so far — the async
+/// counterpart to [`run_bounded`]'s reader threads, for callers that bound a
+/// [`tokio::process::Child`] with `tokio::time::timeout` instead.
+///
+/// Same reasons, same shape: a child whose output fills a pipe buffer (~64 KiB)
+/// blocks on `write` until someone reads the other end, so the pipes must be
+/// drained off the caller's task or the child outlives the very deadline meant
+/// to bound it; and the bytes are accumulated where the caller can reach them
+/// without the reader's cooperation, so a reader still blocked on a pipe a
+/// surviving grandchild holds open cannot keep them hostage.
+pub(in crate::platform) struct PipeDrain {
+    /// Which stream this is, for the log lines. The only thing in here that is
+    /// not policy-free.
+    what: &'static str,
+    /// Shared rather than returned from the task, so the bytes are readable
+    /// while the reader is still running — which on a timeout path is the only
+    /// time they are readable at all.
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Read a child pipe to EOF into a shared buffer, off the caller's task.
+pub(in crate::platform) fn drain_pipe<R>(what: &'static str, handle: Option<R>) -> PipeDrain
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let task = handle.map(|mut h| {
+        let task_buf = std::sync::Arc::clone(&buf);
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match h.read(&mut chunk).await {
+                    Ok(0) => break,
+                    Ok(n) => task_buf
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                    // Keep what arrived before the failure and say the read
+                    // broke, rather than reporting a short buffer as if the
+                    // child had printed nothing.
+                    Err(e) => {
+                        tracing::warn!("Lost part of a child's {what}: {e}");
+                        break;
+                    }
+                }
+            }
+        })
+    });
+    PipeDrain { what, buf, task }
+}
+
+impl PipeDrain {
+    /// Wait for the reader to finish, for at most [`DRAIN_GRACE`], then give up
+    /// on it and take what it has.
+    ///
+    /// Giving up *aborts* the reader rather than dropping it: dropping a
+    /// `JoinHandle` detaches its task, so a reader blocked on a pipe a
+    /// grandchild still holds open would stay resident for the life of the
+    /// process, holding the fd and appending to a buffer nobody will read
+    /// again. Cancellation lands at the `read` await, never while the buffer
+    /// lock is held, so the bytes already accumulated are unaffected.
+    ///
+    /// A panicking reader costs only the tail of the output: it panics inside
+    /// `extend_from_slice`, and the poison recovery below hands back the bytes
+    /// it had already read.
+    pub(in crate::platform) async fn collect(mut self) -> Vec<u8> {
+        let what = self.what;
+        if let Some(task) = self.task.as_mut() {
+            match tokio::time::timeout(DRAIN_GRACE, &mut *task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => tracing::warn!(
+                    "The reader for a child's {what} panicked; returning what arrived."
+                ),
+                Err(_) => {
+                    tracing::warn!(
+                        "A child's {what} reader did not finish within {DRAIN_GRACE:?}; \
+                         something that inherited the pipe is still holding it open. \
+                         Returning what arrived."
+                    );
+                    task.abort();
+                }
+            }
+        }
+        self.take()
+    }
+
+    /// Take the bytes read so far and stop the reader without waiting for it —
+    /// for the deadline path, where the child is being abandoned and there is
+    /// nothing left for the reader to contribute.
+    pub(in crate::platform) fn abandon(mut self) -> Vec<u8> {
+        let taken = self.take();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        taken
+    }
+
+    /// Take the bytes read so far, recovering a poisoned lock rather than
+    /// unwrapping it — a `Vec<u8>` has no invariant for the poison to protect,
+    /// and panicking here would throw away output the caller is about to
+    /// report.
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.buf.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`PipeDrain::collect`] giving up on a reader must *end* it. Dropping a
+    /// `JoinHandle` detaches its task, so the reader this grace exists for — one
+    /// blocked on a pipe a surviving grandchild still holds open — would
+    /// otherwise stay resident for the life of the process, holding the fd and
+    /// appending to a buffer `collect` has already emptied and nobody will read
+    /// again.
+    ///
+    /// Asserted on that buffer rather than on the handle: the grandchild keeps
+    /// writing past the grace, so a detached reader grows it and an aborted one
+    /// leaves it empty. Unix-only for the shell; the behaviour under test
+    /// (`JoinHandle::abort`) is tokio's and not platform-specific.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_aborts_a_reader_it_gave_up_on() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo first; sh -c 'while :; do echo late; sleep 0.2; done' & exit 0")
+            .stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let drain = drain_pipe("stdout", child.stdout.take());
+        let buf = std::sync::Arc::clone(&drain.buf);
+        child.wait().await.unwrap();
+
+        // The grandchild holds the pipe open, so this returns on DRAIN_GRACE
+        // rather than on EOF — the branch under test.
+        let out = drain.collect().await;
+        assert!(
+            String::from_utf8_lossy(&out).contains("first"),
+            "the output the child wrote before exiting was lost: {out:?}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let after = buf.lock().unwrap().clone();
+        assert!(
+            after.is_empty(),
+            "the reader was detached rather than aborted and is still appending: {}",
+            String::from_utf8_lossy(&after)
+        );
+    }
+}

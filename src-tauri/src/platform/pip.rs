@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use super::process::{
-    configure_no_window_tokio_command, head_for_log, isolate_python_command, python_command,
-    run_bounded, tail_for_log, BoundedRun,
+    configure_no_window_tokio_command, drain_pipe, head_for_log, isolate_python_command,
+    python_command, run_bounded, tail_for_log, BoundedRun,
 };
 
 /// Hard upper bound on a single `pip install` invocation during the
@@ -35,16 +35,6 @@ const PIP_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// an hour is beyond any real install on a connection this app is usable on,
 /// and still finite.
 const PIP_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// How long [`run_pip_bounded`] waits for a pipe reader after the child it
-/// belongs to is done with it.
-///
-/// Normally instant: pip closed its end, so the reader sees EOF and returns.
-/// This bounds the case where it does not — a PEP 517 build backend that
-/// inherited the pipe and outlived pip — where waiting inside
-/// [`PIP_RUN_TIMEOUT`] would report a successful install as a timeout half an
-/// hour later. Matches `run_bounded`'s `DRAIN_GRACE`, for the same reason.
-const PIP_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Synchronously run `pip install <package>==<version>` with a wall-clock
 /// timeout. Pinning the exact version lets pip resolve pre-releases without
@@ -274,8 +264,8 @@ pub async fn run_pip(cmd: tokio::process::Command) -> std::io::Result<std::proce
 /// [`run_pip`] with the bound passed in, so the timeout behaviour is testable
 /// without waiting out [`PIP_RUN_TIMEOUT`].
 ///
-/// Both streams are drained into shared buffers by their own tasks rather than
-/// by `wait_with_output`, so the bytes pip had already written survive the
+/// Both streams are drained by [`drain_pipe`] rather than by
+/// `wait_with_output`, so the bytes pip had already written survive the
 /// deadline firing, and a reader still stuck on a pipe a grandchild holds open
 /// cannot keep them hostage. A 30-minute bound only fires in pathological
 /// cases, which are exactly the ones that get reported, and "timed out" with
@@ -320,18 +310,17 @@ async fn run_pip_bounded(
     // pip itself. Joining them inside the bound would turn a successful install
     // into a stall for the remaining balance of the 30 minutes and then a
     // timeout error, with pip's own output already sitting in the buffers. This
-    // is the split `run_bounded` draws with its own `DRAIN_GRACE`, and the
-    // reason `PipeDrain`'s buffer is shared rather than returned by the task.
+    // is the split `run_bounded` draws with its own `DRAIN_GRACE` — the same
+    // grace `PipeDrain::collect` waits under here.
     let waited = tokio::time::timeout(timeout, child.wait()).await;
 
     match waited {
         Ok(status) => {
-            join_pipe("stdout", stdout.task).await;
-            join_pipe("stderr", stderr.task).await;
+            let status = status?;
             Ok(std::process::Output {
-                status: status?,
-                stdout: take_buf(&stdout.buf),
-                stderr: take_buf(&stderr.buf),
+                status,
+                stdout: stdout.collect().await,
+                stderr: stderr.collect().await,
             })
         }
         // Whatever the readers got before the deadline: the child is about to
@@ -343,14 +332,11 @@ async fn run_pip_bounded(
         // `Downloading …` line is the one it stuck on. Callers wrap this in
         // `anyhow` context naming the install they were running.
         Err(_) => {
-            let out = take_buf(&stdout.buf);
-            let errs = take_buf(&stderr.buf);
-            // The bytes are in hand, so the readers have nothing left to
-            // contribute — and one stuck on a pipe a grandchild still holds
-            // open would otherwise stay resident for the life of the process,
-            // appending to a buffer nobody will read.
-            abort_pipe(stdout.task);
-            abort_pipe(stderr.task);
+            // `abandon` rather than `collect`: the child is being killed, so
+            // the readers have nothing left to contribute and waiting out a
+            // grace for each of them would only delay the error.
+            let out = stdout.abandon();
+            let errs = stderr.abandon();
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
@@ -361,81 +347,6 @@ async fn run_pip_bounded(
             ))
         }
     }
-}
-
-/// A pipe reader task, and the bytes it has accumulated so far.
-struct PipeDrain {
-    /// Shared rather than returned from the task, so the bytes are readable
-    /// while the reader is still running — which on the timeout path is the
-    /// only time they are readable at all.
-    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-/// Read a child pipe to EOF into a shared buffer, off the caller's task.
-fn drain_pipe<R>(what: &'static str, handle: Option<R>) -> PipeDrain
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let task = handle.map(|mut h| {
-        let task_buf = std::sync::Arc::clone(&buf);
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut chunk = [0u8; 8192];
-            loop {
-                match h.read(&mut chunk).await {
-                    Ok(0) => break,
-                    Ok(n) => task_buf
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .extend_from_slice(&chunk[..n]),
-                    // Keep what arrived before the failure and say the read
-                    // broke, rather than reporting a short buffer as if the
-                    // child had printed nothing.
-                    Err(e) => {
-                        tracing::warn!("Lost part of pip's {what}: {e}");
-                        break;
-                    }
-                }
-            }
-        })
-    });
-    PipeDrain { buf, task }
-}
-
-/// Wait for a reader to finish, for at most [`PIP_DRAIN_GRACE`], then give up
-/// on it and take what it has. A panicking reader is ignored: it panics inside
-/// `extend_from_slice`, and [`take_buf`] recovers that lock, so the bytes it
-/// had already read still come back.
-async fn join_pipe(what: &str, task: Option<tokio::task::JoinHandle<()>>) {
-    let Some(task) = task else { return };
-    if tokio::time::timeout(PIP_DRAIN_GRACE, task)
-        .await
-        .map_err(|_| ())
-        .is_err()
-    {
-        tracing::warn!(
-            "pip's {what} reader did not finish within {PIP_DRAIN_GRACE:?}; something that \
-             inherited the pipe is still holding it open. Returning what arrived."
-        );
-    }
-}
-
-/// Stop a reader without waiting for it. Cancellation lands at the `read`
-/// await, never while the buffer lock is held, so the bytes already taken from
-/// it are unaffected.
-fn abort_pipe(task: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(task) = task {
-        task.abort();
-    }
-}
-
-/// Take the bytes read so far, recovering a poisoned lock rather than
-/// unwrapping it — a `Vec<u8>` has no invariant for the poison to protect, and
-/// panicking here would throw away the output the caller is about to report.
-fn take_buf(buf: &std::sync::Mutex<Vec<u8>>) -> Vec<u8> {
-    std::mem::take(&mut *buf.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 #[cfg(test)]
