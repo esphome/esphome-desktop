@@ -417,6 +417,9 @@ impl Drop for PipeDrain {
 
 #[cfg(test)]
 mod tests {
+    // Every test below is unix-only (they need a POSIX shell), so on Windows
+    // this import would be unused and `-D warnings` would fail the lint job.
+    #[cfg(unix)]
     use super::*;
 
     /// [`PipeDrain::collect`] giving up on a reader must *end* it. Dropping a
