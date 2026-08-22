@@ -354,8 +354,10 @@ impl PipeDrain {
     /// it had already read.
     pub(in crate::platform) async fn collect(mut self) -> Vec<u8> {
         let what = self.what;
-        if let Some(task) = self.task.as_mut() {
-            match tokio::time::timeout(DRAIN_GRACE, &mut *task).await {
+        // Taken out of `self` so the `Drop` below sees nothing left to do:
+        // this arm decides for itself whether the reader is joined or aborted.
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(DRAIN_GRACE, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => tracing::warn!(
                     "The reader for a child's {what} panicked; returning what arrived."
@@ -390,6 +392,26 @@ impl PipeDrain {
     /// report.
     fn take(&self) -> Vec<u8> {
         std::mem::take(&mut *self.buf.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// Abort the reader for any path that neither [`PipeDrain::collect`] nor
+/// [`PipeDrain::abandon`] covers — an early `?` return, or a caller whose
+/// future is dropped mid-flight. Both of those take the handle out first, so
+/// this only runs when nobody decided explicitly.
+///
+/// Dropping a `JoinHandle` detaches its task rather than cancelling it, so
+/// without this a reader blocked on a pipe a surviving grandchild holds open
+/// would stay resident for the life of the process, holding the fd and
+/// appending to a buffer nobody will read again. That is the same leak
+/// `collect`'s grace and `abandon`'s abort exist to prevent; stating it
+/// structurally means it holds on every arm rather than only the two that
+/// remembered.
+impl Drop for PipeDrain {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -433,6 +455,37 @@ mod tests {
         assert!(
             after.is_empty(),
             "the reader was detached rather than aborted and is still appending: {}",
+            String::from_utf8_lossy(&after)
+        );
+    }
+
+    /// A [`PipeDrain`] dropped without `collect` or `abandon` must end its
+    /// reader too — the `?` early return on the wait arm of a bounded run, or
+    /// a caller whose future is dropped mid-flight. Same assertion and same
+    /// grandchild as above, because the leak is the same one: a detached
+    /// reader keeps the fd and keeps appending.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_drain_aborts_its_reader() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo first; sh -c 'while :; do echo late; sleep 0.2; done' & exit 0")
+            .stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let drain = drain_pipe("stdout", child.stdout.take());
+        let buf = std::sync::Arc::clone(&drain.buf);
+        child.wait().await.unwrap();
+
+        drop(drain);
+
+        // Emptied here rather than by `take`, so growth after this point is
+        // the detached reader and nothing else.
+        buf.lock().unwrap().clear();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let after = buf.lock().unwrap().clone();
+        assert!(
+            after.is_empty(),
+            "the dropped drain's reader was detached rather than aborted: {}",
             String::from_utf8_lossy(&after)
         );
     }

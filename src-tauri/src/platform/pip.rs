@@ -442,7 +442,16 @@ mod tests {
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(args);
 
-        let err = run_pip_bounded(cmd, std::time::Duration::from_secs(1))
+        // 3s, not 1s: the deadline path calls `abandon`, which gives the
+        // reader no grace at all, so whatever it has not read by the moment
+        // the bound fires is gone. Within that window the runner has to start
+        // a shell, run two `echo`s, and schedule the reader task — and a
+        // Windows runner with on-access scanning can spend several hundred ms
+        // on the spawn alone. The child sleeps for 30s either way, so the
+        // slack costs 2s and buys the assertion its meaning: a failure here
+        // should read as "the timeout error lost pip's output", not as "the
+        // runner was busy".
+        let err = run_pip_bounded(cmd, std::time::Duration::from_secs(3))
             .await
             .expect_err("the child never exits within the bound");
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
