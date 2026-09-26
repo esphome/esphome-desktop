@@ -68,7 +68,7 @@ sys-locale = "0.3"
 nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.26"
+cocoa = "0.27"
 # "image-png" enables tauri::image::Image::from_bytes for the template tray icon
 tauri = { version = "2.11.2", features = ["image-png"] }
 
