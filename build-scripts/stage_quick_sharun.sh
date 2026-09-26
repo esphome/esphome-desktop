@@ -12,6 +12,10 @@
 # trace with `timeout` instead. The bundler only downloads quick-sharun.sh when
 # the file is absent, so staging ours here makes it reuse our copy. strace lib
 # detection is preserved.
+#
+# The script also pulls its hooks and C helper sources from upstream main at
+# bundle time; upstream moved anylinux.c and gtk-class-fix.c, so main 404s.
+# Rewrite those URLs to the same pinned commit.
 
 set -euo pipefail
 
@@ -26,7 +30,7 @@ curl -fL --retry 3 --retry-delay 2 -o "$DEST" \
   "https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/${SHARUN_REV}/useful-tools/quick-sharun.sh"
 echo "${SHARUN_SHA256}  ${DEST}" | sha256sum -c -
 
-# Replace the strace kill block. A pinned SHA256 plus the exact-match assert
+# Replace the strace kill block and pin the upstream main URLs. A pinned SHA256 plus the exact-match assert
 # below fail loudly if the upstream file drifts, prompting a re-pin rather than
 # a silent regression.
 python3 - "$DEST" "$SHARUN_REV" <<'PY'
@@ -65,14 +69,13 @@ if src.count(old) != 1:
              "upstream shape changed, re-pin SHARUN_REV/SHA256")
 src = src.replace(old, new)
 
-# The script fetches anylinux.c from upstream main at bundle time; upstream
-# moved it, so main 404s. Fetch it from the same pinned commit instead.
-lib_old = "refs/heads/main/useful-tools/lib/anylinux.c"
-lib_new = sys.argv[2] + "/useful-tools/lib/anylinux.c"
-if src.count(lib_old) != 1:
-    sys.exit("quick-sharun.sh anylinux.c source not found exactly once; "
+# HOOKSRC, ANYLINUX_LIB_SOURCE and GTK_CLASS_FIX_SOURCE.
+main_old = "/Anylinux-AppImages/refs/heads/main/"
+main_new = "/Anylinux-AppImages/" + sys.argv[2] + "/"
+if src.count(main_old) != 3:
+    sys.exit("quick-sharun.sh upstream main URLs not found exactly 3 times; "
              "upstream shape changed, re-pin SHARUN_REV/SHA256")
-open(p, "w").write(src.replace(lib_old, lib_new))
+open(p, "w").write(src.replace(main_old, main_new))
 PY
 
 chmod +x "$DEST"
