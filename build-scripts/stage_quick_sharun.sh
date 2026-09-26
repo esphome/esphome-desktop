@@ -29,7 +29,7 @@ echo "${SHARUN_SHA256}  ${DEST}" | sha256sum -c -
 # Replace the strace kill block. A pinned SHA256 plus the exact-match assert
 # below fail loudly if the upstream file drifts, prompting a re-pin rather than
 # a silent regression.
-python3 - "$DEST" <<'PY'
+python3 - "$DEST" "$SHARUN_REV" <<'PY'
 import sys
 
 p = sys.argv[1]
@@ -63,7 +63,16 @@ new = (
 if src.count(old) != 1:
     sys.exit("quick-sharun.sh strace block not found exactly once; "
              "upstream shape changed, re-pin SHARUN_REV/SHA256")
-open(p, "w").write(src.replace(old, new))
+src = src.replace(old, new)
+
+# The script fetches anylinux.c from upstream main at bundle time; upstream
+# moved it, so main 404s. Fetch it from the same pinned commit instead.
+lib_old = "refs/heads/main/useful-tools/lib/anylinux.c"
+lib_new = sys.argv[2] + "/useful-tools/lib/anylinux.c"
+if src.count(lib_old) != 1:
+    sys.exit("quick-sharun.sh anylinux.c source not found exactly once; "
+             "upstream shape changed, re-pin SHARUN_REV/SHA256")
+open(p, "w").write(src.replace(lib_old, lib_new))
 PY
 
 chmod +x "$DEST"
