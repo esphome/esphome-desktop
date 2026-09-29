@@ -312,6 +312,91 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
 
+      # Windows-specific signing setup. Release builds Authenticode-sign the
+      # installer, uninstaller, app exe and backend python.exe through Azure
+      # Artifact Signing, driven by `bundle.windows.signCommand` in
+      # tauri.release.conf.json, which points at build-scripts/sign_windows.cmd
+      # (the allowlist and the reasons for it live in sign_windows.ps1). Tauri
+      # and the NSIS uninstaller finalizer resolve that command on PATH, so
+      # build-scripts/ goes on PATH here.
+      #
+      # The wrapper is Microsoft's documented SignTool integration: the SDK
+      # signtool.exe already on the runner plus Azure.CodeSigning.Dlib.dll from
+      # the Microsoft.ArtifactSigning.Client NuGet package (it needs the .NET 8
+      # runtime, also on the runner). That package is staged here, pinned by
+      # URL and SHA-256 as prepare_bundle.sh does for MinGit, and its dlib must
+      # additionally carry a valid Microsoft Authenticode signature, so the only
+      # code loaded into the process that holds the signing credentials is the
+      # exact bits this file names. Nothing is fetched at signing time.
+      #
+      # Without any AZURE_* settings the wrapper leaves every file unsigned and
+      # the release still ships, so the pipeline keeps working while the
+      # certificate is being provisioned; the one warning for that lives here
+      # rather than once per signed file. A partial configuration (a secret
+      # set but a variable misspelled, say) is a mistake rather than a
+      # provisioning gap, and it fails here, naming the missing setting,
+      # instead of surfacing later as a "not validly signed" verify failure
+      # that points at the signing service. The decision is exported once as
+      # WINDOWS_SIGNING_CONFIGURED so the verify step below agrees with it.
+      - name: Stage Artifact Signing client
+        if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
+        shell: pwsh
+        env:
+          CLIENT_URL: https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/1.0.128
+          CLIENT_SHA256: 74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Tauri resolves sign_windows.cmd on PATH whether or not signing is
+          # configured; the wrapper is what decides to skip.
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:GITHUB_WORKSPACE 'build-scripts')
+
+          $settings = @(
+            'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
+            'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_CERTIFICATE_PROFILE',
+            'AZURE_SIGNING_PUBLISHER'
+          )
+          $missing = @($settings | Where-Object { -not [System.Environment]::GetEnvironmentVariable($_) })
+          if ($missing.Count -eq $settings.Count) {
+            # Decided before any network I/O: an unsigned release must not
+            # depend on nuget.org or on the package layout.
+            Write-Output '::warning::AZURE_* signing settings are not configured; the Windows installer in this release will not be Authenticode-signed'
+            Add-Content -Path $env:GITHUB_ENV -Value 'WINDOWS_SIGNING_CONFIGURED=false'
+            exit 0
+          }
+          if ($missing.Count -gt 0) {
+            throw "Partial Windows signing configuration, unset: $($missing -join ', ')"
+          }
+
+          $stage = Join-Path $env:RUNNER_TEMP 'artifact-signing-client'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $package = Join-Path $stage 'Microsoft.ArtifactSigning.Client.zip'
+          Invoke-WebRequest -Uri $env:CLIENT_URL -OutFile $package -MaximumRetryCount 3 -RetryIntervalSec 5
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $package).Hash.ToLowerInvariant()
+          if ($actual -ne $env:CLIENT_SHA256) {
+            throw "Microsoft.ArtifactSigning.Client digest mismatch: expected $env:CLIENT_SHA256, got $actual"
+          }
+          Expand-Archive -Path $package -DestinationPath $stage -Force
+          $dlib = Join-Path $stage 'bin\x64\Azure.CodeSigning.Dlib.dll'
+          $sig = Get-AuthenticodeSignature -FilePath $dlib
+          $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+          if ($sig.Status -ne 'Valid' -or $signer -notmatch 'O=Microsoft Corporation') {
+            throw "Azure.CodeSigning.Dlib.dll is not validly signed by Microsoft: $($sig.Status), $signer"
+          }
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+          if (-not $signtool) { throw 'No Windows SDK signtool.exe on this runner' }
+          Write-Output "signtool: $($signtool.FullName)"
+          Write-Output "dlib:     $dlib ($signer)"
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGN_WINDOWS_DLIB=$dlib"
+          Add-Content -Path $env:GITHUB_ENV -Value 'WINDOWS_SIGNING_CONFIGURED=true'
+
       # The Tauri AppImage fork downloads quick-sharun.sh from upstream main and
       # runs it during the build. Its strace step backgrounds each traced binary
       # and kills it via `set -m` job control, which silently no-ops on tty-less
@@ -356,12 +441,74 @@ jobs:
         if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
+      # Tauri Authenticode-signs the installer before tauri-cli writes the
+      # updater's `.exe.sig`, so the minisign signature covers the signed file
+      # and nothing downstream (generate_latest_json.py, the updater) changes.
       - name: Build (Windows Release with signing)
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
         run: cargo tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+
+      # The Windows E2E steps run on CI builds only, so this is the one place
+      # a signed installer is ever checked. A sign step that quietly produced
+      # an unsigned or mis-signed release would otherwise surface as a
+      # SmartScreen report weeks later. The interpreter is checked too: Tauri
+      # signs resources in place, and python.exe is the process the firewall
+      # prompt names, so a bundle layout change that drops it off the
+      # wrapper's allowlist fails here instead. The uninstaller cannot be
+      # checked from the build output; makensis signs it as a temporary file
+      # and embeds it in the installer. Each signature must also name the
+      # publisher in AZURE_SIGNING_PUBLISHER (the certificate's common name,
+      # the validated legal entity): a valid signature from the wrong
+      # certificate profile, or one an upstream applied to its own binary,
+      # is not the release signature this step exists to prove.
+      - name: Verify Windows signatures
+        if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
+        shell: pwsh
+        env:
+          AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Fail closed: only the staging step's explicit "not configured"
+          # verdict skips this. An unset flag means that step did not run as
+          # expected, and an unverified release must not report success.
+          if ($env:WINDOWS_SIGNING_CONFIGURED -eq 'false') {
+            Write-Output 'Signing not configured; nothing to verify.'
+            exit 0
+          }
+          if ($env:WINDOWS_SIGNING_CONFIGURED -ne 'true') {
+            throw "WINDOWS_SIGNING_CONFIGURED is '$env:WINDOWS_SIGNING_CONFIGURED'; the staging step did not record a verdict"
+          }
+          # Each group is asserted on its own so extra files in one cannot
+          # hide a missing file in another; the installer is the one
+          # SmartScreen evaluates.
+          $installers = @(Get-ChildItem -File -Path 'src-tauri/target/release/bundle/nsis/*-setup.exe')
+          if ($installers.Count -eq 0) { throw 'No NSIS installer found under src-tauri/target/release/bundle/nsis' }
+          $files = $installers +
+                   @(Get-Item -Path 'src-tauri/target/release/esphome-desktop.exe') +
+                   @(Get-Item -Path 'src-tauri/python/python.exe') +
+                   @(Get-Item -Path 'src-tauri/python/pythonw.exe')
+          $simpleName = [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName
+          $failed = $false
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature -FilePath $f.FullName
+            $publisher = if ($sig.SignerCertificate) { $sig.SignerCertificate.GetNameInfo($simpleName, $false) } else { '<none>' }
+            $tsa = if ($sig.TimeStamperCertificate) { $sig.TimeStamperCertificate.Subject } else { '<none>' }
+            $ok = $sig.Status -eq 'Valid' -and $sig.TimeStamperCertificate -and $publisher -eq $env:AZURE_SIGNING_PUBLISHER
+            Write-Output "$($f.FullName): $($sig.Status) $(if ($ok) { 'OK' } else { 'FAILED' })"
+            Write-Output "  publisher:  $publisher (expected $env:AZURE_SIGNING_PUBLISHER)"
+            Write-Output "  timestamp:  $tsa"
+            if (-not $ok) { $failed = $true }
+          }
+          if ($failed) { throw 'One or more Windows executables are not validly signed, timestamped and issued to the expected publisher' }
 
       # Build step - macOS CI
       - name: Build (macOS CI)
