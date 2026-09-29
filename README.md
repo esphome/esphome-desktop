@@ -227,12 +227,16 @@ points Tauri's `signCommand` at `build-scripts/sign_windows.cmd`, which signs
 the installer, uninstaller, app exe and the bundled `python.exe`, and leaves the
 rest of the bundled resource trees (MinGit, the Python runtime DLLs, pip
 launchers, ccache) as their upstreams shipped them; the header of
-`sign_windows.ps1` explains the quota and build-time reasons. The workflow
-reads the `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`
-secrets and the `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT` and
-`AZURE_SIGNING_CERTIFICATE_PROFILE` repository variables; when they are absent
-the release still builds, unsigned, with a workflow warning. PR builds are
-never signed. SmartScreen reputation accrues to the publisher across signed
+`sign_windows.ps1` explains the quota and build-time reasons. The script is
+Microsoft's SignTool integration: the Windows SDK signtool with the
+`Microsoft.ArtifactSigning.Client` dlib, which the workflow stages pinned by
+digest. The workflow reads the `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and
+`AZURE_CLIENT_SECRET` secrets and the `AZURE_SIGNING_ENDPOINT`,
+`AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_CERTIFICATE_PROFILE` and
+`AZURE_SIGNING_PUBLISHER` repository variables (the last is the certificate's
+common name, checked against every signature after the build); when they are
+all absent the release still builds, unsigned, with a workflow warning, and a
+partial set fails the build. PR builds are never signed. SmartScreen reputation accrues to the publisher across signed
 releases rather than arriving with the first one, so early signed releases
 can still show the prompt, now naming the publisher.
 

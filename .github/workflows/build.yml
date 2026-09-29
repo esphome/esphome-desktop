@@ -318,10 +318,16 @@ jobs:
       # tauri.release.conf.json, which points at build-scripts/sign_windows.cmd
       # (the allowlist and the reasons for it live in sign_windows.ps1). Tauri
       # and the NSIS uninstaller finalizer resolve that command on PATH, so
-      # build-scripts/ goes on PATH here along with the signing CLI. The CLI is
-      # a pinned release binary with its digest checked, as prepare_bundle.sh
-      # does for MinGit: the crate carries no binstall metadata and compiling
-      # it would cost minutes on every release.
+      # build-scripts/ goes on PATH here.
+      #
+      # The wrapper is Microsoft's documented SignTool integration: the SDK
+      # signtool.exe already on the runner plus Azure.CodeSigning.Dlib.dll from
+      # the Microsoft.ArtifactSigning.Client NuGet package (it needs the .NET 8
+      # runtime, also on the runner). That package is staged here, pinned by
+      # URL and SHA-256 as prepare_bundle.sh does for MinGit, and its dlib must
+      # additionally carry a valid Microsoft Authenticode signature, so the only
+      # code loaded into the process that holds the signing credentials is the
+      # exact bits this file names. Nothing is fetched at signing time.
       #
       # Without any AZURE_* settings the wrapper leaves every file unsigned and
       # the release still ships, so the pipeline keeps working while the
@@ -332,34 +338,48 @@ jobs:
       # instead of surfacing later as a "not validly signed" verify failure
       # that points at the signing service. The decision is exported once as
       # WINDOWS_SIGNING_CONFIGURED so the verify step below agrees with it.
-      - name: Install Artifact Signing CLI
+      - name: Stage Artifact Signing client
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
         shell: pwsh
         env:
-          CLI_URL: https://github.com/levminer/trusted-signing-cli/releases/download/0.11.0/artifact-signing-cli.exe
-          CLI_SHA256: ddc6f6ef68631bf367ad051d7d37109e58d46095406e1fbba60d553b10f94393
+          CLIENT_URL: https://www.nuget.org/api/v2/package/Microsoft.ArtifactSigning.Client/1.0.128
+          CLIENT_SHA256: 74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tools = Join-Path $env:RUNNER_TEMP 'artifact-signing-cli'
-          New-Item -ItemType Directory -Force -Path $tools | Out-Null
-          $exe = Join-Path $tools 'artifact-signing-cli.exe'
-          Invoke-WebRequest -Uri $env:CLI_URL -OutFile $exe -MaximumRetryCount 3 -RetryIntervalSec 5
-          $actual = (Get-FileHash -Algorithm SHA256 -Path $exe).Hash.ToLowerInvariant()
-          if ($actual -ne $env:CLI_SHA256) {
-            throw "artifact-signing-cli digest mismatch: expected $env:CLI_SHA256, got $actual"
+          $stage = Join-Path $env:RUNNER_TEMP 'artifact-signing-client'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $package = Join-Path $stage 'Microsoft.ArtifactSigning.Client.zip'
+          Invoke-WebRequest -Uri $env:CLIENT_URL -OutFile $package -MaximumRetryCount 3 -RetryIntervalSec 5
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $package).Hash.ToLowerInvariant()
+          if ($actual -ne $env:CLIENT_SHA256) {
+            throw "Microsoft.ArtifactSigning.Client digest mismatch: expected $env:CLIENT_SHA256, got $actual"
           }
-          Add-Content -Path $env:GITHUB_PATH -Value $tools
+          Expand-Archive -Path $package -DestinationPath $stage -Force
+          $dlib = Join-Path $stage 'bin\x64\Azure.CodeSigning.Dlib.dll'
+          $sig = Get-AuthenticodeSignature -FilePath $dlib
+          $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+          if ($sig.Status -ne 'Valid' -or $signer -notmatch 'O=Microsoft Corporation') {
+            throw "Azure.CodeSigning.Dlib.dll is not validly signed by Microsoft: $($sig.Status), $signer"
+          }
+          $signtool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+          if (-not $signtool) { throw 'No Windows SDK signtool.exe on this runner' }
+          Write-Output "signtool: $($signtool.FullName)"
+          Write-Output "dlib:     $dlib ($signer)"
+          Add-Content -Path $env:GITHUB_ENV -Value "SIGN_WINDOWS_DLIB=$dlib"
           Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:GITHUB_WORKSPACE 'build-scripts')
 
           $settings = @(
             'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
-            'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_CERTIFICATE_PROFILE'
+            'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_CERTIFICATE_PROFILE',
+            'AZURE_SIGNING_PUBLISHER'
           )
           $missing = @($settings | Where-Object { -not [System.Environment]::GetEnvironmentVariable($_) })
           if ($missing.Count -eq $settings.Count) {
@@ -439,10 +459,16 @@ jobs:
       # prompt names, so a bundle layout change that drops it off the
       # wrapper's allowlist fails here instead. The uninstaller cannot be
       # checked from the build output; makensis signs it as a temporary file
-      # and embeds it in the installer.
+      # and embeds it in the installer. Each signature must also name the
+      # publisher in AZURE_SIGNING_PUBLISHER (the certificate's common name,
+      # the validated legal entity): a valid signature from the wrong
+      # certificate profile, or one an upstream applied to its own binary,
+      # is not the release signature this step exists to prove.
       - name: Verify Windows signatures
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
         shell: pwsh
+        env:
+          AZURE_SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:WINDOWS_SIGNING_CONFIGURED -ne 'true') {
@@ -453,17 +479,19 @@ jobs:
                    @(Get-ChildItem -File -Path 'src-tauri/target/release/bundle/nsis/*.exe') +
                    @(Get-Item -Path 'src-tauri/python/python.exe', 'src-tauri/python/pythonw.exe')
           if ($files.Count -lt 4) { throw "Expected at least 4 Windows executables to verify, found $($files.Count)" }
+          $simpleName = [System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName
           $failed = $false
           foreach ($f in $files) {
             $sig = Get-AuthenticodeSignature -FilePath $f.FullName
-            $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+            $publisher = if ($sig.SignerCertificate) { $sig.SignerCertificate.GetNameInfo($simpleName, $false) } else { '<none>' }
             $tsa = if ($sig.TimeStamperCertificate) { $sig.TimeStamperCertificate.Subject } else { '<none>' }
-            Write-Output "$($f.FullName): $($sig.Status)"
-            Write-Output "  signer:     $signer"
+            $ok = $sig.Status -eq 'Valid' -and $sig.TimeStamperCertificate -and $publisher -eq $env:AZURE_SIGNING_PUBLISHER
+            Write-Output "$($f.FullName): $($sig.Status) $(if ($ok) { 'OK' } else { 'FAILED' })"
+            Write-Output "  publisher:  $publisher (expected $env:AZURE_SIGNING_PUBLISHER)"
             Write-Output "  timestamp:  $tsa"
-            if ($sig.Status -ne 'Valid' -or -not $sig.TimeStamperCertificate) { $failed = $true }
+            if (-not $ok) { $failed = $true }
           }
-          if ($failed) { throw 'One or more Windows executables are not validly signed and timestamped' }
+          if ($failed) { throw 'One or more Windows executables are not validly signed, timestamped and issued to the expected publisher' }
 
       # Build step - macOS CI
       - name: Build (macOS CI)

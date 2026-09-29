@@ -6,8 +6,11 @@ nothing else ever runs it: PR builds do not sign, and a release build that
 signs the wrong set of files either burns the Azure Artifact Signing quota
 (every unsigned .exe/.dll in the bundled resource trees, ~190 files) or ships
 an unsigned installer. Neither shows up until a release is already out, so the
-allowlist, the no-credentials fallback and the retry loop are pinned here
-against a stub ``artifact-signing-cli`` that records what it was asked to sign.
+allowlist, the no-credentials fallback, the signtool invocation and the retry
+loop are pinned here against a stub ``signtool.exe`` that records what it was
+asked to sign. The stub is reached through the wrapper's own
+``SIGN_WINDOWS_SIGNTOOL`` override, never through ``PATH``, so nothing installed
+on the machine can leak into these tests.
 
 Windows only: the script's path handling is Windows-native and the shim is a
 batch file. On other platforms the whole module is skipped, which is fine
@@ -16,6 +19,7 @@ because the scripts test workflow runs this suite on ``windows-latest`` too.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -63,7 +67,8 @@ SIGNED_FILES = [
 class FakeRepo:
     root: Path
     shim: Path
-    stub_dir: Path
+    signtool: Path
+    dlib: Path
     calls_log: Path
 
     def path(self, relative: str) -> Path:
@@ -76,10 +81,15 @@ class FakeRepo:
             line for line in self.calls_log.read_text().splitlines() if line.strip()
         ]
 
+    def metadata(self) -> dict[str, object]:
+        # The wrapper writes the dlib's metadata file into RUNNER_TEMP, which
+        # run_wrapper points at the fake repo root.
+        return json.loads((self.root / "sign_windows-metadata.json").read_text())
+
 
 def make_repo(root: Path) -> FakeRepo:
     """A repo-shaped tree at ``root``: the real scripts copied in, PE files
-    faked, and a stub ``artifact-signing-cli`` that logs its arguments."""
+    faked, a fake dlib, and a stub signtool that logs its arguments."""
     root.mkdir(parents=True, exist_ok=True)
     scripts = root / "build-scripts"
     scripts.mkdir()
@@ -93,13 +103,17 @@ def make_repo(root: Path) -> FakeRepo:
     stub_dir = root / "stub"
     stub_dir.mkdir()
     calls_log = stub_dir / "calls.log"
-    (stub_dir / "artifact-signing-cli.cmd").write_text(
+    signtool = stub_dir / "signtool.cmd"
+    signtool.write_text(
         f'@echo off\r\necho %*>>"{calls_log}"\r\nexit /b %STUB_EXIT%\r\n'
     )
+    dlib = stub_dir / "Azure.CodeSigning.Dlib.dll"
+    dlib.write_bytes(b"MZ")
     return FakeRepo(
         root=root,
         shim=scripts / "sign_windows.cmd",
-        stub_dir=stub_dir,
+        signtool=signtool,
+        dlib=dlib,
         calls_log=calls_log,
     )
 
@@ -114,14 +128,20 @@ def run_wrapper(
     relative: str,
     *,
     credentials: bool = True,
-    stub_on_path: bool = True,
+    signtool: Path | None = None,
+    dlib: Path | None = None,
     stub_exit: int = 0,
 ) -> subprocess.CompletedProcess[str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("AZURE_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("AZURE_", "SIGN_WINDOWS_", "RUNNER_TEMP"))
+    }
     if credentials:
         env.update(CREDENTIALS)
-    if stub_on_path:
-        env["PATH"] = f"{repo.stub_dir}{os.pathsep}{env.get('PATH', '')}"
+    env["SIGN_WINDOWS_SIGNTOOL"] = str(signtool or repo.signtool)
+    env["SIGN_WINDOWS_DLIB"] = str(dlib or repo.dlib)
+    env["RUNNER_TEMP"] = str(repo.root)
     env["STUB_EXIT"] = str(stub_exit)
     # Real backoff is 5 s then 10 s; the retry test only cares about the count.
     env["SIGN_WINDOWS_RETRY_DELAY"] = "0"
@@ -151,10 +171,30 @@ def test_app_installer_and_interpreter_are_signed(
     calls = repo.calls()
     assert len(calls) == 1
     call = calls[0]
-    assert f"-e {CREDENTIALS['AZURE_SIGNING_ENDPOINT']}" in call
-    assert f"-a {CREDENTIALS['AZURE_SIGNING_ACCOUNT']}" in call
-    assert f"-c {CREDENTIALS['AZURE_SIGNING_CERTIFICATE_PROFILE']}" in call
-    assert str(repo.path(relative)) in call
+    assert call.startswith("sign /v /fd SHA256 ")
+    assert "/tr http://timestamp.acs.microsoft.com /td SHA256" in call
+    assert f"/dlib {repo.dlib}" in call
+    assert f"/dmdf {repo.root / 'sign_windows-metadata.json'}" in call
+    assert call.endswith(str(repo.path(relative)))
+
+
+def test_metadata_names_the_account_and_pins_environment_credential(
+    repo: FakeRepo,
+) -> None:
+    result = run_wrapper(repo, SIGNED_FILES[0])
+    assert result.returncode == 0, result.stderr
+    metadata = repo.metadata()
+    assert metadata["Endpoint"] == CREDENTIALS["AZURE_SIGNING_ENDPOINT"]
+    assert metadata["CodeSigningAccountName"] == CREDENTIALS["AZURE_SIGNING_ACCOUNT"]
+    assert (
+        metadata["CertificateProfileName"]
+        == CREDENTIALS["AZURE_SIGNING_CERTIFICATE_PROFILE"]
+    )
+    excluded = metadata["ExcludeCredentials"]
+    assert isinstance(excluded, list)
+    assert "EnvironmentCredential" not in excluded
+    assert "AzureCliCredential" in excluded
+    assert "ManagedIdentityCredential" in excluded
 
 
 def test_without_credentials_the_file_is_left_unsigned(repo: FakeRepo) -> None:
@@ -173,10 +213,18 @@ def test_without_credentials_resources_stay_quiet(repo: FakeRepo) -> None:
     assert "credentials" not in result.stdout
 
 
-def test_missing_cli_fails_the_build(repo: FakeRepo) -> None:
-    result = run_wrapper(repo, SIGNED_FILES[0], stub_on_path=False)
+def test_missing_signtool_fails_the_build(repo: FakeRepo) -> None:
+    result = run_wrapper(repo, SIGNED_FILES[0], signtool=repo.root / "nope.exe")
     assert result.returncode != 0
-    assert "artifact-signing-cli" in result.stderr + result.stdout
+    assert "signtool.exe not found" in result.stderr + result.stdout
+    assert repo.calls() == []
+
+
+def test_missing_dlib_fails_the_build(repo: FakeRepo) -> None:
+    result = run_wrapper(repo, SIGNED_FILES[0], dlib=repo.root / "nope.dll")
+    assert result.returncode != 0
+    assert "SIGN_WINDOWS_DLIB" in result.stderr + result.stdout
+    assert repo.calls() == []
 
 
 def test_missing_file_fails_the_build(repo: FakeRepo) -> None:
@@ -185,7 +233,7 @@ def test_missing_file_fails_the_build(repo: FakeRepo) -> None:
     assert repo.calls() == []
 
 
-def test_cli_failure_is_retried_then_fails(repo: FakeRepo) -> None:
+def test_signtool_failure_is_retried_then_fails(repo: FakeRepo) -> None:
     result = run_wrapper(repo, SIGNED_FILES[0], stub_exit=1)
     assert result.returncode != 0
     assert len(repo.calls()) == 3

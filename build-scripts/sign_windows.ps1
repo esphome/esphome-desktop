@@ -17,19 +17,31 @@
 # the backend interpreter, so those are the allowlist: everything else under a
 # resource tree is skipped and stays exactly as its upstream shipped it.
 #
-# Signing goes through artifact-signing-cli (levminer/trusted-signing-cli),
-# which wraps signtool with Microsoft's Artifact Signing dlib and timestamps
-# against http://timestamp.acs.microsoft.com. It reads these variables:
+# Signing is Microsoft's documented SignTool integration: the Windows SDK
+# signtool.exe loads Azure.CodeSigning.Dlib.dll from the
+# Microsoft.ArtifactSigning.Client package, which authenticates with
+# Azure.Identity and timestamps against http://timestamp.acs.microsoft.com.
+# The workflow stages that package (pinned, digest-checked, Microsoft-signed)
+# and hands its path over in SIGN_WINDOWS_DLIB, so nothing is fetched at
+# signing time. The settings read here:
 #
-#   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET   service principal
+#   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET   service principal,
+#                                                           read by the dlib's
+#                                                           EnvironmentCredential
 #   AZURE_SIGNING_ENDPOINT                                  e.g. https://weu.codesigning.azure.net
 #   AZURE_SIGNING_ACCOUNT                                   Artifact Signing account name
 #   AZURE_SIGNING_CERTIFICATE_PROFILE                       certificate profile name
+#   SIGN_WINDOWS_DLIB                                       path to Azure.CodeSigning.Dlib.dll
+#   SIGN_WINDOWS_SIGNTOOL                                   optional signtool.exe override;
+#                                                           the newest Windows 10/11 SDK
+#                                                           x64 signtool is used otherwise
+#   SIGN_WINDOWS_RETRY_DELAY                                optional base backoff in seconds
 #
-# When they are unset the file is left unsigned and the build carries on, the
-# same way sign_python_bundle.sh behaves without APPLE_SIGNING_IDENTITY, so a
-# release can still ship while the certificate is being provisioned. The
-# workflow emits the single warning for that case.
+# When the AZURE_* settings are all unset the file is left unsigned and the
+# build carries on, the same way sign_python_bundle.sh behaves without
+# APPLE_SIGNING_IDENTITY, so a release can still ship while the certificate is
+# being provisioned. The workflow emits the single warning for that case and
+# rejects a partial configuration before the build starts.
 
 [CmdletBinding()]
 param(
@@ -78,11 +90,47 @@ if ($missing.Count -gt 0) {
     exit 0
 }
 
-$cli = Get-Command artifact-signing-cli -ErrorAction SilentlyContinue
-if (-not $cli) {
-    Write-Error 'sign_windows: artifact-signing-cli not found on PATH'
+$dlib = $env:SIGN_WINDOWS_DLIB
+if (-not $dlib -or -not (Test-Path -LiteralPath $dlib -PathType Leaf)) {
+    Write-Error "sign_windows: SIGN_WINDOWS_DLIB does not point at Azure.CodeSigning.Dlib.dll: '$dlib'"
     exit 1
 }
+
+$signtool = $env:SIGN_WINDOWS_SIGNTOOL
+if (-not $signtool) {
+    $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    $signtool = Get-ChildItem -Path (Join-Path $kits '10.*\x64\signtool.exe') -ErrorAction SilentlyContinue |
+        Sort-Object { [version]$_.Directory.Parent.Name } |
+        Select-Object -Last 1 -ExpandProperty FullName
+}
+if (-not $signtool -or -not (Test-Path -LiteralPath $signtool -PathType Leaf)) {
+    Write-Error "sign_windows: signtool.exe not found (SIGN_WINDOWS_SIGNTOOL='$env:SIGN_WINDOWS_SIGNTOOL')"
+    exit 1
+}
+
+# The dlib reads its account details from a metadata file. Nothing in it is
+# secret, so it lives at a fixed name in the runner temp dir and is simply
+# rewritten per call. Every credential source except EnvironmentCredential is
+# excluded so the dlib neither probes for a managed identity nor falls back to
+# some other identity that happens to be present on the machine.
+$tempDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+$metadata = Join-Path $tempDir 'sign_windows-metadata.json'
+@{
+    Endpoint               = $env:AZURE_SIGNING_ENDPOINT
+    CodeSigningAccountName = $env:AZURE_SIGNING_ACCOUNT
+    CertificateProfileName = $env:AZURE_SIGNING_CERTIFICATE_PROFILE
+    ExcludeCredentials     = @(
+        'ManagedIdentityCredential',
+        'WorkloadIdentityCredential',
+        'SharedTokenCacheCredential',
+        'VisualStudioCredential',
+        'VisualStudioCodeCredential',
+        'AzureCliCredential',
+        'AzurePowerShellCredential',
+        'AzureDeveloperCliCredential',
+        'InteractiveBrowserCredential'
+    )
+} | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding ascii
 
 # The service and its timestamp server are network calls; a transient failure
 # on one of the ~8 files must not sink a release build. The base delay is
@@ -94,11 +142,10 @@ if ($env:SIGN_WINDOWS_RETRY_DELAY) {
 }
 for ($i = 1; $i -le $attempts; $i++) {
     Write-Output "sign_windows: signing (attempt $i/$attempts) $full"
-    & $cli.Source `
-        -e $env:AZURE_SIGNING_ENDPOINT `
-        -a $env:AZURE_SIGNING_ACCOUNT `
-        -c $env:AZURE_SIGNING_CERTIFICATE_PROFILE `
-        -d 'ESPHome Device Builder' `
+    & $signtool sign /v /fd SHA256 `
+        /tr 'http://timestamp.acs.microsoft.com' /td SHA256 `
+        /dlib $dlib /dmdf $metadata `
+        /d 'ESPHome Device Builder' `
         $full
     if ($LASTEXITCODE -eq 0) {
         exit 0
@@ -108,5 +155,5 @@ for ($i = 1; $i -le $attempts; $i++) {
     }
 }
 
-Write-Error "sign_windows: artifact-signing-cli failed after $attempts attempts: $full"
+Write-Error "sign_windows: signtool failed after $attempts attempts: $full"
 exit 1
