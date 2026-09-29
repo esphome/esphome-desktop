@@ -77,30 +77,36 @@ class FakeRepo:
         ]
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> FakeRepo:
-    """A repo-shaped tree: the real scripts copied in, PE files faked."""
-    scripts = tmp_path / "build-scripts"
+def make_repo(root: Path) -> FakeRepo:
+    """A repo-shaped tree at ``root``: the real scripts copied in, PE files
+    faked, and a stub ``artifact-signing-cli`` that logs its arguments."""
+    root.mkdir(parents=True, exist_ok=True)
+    scripts = root / "build-scripts"
     scripts.mkdir()
     for name in ("sign_windows.ps1", "sign_windows.cmd"):
         shutil.copy(BUILD_SCRIPTS / name, scripts / name)
     for relative in RESOURCE_FILES + SIGNED_FILES:
-        target = tmp_path / relative
+        target = root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"MZ")
 
-    stub_dir = tmp_path / "stub"
+    stub_dir = root / "stub"
     stub_dir.mkdir()
     calls_log = stub_dir / "calls.log"
     (stub_dir / "artifact-signing-cli.cmd").write_text(
         f'@echo off\r\necho %*>>"{calls_log}"\r\nexit /b %STUB_EXIT%\r\n'
     )
     return FakeRepo(
-        root=tmp_path,
+        root=root,
         shim=scripts / "sign_windows.cmd",
         stub_dir=stub_dir,
         calls_log=calls_log,
     )
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> FakeRepo:
+    return make_repo(tmp_path)
 
 
 def run_wrapper(
@@ -117,6 +123,8 @@ def run_wrapper(
     if stub_on_path:
         env["PATH"] = f"{repo.stub_dir}{os.pathsep}{env.get('PATH', '')}"
     env["STUB_EXIT"] = str(stub_exit)
+    # Real backoff is 5 s then 10 s; the retry test only cares about the count.
+    env["SIGN_WINDOWS_RETRY_DELAY"] = "0"
     return subprocess.run(
         [str(repo.shim), str(repo.path(relative))],
         env=env,
@@ -189,27 +197,11 @@ def test_checkout_under_a_git_folder_is_not_mistaken_for_a_resource(
 ) -> None:
     """The resource check is anchored on src-tauri/, not on a bare path
     segment, so a clone living under ...\\git\\... still gets its app signed."""
-    nested = tmp_path / "git" / "python" / "checkout"
-    nested.mkdir(parents=True)
-    scripts = nested / "build-scripts"
-    scripts.mkdir()
-    for name in ("sign_windows.ps1", "sign_windows.cmd"):
-        shutil.copy(BUILD_SCRIPTS / name, scripts / name)
-    app = nested / "src-tauri" / "target" / "release" / "esphome-desktop.exe"
-    app.parent.mkdir(parents=True)
-    app.write_bytes(b"MZ")
-    stub_dir = nested / "stub"
-    stub_dir.mkdir()
-    calls_log = stub_dir / "calls.log"
-    (stub_dir / "artifact-signing-cli.cmd").write_text(
-        f'@echo off\r\necho %*>>"{calls_log}"\r\nexit /b 0\r\n'
-    )
-    repo = FakeRepo(
-        root=nested,
-        shim=scripts / "sign_windows.cmd",
-        stub_dir=stub_dir,
-        calls_log=calls_log,
-    )
+    repo = make_repo(tmp_path / "git" / "python" / "checkout")
     result = run_wrapper(repo, "src-tauri/target/release/esphome-desktop.exe")
     assert result.returncode == 0, result.stderr
+    assert len(repo.calls()) == 1
+    result = run_wrapper(repo, RESOURCE_FILES[0])
+    assert result.returncode == 0, result.stderr
+    assert "skip (bundled resource)" in result.stdout
     assert len(repo.calls()) == 1

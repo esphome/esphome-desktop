@@ -85,8 +85,13 @@ if (-not $cli) {
 }
 
 # The service and its timestamp server are network calls; a transient failure
-# on one of the ~8 files must not sink a release build.
+# on one of the ~8 files must not sink a release build. The base delay is
+# overridable so the test suite does not sit through the backoff.
 $attempts = 3
+$retryDelay = 5
+if ($env:SIGN_WINDOWS_RETRY_DELAY) {
+    $retryDelay = [int]$env:SIGN_WINDOWS_RETRY_DELAY
+}
 for ($i = 1; $i -le $attempts; $i++) {
     Write-Output "sign_windows: signing (attempt $i/$attempts) $full"
     & $cli.Source `
@@ -99,7 +104,7 @@ for ($i = 1; $i -le $attempts; $i++) {
         exit 0
     }
     if ($i -lt $attempts) {
-        Start-Sleep -Seconds (5 * $i)
+        Start-Sleep -Seconds ($retryDelay * $i)
     }
 }
 
