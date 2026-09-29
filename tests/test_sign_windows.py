@@ -175,7 +175,9 @@ def test_app_installer_and_interpreter_are_signed(
     assert "/tr http://timestamp.acs.microsoft.com /td SHA256" in call
     assert f"/dlib {repo.dlib}" in call
     assert f"/dmdf {repo.root / 'sign_windows-metadata.json'}" in call
-    assert call.endswith(str(repo.path(relative)))
+    # PowerShell quotes an argument with spaces (the installer name has them),
+    # so the logged line may end in a closing quote.
+    assert call.rstrip('"').endswith(str(repo.path(relative)))
 
 
 def test_metadata_names_the_account_and_pins_environment_credential(
