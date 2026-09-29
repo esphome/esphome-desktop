@@ -55,7 +55,7 @@ clap = { version = "4.6", features = ["derive"] }
 open = "5"
 
 # Home directory detection
-dirs = "6"
+dirs = "7"
 
 # Strips the Windows \\?\ prefix from Tauri's resource dir (no-op elsewhere)
 dunce = "1"
