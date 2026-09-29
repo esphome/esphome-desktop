@@ -169,8 +169,22 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.target }}
-    # The slowest job (macOS) runs ~13 min; cap well above that so a hung step
-    # fails fast instead of running out the 360 minute default.
+    # Caps a hung step instead of letting it run out the 360 minute default.
+    #
+    # Sized from measured leg durations, not from the slowest platform by
+    # reputation: over the last 100 pull_request runs windows-x64 is the
+    # slowest leg at ~13.5 min median / 22 min worst, so 30 leaves roughly
+    # eight minutes of headroom -- not the twenty an out-of-date "macOS is the
+    # slowest at ~13 min" reading suggests. Three legs have hit this cap in
+    # that sample, each at 2-4x its own p90 (a linux-x64 leg whose p90 is under
+    # seven minutes among them): those are hangs, not slow builds, so the cap
+    # is doing its job and raising it would only delay the diagnosis.
+    # Re-measure before changing it; a leg whose p90 approaches 30 needs the
+    # build made faster or split, not a bigger number here.
+    #
+    # A leg stopped by this cap is reported as *cancelled*, which `ci-status`
+    # treats as a failure (see the note there) -- correctly, but it then looks
+    # exactly like a superseded run.
     timeout-minutes: 30
 
     steps:
@@ -743,6 +757,28 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           echo "$NEEDS_JSON" | jq
+          # Name the jobs that did not pass, as annotations, so the failure is
+          # legible from the checks list without opening this log and reading a
+          # JSON blob terminated by the word `false`.
+          #
+          # `cancelled` is the ambiguous one, and it is worth knowing which of
+          # the two it is before assuming a flake:
+          #   * the whole run was superseded by a newer push -- expected, and
+          #     the newer run carries the verdict that matters; or
+          #   * a single `build` matrix leg hit `timeout-minutes` while its
+          #     siblings passed. GitHub reports a job timeout as *cancelled*,
+          #     not failure, so a hung leg is indistinguishable here from a
+          #     superseded run. Open the `build` job and look for the leg that
+          #     stopped at the cap; that one is a hang to investigate, and the
+          #     run needs re-running before the PR can merge.
+          #
+          # Best-effort and deliberately non-fatal: a mistake in this filter
+          # must never change the verdict, which the next command alone decides.
+          echo "$NEEDS_JSON" | jq -r '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"))
+            | .[]
+            | "::error::CI Status: job \(.key) reported \(.value.result)"' || true
           echo "$NEEDS_JSON" | jq -e 'all(.result == "success" or .result == "skipped")'
 
   release:
