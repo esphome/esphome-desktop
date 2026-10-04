@@ -129,7 +129,6 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 2 || 4 }}
       matrix:
         include:
           - platform: windows
