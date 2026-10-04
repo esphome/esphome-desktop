@@ -250,14 +250,17 @@ jobs:
       # Version reaches the script only through env, never via ${{ }}
       # interpolation into the run block, so a crafted Cargo.lock cannot inject
       # shell commands. GITHUB_TOKEN lets binstall query GitHub releases without
-      # hitting the anonymous rate limit.
+      # hitting the anonymous rate limit. --locked makes the compile fallback
+      # use the crate's published Cargo.lock; without it cargo resolves the
+      # newest semver-compatible deps, and a newer tauri-bundler can break the
+      # build of an older tauri-cli.
       - name: Install Tauri CLI (prebuilt)
         if: ${{ !matrix.tauri_rev }}
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cargo binstall --no-confirm \
+          cargo binstall --no-confirm --locked \
             --strategies crate-meta-data,quick-install,compile \
             tauri-cli --version "$TAURI_CLI_VERSION"
 
