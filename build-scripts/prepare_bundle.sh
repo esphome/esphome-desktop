@@ -16,8 +16,8 @@
 
 set -e
 
-PYTHON_VERSION="3.14.7"
-PBS_VERSION="20260924"
+PYTHON_VERSION="3.14.8"
+PBS_VERSION="20261003"
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_VERSION}"
 
 # MinGit (minimal Git for Windows) is bundled on Windows only. ESPHome,
