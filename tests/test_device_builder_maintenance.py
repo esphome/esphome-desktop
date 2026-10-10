@@ -41,14 +41,21 @@ def _make_dist_info(
     with_name: bool = True,
     with_record: bool = True,
     with_metadata: bool = True,
+    dir_stem: str | None = None,
 ) -> Path:
     """Create a *.dist-info dir for ``package`` and return its path.
 
     ``with_record=False`` and ``with_metadata=False`` fabricate the torn shapes
     the installer overlay leaves behind; the default is a pip-manageable entry
     (a completed pip install always writes RECORD).
+
+    ``dir_stem`` overrides the directory's name part, which is the only way to
+    pin the two spellings a dotted project name has on disk: pip wrote
+    ``ruamel.yaml-...`` for years and a normalizing setuptools writes
+    ``ruamel_yaml-...``, so a tree can hold both.
     """
-    dist_info = site / f"{package.replace('-', '_')}-{version}.dist-info"
+    stem = package.replace("-", "_") if dir_stem is None else dir_stem
+    dist_info = site / f"{stem}-{version}.dist-info"
     dist_info.mkdir(parents=True)
     if with_metadata:
         lines = ["Metadata-Version: 2.1"]
@@ -270,6 +277,54 @@ def test_dedupe_all_never_groups_nameless_dist_infos(tmp_path: Path) -> None:
     assert orphan_b.is_dir()
     assert keep.is_dir()
     assert not stale.exists()
+
+
+def test_norm_canonicalizes_every_separator_spelling() -> None:
+    # PEP 503: runs of "-", "_" and "." all collapse to a single "-". The two
+    # identities the prune compares are spelled differently on disk -- METADATA
+    # carries the published name, the directory carries pip's escaped form --
+    # so anything weaker than canonicalization splits one package in two.
+    assert maint._norm("ruamel.yaml") == "ruamel-yaml"
+    assert maint._norm("ruamel_yaml") == "ruamel-yaml"
+    assert maint._norm("RuAmEl.YaMl") == "ruamel-yaml"
+    assert maint._norm("zope.interface") == maint._norm("zope_interface")
+    assert maint._norm("a--b__c..d") == "a-b-c-d"
+    # The device-builder names the #190 heal scopes to are already canonical.
+    assert {maint._norm(name) for name in maint.TARGETS} == maint.TARGETS
+
+
+def test_infer_name_agrees_with_metadata_for_a_dotted_package(
+    tmp_path: Path,
+) -> None:
+    # The directory-name fallback and the METADATA header must land on the
+    # same group key, whichever of the two escaped spellings pip wrote.
+    for stem in ("ruamel.yaml", "ruamel_yaml"):
+        path = tmp_path / f"{stem}-0.18.6.dist-info"
+        assert maint._infer_name(path) == "ruamel-yaml"
+
+
+def test_dedupe_all_groups_a_dotted_name_with_its_escaped_directory(
+    tmp_path: Path,
+) -> None:
+    # A dotted project with one entry whose METADATA is gone: the survivor is
+    # attributed from its directory name, so it must join its own package's
+    # group rather than form a lone one. Grouped, it is the deliberate
+    # dir-name-only keep the prune documents -- pip can still manage it (it has
+    # a RECORD) and its rankable sibling keeps the group resolvable -- so
+    # nothing is removed and nothing is counted. Split off on a separator
+    # spelling it would instead be a group with nothing rankable in it, and the
+    # self-clean would exit 1 claiming damage this tree does not have.
+    healthy = _make_dist_info(tmp_path, "ruamel.yaml", "0.18.6")
+    orphan = _make_dist_info(
+        tmp_path,
+        "ruamel.yaml",
+        "0.19.0",
+        with_metadata=False,
+        dir_stem="ruamel_yaml",
+    )
+    assert maint.dedupe_dist_info(_dists(tmp_path), targets=None) == (0, 0)
+    assert healthy.is_dir()
+    assert orphan.is_dir()
 
 
 def test_dedupe_all_keeps_safety_guards(tmp_path: Path) -> None:
