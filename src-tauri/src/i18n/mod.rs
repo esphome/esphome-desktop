@@ -22,7 +22,7 @@
 //! Logs and CLI/control-channel output intentionally stay English — this
 //! module is only for strings a user sees in the UI.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use tracing::warn;
@@ -110,6 +110,36 @@ fn interpolate(template: &str, args: &[(&str, &str)]) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The set of `{name}` tokens a message carries, or `None` if its braces are
+/// malformed.
+///
+/// The walk mirrors [`interpolate`]'s (`{` then the next `}`), so the tokens
+/// reported are the ones interpolation would actually try to fill. A set (not
+/// a count) because interpolation replaces every occurrence of a token, so a
+/// message may repeat or reorder one freely.
+///
+/// `None` covers the brace shapes interpolation cannot fill and therefore
+/// renders raw in the UI: an unmatched `{`, and any `}` that does not close a
+/// token. Reporting them here rather than ignoring them keeps token drift and
+/// brace drift — the same translator typo class — behind one check.
+fn placeholders(message: &str) -> Option<BTreeSet<&str>> {
+    let mut out = BTreeSet::new();
+    let mut rest = message;
+    while let Some(start) = rest.find('{') {
+        if rest[..start].contains('}') {
+            return None;
+        }
+        let after = &rest[start + 1..];
+        let end = after.find('}')?;
+        out.insert(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    if rest.contains('}') {
+        return None;
+    }
+    Some(out)
 }
 
 /// Pick the locale to use: a non-empty env override wins, then the system
@@ -236,8 +266,19 @@ fn parse_locale(raw: &str) -> HashMap<String, String> {
 }
 
 /// Build the active table: the English base overlaid with the requested
-/// locale's non-empty messages (Lokalise exports untranslated keys as empty
+/// locale's usable messages (Lokalise exports untranslated keys as empty
 /// strings; those must fall back to English, not blank the UI).
+///
+/// "Usable" also means the message carries the same `{placeholder}` set as
+/// its English original, with well-formed braces. Translations arrive from
+/// Lokalise and are embedded by `build.rs`, whose only gate is that the file
+/// parses as JSON — and dev builds are English-only, so no test ever sees
+/// them. A translator who drops `{version}`, types `{versoin}`, or leaves a
+/// brace unclosed therefore ships a message that interpolation either
+/// silently strips a value from or renders with a raw brace in the UI, and
+/// the overlay would install it *over* a correct English string. Falling back
+/// per key is the same remedy the empty-string case already gets, for the
+/// same reason: the translated value is unusable, and English is.
 fn build_table(requested: Option<&str>, embedded: &[(&str, &str)]) -> HashMap<String, String> {
     let base_raw = embedded
         .iter()
@@ -260,12 +301,24 @@ fn build_table(requested: Option<&str>, embedded: &[(&str, &str)]) -> HashMap<St
         .map(|(_, raw)| *raw)
         .unwrap_or("{}");
     for (key, message) in parse_locale(raw) {
+        if message.is_empty() {
+            continue;
+        }
         // Only overlay keys that exist in English: a stale Lokalise key must
         // not resurrect a string the code no longer uses (harmless) or, worse,
         // mask a typo'd lookup with a stale message.
-        if !message.is_empty() && table.contains_key(&key) {
-            table.insert(key, message);
+        let Some(english) = table.get(&key) else {
+            continue;
+        };
+        // `is_none` on its own arm, not folded into the comparison: two
+        // malformed messages compare equal, and a malformed English original
+        // must not license a malformed translation.
+        let translated = placeholders(&message);
+        if translated.is_none() || translated != placeholders(english) {
+            warn!("{stem} translation of {key} has unusable placeholders; using English");
+            continue;
         }
+        table.insert(key, message);
     }
     table
 }
@@ -472,6 +525,82 @@ mod tests {
     }
 
     #[test]
+    fn build_table_rejects_placeholder_mismatched_translations() {
+        let embedded: &[(&str, &str)] = &[
+            (
+                "en",
+                r#"{"dropped": "v {version}", "typo": "v {version}", "extra": "plain"}"#,
+            ),
+            (
+                "fr",
+                r#"{"dropped": "version", "typo": "v {versoin}", "extra": "brut {oups}"}"#,
+            ),
+        ];
+        let table = build_table(Some("fr"), embedded);
+        // A dropped token would silently strip the value from the message.
+        assert_eq!(
+            table.get("dropped").map(String::as_str),
+            Some("v {version}")
+        );
+        // A typo'd or invented token would render a raw brace in the UI.
+        assert_eq!(table.get("typo").map(String::as_str), Some("v {version}"));
+        assert_eq!(table.get("extra").map(String::as_str), Some("plain"));
+    }
+
+    #[test]
+    fn build_table_keeps_reordered_and_repeated_placeholders() {
+        // Word order is exactly what a translation is allowed to change, and
+        // interpolation fills every occurrence, so neither reordering nor
+        // repeating a token makes a message unusable.
+        let embedded: &[(&str, &str)] = &[
+            ("en", r#"{"a": "{subject} is {installed}"}"#),
+            ("fr", r#"{"a": "{installed} : {subject} ({subject})"}"#),
+        ];
+        let table = build_table(Some("fr"), embedded);
+        assert_eq!(
+            table.get("a").map(String::as_str),
+            Some("{installed} : {subject} ({subject})")
+        );
+    }
+
+    #[test]
+    fn placeholders_reads_the_tokens_interpolate_would_fill() {
+        assert_eq!(
+            placeholders("{b} and {a} and {b}"),
+            Some(["a", "b"].into_iter().collect())
+        );
+        assert_eq!(placeholders("no tokens"), Some(BTreeSet::new()));
+        // Brace shapes interpolation cannot fill, and so renders raw.
+        assert_eq!(placeholders("{a} then {oops"), None);
+        assert_eq!(placeholders("}{a}"), None);
+        assert_eq!(placeholders("{a}}"), None);
+        assert_eq!(placeholders("stray}"), None);
+    }
+
+    #[test]
+    fn build_table_rejects_brace_malformed_translations() {
+        // Token-set equality alone accepts these: the braces differ in shape
+        // while the tokens they yield do not.
+        let embedded: &[(&str, &str)] = &[
+            (
+                "en",
+                r#"{"trailing": "v {version}", "stray": "plain", "doubled": "{a}"}"#,
+            ),
+            (
+                "fr",
+                r#"{"trailing": "v {version} {", "stray": "brut}", "doubled": "{a}}"}"#,
+            ),
+        ];
+        let table = build_table(Some("fr"), embedded);
+        assert_eq!(
+            table.get("trailing").map(String::as_str),
+            Some("v {version}")
+        );
+        assert_eq!(table.get("stray").map(String::as_str), Some("plain"));
+        assert_eq!(table.get("doubled").map(String::as_str), Some("{a}"));
+    }
+
+    #[test]
     fn build_table_unknown_locale_is_english() {
         let embedded: &[(&str, &str)] = &[("en", r#"{"a": "english"}"#)];
         let table = build_table(Some("ja"), embedded);
@@ -499,13 +628,11 @@ mod tests {
             .map(|(_, raw)| *raw)
             .expect("en.json embedded");
         for (key, message) in parse_locale(en) {
-            let mut rest = message.as_str();
-            while let Some(start) = rest.find('{') {
-                let after = &rest[start + 1..];
-                let end = after
-                    .find('}')
-                    .unwrap_or_else(|| panic!("unclosed '{{' in {key}"));
-                let name = &after[..end];
+            // Same scan the overlay holds translations to, so the base locale
+            // and the locales overlaying it cannot drift apart.
+            let names =
+                placeholders(&message).unwrap_or_else(|| panic!("malformed '{{' or '}}' in {key}"));
+            for name in names {
                 assert!(
                     !name.is_empty()
                         && name
@@ -513,9 +640,7 @@ mod tests {
                             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                     "bad placeholder {{{name}}} in {key}"
                 );
-                rest = &after[end + 1..];
             }
-            assert!(!rest.contains('}'), "stray '}}' in {key}");
         }
     }
 
