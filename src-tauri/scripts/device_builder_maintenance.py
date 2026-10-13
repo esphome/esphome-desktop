@@ -111,8 +111,21 @@ def vkey(version: str | None) -> tuple[tuple[int, ...], int, int]:
     return (release, _ORDER.get(match.group(2), 4), int(match.group(3) or 0))
 
 
+# PEP 503 name normalization: collapse every run of ``-``, ``_`` and ``.`` to a
+# single ``-``, then lowercase. Anything weaker splits one package across two
+# groups, because the two identities the prune compares are spelled
+# differently: METADATA carries the project name as published (``ruamel.yaml``)
+# while the dist-info directory carries the escaped form pip wrote, which is
+# ``ruamel_yaml`` for anything built by a normalizing setuptools. A group split
+# that way loses the very comparison the prune exists to make -- and, because a
+# lone dir-name-only entry in a group of its own has nothing rankable to sit
+# beside, turns a deliberate conservative keep into a counted failure and an
+# exit 1 that claims damage the tree does not have.
+_NORM_SEPARATORS = re.compile(r"[-_.]+")
+
+
 def _norm(name: str | None) -> str:
-    return (name or "").lower().replace("_", "-")
+    return _NORM_SEPARATORS.sub("-", name or "").lower()
 
 
 def _dist_path(dist: Distribution) -> object:
