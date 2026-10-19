@@ -59,9 +59,9 @@ PORTABLEGIT_SHA256="075e158ef8e1f0ab80b347e245405d3eca735c2dc88fd8e032e137d0ca61
 # no upstream checksum file (only minisig), so CCACHE_SHA256 is computed from the
 # pinned asset. All three are rewritten by the nightly
 # `bump_bundle_versions.py --target ccache` job.
-CCACHE_VERSION="4.14.1"
-CCACHE_URL="https://github.com/ccache/ccache/releases/download/v4.14.1/ccache-4.14.1-windows-x86_64.zip"
-CCACHE_SHA256="6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4"
+CCACHE_VERSION="4.14.2"
+CCACHE_URL="https://github.com/ccache/ccache/releases/download/v4.14.2/ccache-4.14.2-windows-x86_64.zip"
+CCACHE_SHA256="6993ce645e53192cec592ee23186200b574ac4c59097ecde8d9cfd681b47ae84"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
