@@ -14,4 +14,7 @@ jobs:
     permissions:
       issues: write         # issues.lock on closed issues
       pull-requests: write  # issues.lock on closed pull requests
-    uses: esphome/workflows/.github/workflows/lock.yml@2026.9.0
+    # Keep this pinned by commit SHA: gh-actions-lock does not lock cross-repo
+    # reusable workflows yet, so a version tag here would not be verified.
+    # https://github.com/github/gh-actions-lock/issues/179
+    uses: esphome/workflows/.github/workflows/lock.yml@cc3e76de337dc59bc1cba8da58d963cd23b873f1  # 2026.9.0
