@@ -188,7 +188,7 @@ jobs:
       # and build English-only.
       - name: Restore translations
         if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: translations
           path: src-tauri/translations/
@@ -791,7 +791,7 @@ jobs:
           echo "Found draft release: $tag_name (ID: $release_id)"
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
 
