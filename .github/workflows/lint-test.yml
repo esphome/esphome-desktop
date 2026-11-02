@@ -44,7 +44,7 @@ jobs:
       lint_test: ${{ steps.determine.outputs.lint_test }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
       - name: Determine jobs
         id: determine
         env:
@@ -69,7 +69,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
 
       # Structural gate: no file under src-tauri/src may cross the line cap.
       # Needs no Rust toolchain, so it runs before the setup steps and fails
@@ -84,7 +84,7 @@ jobs:
       # even a plain `cargo test` needs these to compile. Same dependency set
       # as the Build workflow's Linux jobs (shared composite action).
       - name: Install Linux dependencies
-        uses: ./.github/actions/linux-tauri-deps
+        uses: $/.github/actions/linux-tauri-deps
 
       # Pin the toolchain version (unlike the Build workflow, which floats
       # `stable`). clippy and rustfmt are *required* gates below, so a floating
@@ -94,7 +94,7 @@ jobs:
       # adopt newer lints. 1.96.0 is the version that established the green
       # clippy/fmt baseline this workflow enforces.
       - name: Setup Rust
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
@@ -104,7 +104,7 @@ jobs:
           cache-bin: "true"
 
       - name: Stub bundle resource dirs
-        uses: ./.github/actions/stub-bundle-dirs
+        uses: $/.github/actions/stub-bundle-dirs
 
       # Required gates. clippy and rustfmt were introduced as advisory in the
       # first iteration of this workflow because they had never run in CI and the
@@ -162,14 +162,14 @@ jobs:
         os: [macos-15, windows-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
 
       # Same pinned toolchain as the Linux job, so a lint is a lint regardless
       # of which job caught it. No webkit/appindicator deps are needed: Tauri
       # uses the system WebView2 (Windows) / WKWebView (macOS), not the
       # GTK/webkit stack.
       - name: Setup Rust
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           toolchain: 1.96.0
           components: clippy, rustfmt
@@ -179,7 +179,7 @@ jobs:
       # top-level `bundle` block, so they're resources on macOS/Windows too
       # (git = MinGit, ccache = bundled ccache on Windows).
       - name: Stub bundle resource dirs
-        uses: ./.github/actions/stub-bundle-dirs
+        uses: $/.github/actions/stub-bundle-dirs
 
       # fmt is cfg-agnostic and already green on Linux, so this is belt and
       # braces against a platform newline quirk rather than a real second check.

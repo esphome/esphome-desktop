@@ -33,14 +33,14 @@ runs:
   using: composite
   steps:
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # v1, toolchain selected via the input
+      uses: dtolnay/rust-toolchain@v1 # toolchain selected via the input
       with:
         toolchain: ${{ inputs.toolchain }}
         targets: ${{ inputs.targets }}
         components: ${{ inputs.components }}
 
     - name: Setup Rust cache
-      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      uses: Swatinem/rust-cache@v2.9.1
       with:
         workspaces: src-tauri
         key: ${{ inputs.cache-key }}
