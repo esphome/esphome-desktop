@@ -15,18 +15,18 @@ jobs:
     steps:
       - name: Generate a token
         id: generate-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
 
-      - uses: release-drafter/release-drafter@72967cdc98ddd3160f1fc3dff619de365e137dd0 # v7.9.0
+      - uses: release-drafter/release-drafter@v7.9.0
         id: release-draft
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
 
       # Update version numbers in Cargo.toml and tauri.conf.json
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           token: ${{ steps.generate-token.outputs.token }}
 
@@ -49,7 +49,7 @@ jobs:
 
       # Commit via the GraphQL API so the commit is signed/verified as the GitHub App.
       - name: Commit changes
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        uses: actions/github-script@v9.0.0
         env:
           VERSION: ${{ steps.version.outputs.version }}
         with:

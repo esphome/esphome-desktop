@@ -68,16 +68,16 @@ jobs:
             target: windows-x64
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
 
       # Tauri links against webkit/appindicator on Linux, so even a plain
       # `cargo test` needs these to compile. The action self-gates on Linux, so
       # it is a no-op on the macOS and Windows legs.
       - name: Install Linux dependencies
-        uses: ./.github/actions/linux-tauri-deps
+        uses: $/.github/actions/linux-tauri-deps
 
       - name: Setup Rust
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           toolchain: 1.96.0
           cache-key: python-tree-repair-${{ matrix.os }}
@@ -85,7 +85,7 @@ jobs:
       # `tauri.conf.json` declares `python`, `git` and `ccache` as bundle
       # resources, which the crate expects to exist at build time.
       - name: Stub bundle resource dirs
-        uses: ./.github/actions/stub-bundle-dirs
+        uses: $/.github/actions/stub-bundle-dirs
 
       # The real thing: downloads python-build-standalone and installs esphome
       # and esphome-device-builder into it, through the same code path a
