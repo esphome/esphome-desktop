@@ -89,7 +89,7 @@ jobs:
           cat aur-pkg/.SRCINFO
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: aur-pkg
           include-hidden-files: true
