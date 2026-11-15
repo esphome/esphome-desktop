@@ -1,12 +1,13 @@
 name: Scripts Test
 
-# Lint and unit tests for the repo's first-party Python: the release tooling
-# under .github/scripts/, the runtime helpers under src-tauri/scripts/ that the
-# Rust binary embeds via include_str!, and the build-time generators under
+# Unit tests for the repo's first-party Python: the release tooling under
+# .github/scripts/, the runtime helpers under src-tauri/scripts/ that the Rust
+# binary embeds via include_str!, and the build-time generators under
 # build-scripts/. The release manifest generator drives in-app self-updates and
 # device_builder_maintenance.py heals the bundled install (#190); a bug in
 # either ships to every user, and the main Build workflow only *runs* them
-# during a release, so this job gates the logic on every relevant PR.
+# during a release, so this job gates the logic on every relevant PR. Ruff lint
+# and format run in the prek workflow (prek.yml), which covers every PR.
 
 on:
   pull_request:
@@ -17,7 +18,10 @@ on:
       - "build-scripts/**"
       - "src-tauri/scripts/**"
       - "tests/**"
+      - ".github/workflows/**"
+      - ".python-version"
       - "pyproject.toml"
+      - "uv.lock"
   workflow_dispatch:
 
 concurrency:
@@ -27,32 +31,6 @@ concurrency:
 permissions: {}
 
 jobs:
-  lint:
-    name: Python lint (ruff)
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-
-      - name: Set up Python
-        uses: actions/setup-python@v7.0.0
-        with:
-          python-version: "3.14"
-
-      # Pin ruff exactly: its lint rules and formatter output can change between
-      # releases, so an unpinned upgrade could fail this gate on an unrelated PR
-      # (same reasoning the repo pins the Rust toolchain).
-      - name: Install ruff
-        run: python -m pip install 'ruff==0.15.13'
-
-      - name: Ruff check
-        run: ruff check .
-
-      - name: Ruff format check
-        run: ruff format --check .
-
   test:
     name: Python scripts test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -70,15 +48,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
-      - name: Set up Python
-        uses: actions/setup-python@v7.0.0
-        with:
-          python-version: "3.14"
-
-      # Pin to a major so a breaking/yanked pytest release can't fail this gate
-      # on unrelated PRs (same reasoning the repo pins the Rust toolchain).
-      - name: Install pytest
-        run: python -m pip install 'pytest~=8.0'
+      # Python comes from .python-version, pytest from uv.lock.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Run script tests
-        run: python -m pytest tests/ -v
+        run: uv run --locked pytest tests/ -v

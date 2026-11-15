@@ -3,14 +3,10 @@
 
 Run from the repo root, with no arguments:
 
-    python3 .github/scripts/check_file_size.py   # `python` on Windows
-
-(A python.org install on Windows puts `python.exe` on PATH but no
-`python3.exe`; the pre-commit hook sidesteps this by having pre-commit
-provision the interpreter.)
+    uv run python .github/scripts/check_file_size.py
 
 Wired into the `lint-test` job (.github/workflows/lint-test.yml) and mirrored
-by a pre-commit hook. Exits non-zero, with a message naming each offending
+by a prek hook (prek.toml). Exits non-zero, with a message naming each offending
 file, on any of:
 
   * a non-exempt file over the cap;
@@ -231,7 +227,7 @@ def check(root: Path, files: Iterable[str], exempt: Iterable[str]) -> list[str]:
         except FileNotFoundError as error:
             # git ls-files reads the index, so it lists a file deleted from the
             # working tree but not staged. CI is a fresh checkout and
-            # pre-commit stashes, so this only reaches someone running the
+            # prek stashes, so this only reaches someone running the
             # script by hand in a dirty tree — which is what CONTRIBUTING.md
             # tells them to do.
             raise RuntimeError(

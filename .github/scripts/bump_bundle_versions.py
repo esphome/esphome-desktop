@@ -51,7 +51,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 # This script runs by path (not as an installed package), so make the sibling
 # _gha helper importable regardless of the caller's cwd.
@@ -65,6 +65,9 @@ from _gha import warn as _warn  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PREPARE_BUNDLE = REPO_ROOT / "build-scripts" / "prepare_bundle.sh"
+# The Python CI runs on. Kept equal to the bundled PYTHON_VERSION (a test in
+# tests/test_python_version_pins.py enforces it), so a Python bump moves both.
+PYTHON_VERSION_FILE = REPO_ROOT / ".python-version"
 
 PBS_REPO = "astral-sh/python-build-standalone"
 
@@ -201,15 +204,13 @@ def is_downgrade(current: str, candidate: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
-_T = TypeVar("_T")
-
 # How many times to attempt a network op before giving up, and the linear
 # backoff base between attempts.
 HTTP_RETRIES = 3
 HTTP_RETRY_BACKOFF = 2
 
 
-def _with_retries(op: Callable[[], _T]) -> _T:
+def _with_retries[T](op: Callable[[], T]) -> T:
     """Run `op`, retrying transient network failures with linear backoff.
 
     We deliberately do NOT swallow a persistent failure into a no-op: if the
@@ -509,6 +510,11 @@ def main(argv: list[str] | None = None) -> int:
         default=str(PREPARE_BUNDLE),
         help="Path to prepare_bundle.sh (defaults to the in-repo copy).",
     )
+    parser.add_argument(
+        "--python-version-file",
+        default=str(PYTHON_VERSION_FILE),
+        help="Path to .python-version, rewritten on a Python bump.",
+    )
     args = parser.parse_args(argv)
 
     required, resolve_bump, subject = TARGETS[args.target]
@@ -543,6 +549,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     path.write_text(result.text, encoding="utf-8")
+    if args.target == "python":
+        pinned = read_assignment(result.text, "PYTHON_VERSION")
+        Path(args.python_version_file).write_text(f"{pinned}\n", encoding="utf-8")
     print(f"Bumped bundled {subject}:")
     for var, (old, new) in result.var_changes.items():
         print(f"  {var}: {old} -> {new}")

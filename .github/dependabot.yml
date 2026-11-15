@@ -19,3 +19,12 @@ updates:
       interval: "weekly"
     labels:
       - "dependencies"
+
+  # Python dev tooling (ruff, pytest, prek) in pyproject.toml / uv.lock. The
+  # ruff hook in prek.toml runs this locked ruff, so one bump covers both.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"

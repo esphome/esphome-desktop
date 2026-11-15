@@ -47,6 +47,19 @@ CCACHE_SHA256="2222222222222222222222222222222222222222222222222222222222222222"
 bump = load_script_module(SCRIPT_PATH)
 
 
+@pytest.fixture(autouse=True)
+def python_version_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the script's .python-version at a temp copy for every test.
+
+    main() defaults to the repo's real file, so without this a Python bump test
+    would rewrite it.
+    """
+    path = tmp_path / ".python-version"
+    path.write_text("3.13.12\n")
+    monkeypatch.setattr(bump, "PYTHON_VERSION_FILE", path)
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Pure transforms.
 # --------------------------------------------------------------------------- #
@@ -407,7 +420,7 @@ def test_main_fails_when_upstream_unresolvable(
 
 
 def test_main_writes_file_and_outputs_on_bump(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_version_file: Path
 ) -> None:
     script = tmp_path / "prepare_bundle.sh"
     script.write_text(SAMPLE_SCRIPT)
@@ -421,10 +434,29 @@ def test_main_writes_file_and_outputs_on_bump(
     assert rc == 0
     assert 'PYTHON_VERSION="3.13.13"' in script.read_text()
     assert 'PBS_VERSION="20260602"' in script.read_text()
+    # CI's Python moves in the same PR as the bundled one.
+    assert python_version_file.read_text() == "3.13.13\n"
 
     output = out.read_text()
     assert "changed=true" in output
     assert "Bump bundled Python to 3.13.13" in output
+
+
+def test_main_python_version_file_flag_overrides_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_version_file: Path
+) -> None:
+    script = tmp_path / "prepare_bundle.sh"
+    script.write_text(SAMPLE_SCRIPT)
+    other = tmp_path / "other-python-version"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setattr(
+        bump, "resolve_latest_python", lambda minor: ("20260602", "3.13.13")
+    )
+
+    rc = bump.main(["--file", str(script), "--python-version-file", str(other)])
+    assert rc == 0
+    assert other.read_text() == "3.13.13\n"
+    assert python_version_file.read_text() == "3.13.12\n"
 
 
 def test_main_build_only_bump_titles_the_build_not_the_version(
@@ -607,7 +639,7 @@ def test_main_mingit_fails_when_variables_absent(
 
 
 def test_main_ccache_writes_file_and_outputs_on_bump(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_version_file: Path
 ) -> None:
     script = tmp_path / "prepare_bundle.sh"
     script.write_text(SAMPLE_SCRIPT)
@@ -629,6 +661,7 @@ def test_main_ccache_writes_file_and_outputs_on_bump(
     assert f'CCACHE_SHA256="{"ff" * 32}"' in text
     # A ccache bump leaves the Python and MinGit pins untouched.
     assert 'PYTHON_VERSION="3.13.12"' in text
+    assert python_version_file.read_text() == "3.13.12\n"
     assert 'MINGIT_VERSION="2.53.0"' in text
 
     output = out.read_text()

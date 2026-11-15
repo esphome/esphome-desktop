@@ -36,6 +36,11 @@ jobs:
           tag="${{ steps.release-draft.outputs.tag_name }}"
           echo "version=${tag:1}" >> $GITHUB_OUTPUT
 
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
       # One table-driven step rewrites every version-bearing file; adding a
       # file is one line in the script's table instead of another sed step.
       - name: Set versions

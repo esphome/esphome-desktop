@@ -3,6 +3,26 @@
 # The bundled CPython and site-packages trees are vendored third-party code and
 # are excluded from linting.
 
+# Not a package: this table only gives uv a Python floor (the 3.14 line we
+# bundle) for the dev environment.
+[project]
+name = "esphome-desktop-tooling"
+version = "0"
+requires-python = ">=3.14"
+
+[tool.uv]
+package = false
+
+# Dev tooling, pinned exactly and locked in uv.lock; Dependabot bumps them. CI,
+# the prek hooks and contributors all run these versions via `uv run`.
+[dependency-groups]
+dev = [
+    "prek==0.5.6",
+    "pytest==9.2.0",
+    "pyyaml==6.0.3",
+    "ruff==0.16.8",
+]
+
 [tool.ruff]
 line-length = 88
 extend-exclude = [

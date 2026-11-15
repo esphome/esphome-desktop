@@ -48,6 +48,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
       - name: Determine jobs
         id: determine
         env:
@@ -82,7 +86,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.14"
+          python-version-file: .python-version
 
       - name: Download from Lokalise
         # Non-English locales are gitignored, so pull them before building to
@@ -827,6 +831,11 @@ jobs:
       # the full manifest shape and the rationale around the `downloads`
       # section (formats the Tauri updater doesn't ship — .dmg) and the
       # desktop.esphome.io schema reference.
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
       - name: Generate latest.json for updater
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
