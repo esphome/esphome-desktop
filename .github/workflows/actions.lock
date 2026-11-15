@@ -9,7 +9,7 @@ workflows:
         - 'actions/download-artifact@v8.0.1'
         - 'actions/setup-python@v7.0.0'
         - 'actions/upload-artifact@v7.0.1'
-        - 'cargo-bins/cargo-binstall@v1.25.1'
+        - 'cargo-bins/cargo-binstall@v1.26.1'
         - 'dtolnay/rust-toolchain@v1'
         - 'swatinem/rust-cache@v2.9.1'
     '.github/workflows/bump-bundle-versions.yml':
@@ -115,9 +115,9 @@ dependencies:
         repo_id: 496012378
         uses:
             - 'actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f'
-    'cargo-bins/cargo-binstall@v1.25.1':
-        ref: 'v1.25.1'
-        commit: 'sha1-7bebc2e59eb8820162b7ac8f62a92bfdb2732447'
+    'cargo-bins/cargo-binstall@v1.26.1':
+        ref: 'v1.26.1'
+        commit: 'sha1-81df5c23b0dc775b009efdfc9895c5965b7a4e40'
         owner_id: 110581826
         repo_id: 321270638
     'dtolnay/rust-toolchain@v1':
