@@ -326,6 +326,12 @@ jobs:
       # Pre-stage a copy pinned to a known commit, patched to bound each trace
       # with `timeout` instead, so the bundler reuses ours (it only downloads
       # when the file is absent).
+      - name: Set up Python
+        if: contains(matrix.bundles, 'appimage')
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
       - name: Stage patched quick-sharun (AppImage strace hang fix)
         if: contains(matrix.bundles, 'appimage')
         run: ./build-scripts/stage_quick_sharun.sh

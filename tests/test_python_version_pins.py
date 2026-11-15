@@ -29,6 +29,9 @@ _PYTHON_CALL_RE = re.compile(r"(?:^|[\s;|&(])python3?(?:\s|$)", re.MULTILINE)
 # counts as a bare call. setup-uv alone does not put that Python on PATH.
 _UV_RUN_PYTHON_RE = re.compile(r"\buv\s+run(?:\s+-\S+)*\s+python3?\b")
 
+# A repo shell script a step runs (`./build-scripts/x.sh`, `bash scripts/y.sh`).
+_REPO_SCRIPT_RE = re.compile(r"(?:\./)?((?:[\w.-]+/)*[\w.-]+\.sh)\b")
+
 _PYTHON_VERSION_RE = re.compile(r'^PYTHON_VERSION="([^"]+)"$', re.MULTILINE)
 
 
@@ -72,7 +75,26 @@ def test_workflow_reads_python_version_file(workflow: Path) -> None:
     )
 
 
-def _unpinned_python_steps(workflow: dict) -> list[str]:
+def _calls_python(command: str, root: Path) -> bool:
+    """Whether a run command, or a repo shell script it runs, calls bare Python."""
+    command = _UV_RUN_PYTHON_RE.sub("uv-run", command)
+    if _PYTHON_CALL_RE.search(command):
+        return True
+    for match in _REPO_SCRIPT_RE.finditer(command):
+        script = root / match.group(1)
+        if not script.is_file():
+            continue
+        code = "\n".join(
+            line
+            for line in script.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        if _PYTHON_CALL_RE.search(_UV_RUN_PYTHON_RE.sub("uv-run", code)):
+            return True
+    return False
+
+
+def _unpinned_python_steps(workflow: dict, root: Path = REPO_ROOT) -> list[str]:
     """Steps that run a bare `python`/`python3` before setup-python."""
     found: list[str] = []
     for job_id, job in (workflow.get("jobs") or {}).items():
@@ -81,8 +103,7 @@ def _unpinned_python_steps(workflow: dict) -> list[str]:
             if str(step.get("uses", "")).startswith("actions/setup-python@"):
                 pinned = True
                 continue
-            run = _UV_RUN_PYTHON_RE.sub("uv-run", str(step.get("run", "")))
-            if not pinned and _PYTHON_CALL_RE.search(run):
+            if not pinned and _calls_python(str(step.get("run", "")), root):
                 found.append(f"{job_id}: {step.get('name', '<unnamed>')}")
     return found
 
@@ -105,7 +126,11 @@ def _sparse_checkouts_missing_python_version(workflow: dict) -> list[str]:
     return found
 
 
-def test_unpinned_python_steps_detection() -> None:
+def test_unpinned_python_steps_detection(tmp_path: Path) -> None:
+    scripts = tmp_path / "build-scripts"
+    scripts.mkdir()
+    (scripts / "py.sh").write_text("#!/bin/bash\npython3 - <<'PY'\nPY\n")
+    (scripts / "quiet.sh").write_text("# python3 in a comment\necho hi\n")
     workflow = {
         "jobs": {
             "late": {
@@ -123,10 +148,21 @@ def test_unpinned_python_steps_detection() -> None:
                 ]
             },
             "path-only": {"steps": [{"run": "cp -r src-tauri/python out"}]},
+            "scripts": {
+                "steps": [
+                    {"name": "py script", "run": "./build-scripts/py.sh"},
+                    {"name": "quiet script", "run": "build-scripts/quiet.sh"},
+                    {"name": "missing script", "run": "./build-scripts/gone.sh"},
+                ]
+            },
             "reusable": {"uses": "./.github/workflows/x.yml"},
         }
     }
-    assert _unpinned_python_steps(workflow) == ["late: early", "uv: bare"]
+    assert _unpinned_python_steps(workflow, tmp_path) == [
+        "late: early",
+        "uv: bare",
+        "scripts: py script",
+    ]
 
 
 def test_sparse_checkout_detection() -> None:
