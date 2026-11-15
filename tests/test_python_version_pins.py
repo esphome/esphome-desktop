@@ -25,7 +25,9 @@ WORKFLOWS = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
 # A shell command that starts the Python interpreter (`python3 x.py`,
 # `$(python3 ...)`), but not a path segment like `src-tauri/python`.
 _PYTHON_CALL_RE = re.compile(r"(?:^|[\s;|&(])python3?(?:\s|$)", re.MULTILINE)
-_SETUP_ACTIONS = ("actions/setup-python@", "astral-sh/setup-uv@")
+# `uv run [flags] python ...` resolves .python-version itself, so it never
+# counts as a bare call. setup-uv alone does not put that Python on PATH.
+_UV_RUN_PYTHON_RE = re.compile(r"\buv\s+run(?:\s+-\S+)*\s+python3?\b")
 
 _PYTHON_VERSION_RE = re.compile(r'^PYTHON_VERSION="([^"]+)"$', re.MULTILINE)
 
@@ -71,15 +73,35 @@ def test_workflow_reads_python_version_file(workflow: Path) -> None:
 
 
 def _unpinned_python_steps(workflow: dict) -> list[str]:
-    """Steps that run `python`/`python3` before the job sets up Python."""
+    """Steps that run a bare `python`/`python3` before setup-python."""
     found: list[str] = []
     for job_id, job in (workflow.get("jobs") or {}).items():
         pinned = False
         for step in job.get("steps") or []:
-            if str(step.get("uses", "")).startswith(_SETUP_ACTIONS):
+            if str(step.get("uses", "")).startswith("actions/setup-python@"):
                 pinned = True
-            elif not pinned and _PYTHON_CALL_RE.search(str(step.get("run", ""))):
+                continue
+            run = _UV_RUN_PYTHON_RE.sub("uv-run", str(step.get("run", "")))
+            if not pinned and _PYTHON_CALL_RE.search(run):
                 found.append(f"{job_id}: {step.get('name', '<unnamed>')}")
+    return found
+
+
+def _sparse_checkouts_missing_python_version(workflow: dict) -> list[str]:
+    """Jobs that set up Python from .python-version but sparse-check it out."""
+    found: list[str] = []
+    for job_id, job in (workflow.get("jobs") or {}).items():
+        steps = job.get("steps") or []
+        reads_file = any(
+            str(step.get("with", {}).get("python-version-file", "")).endswith(
+                ".python-version"
+            )
+            for step in steps
+        )
+        for step in steps:
+            sparse = str(step.get("with", {}).get("sparse-checkout", ""))
+            if reads_file and sparse and ".python-version" not in sparse.split():
+                found.append(job_id)
     return found
 
 
@@ -96,14 +118,35 @@ def test_unpinned_python_steps_detection() -> None:
             "uv": {
                 "steps": [
                     {"uses": "astral-sh/setup-uv@v10.3.3"},
-                    {"run": "python c.py"},
+                    {"name": "uv run", "run": "uv run --locked python d.py"},
+                    {"name": "bare", "run": "python c.py"},
                 ]
             },
             "path-only": {"steps": [{"run": "cp -r src-tauri/python out"}]},
             "reusable": {"uses": "./.github/workflows/x.yml"},
         }
     }
-    assert _unpinned_python_steps(workflow) == ["late: early"]
+    assert _unpinned_python_steps(workflow) == ["late: early", "uv: bare"]
+
+
+def test_sparse_checkout_detection() -> None:
+    setup = {"with": {"python-version-file": ".python-version"}}
+    workflow = {
+        "jobs": {
+            "missing": {
+                "steps": [{"with": {"sparse-checkout": ".github/scripts\n"}}, setup]
+            },
+            "ok": {
+                "steps": [
+                    {"with": {"sparse-checkout": ".python-version\n.github\n"}},
+                    setup,
+                ]
+            },
+            "full": {"steps": [{"uses": "actions/checkout@v7.0.1"}, setup]},
+            "no-python": {"steps": [{"with": {"sparse-checkout": "docs\n"}}]},
+        }
+    }
+    assert _sparse_checkouts_missing_python_version(workflow) == ["missing"]
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
@@ -112,4 +155,12 @@ def test_workflow_runs_python_only_after_setup(workflow: Path) -> None:
     assert _unpinned_python_steps(data) == [], (
         f"{workflow.name}: add a setup-python step "
         "(`python-version-file: .python-version`) before these steps"
+    )
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
+def test_sparse_checkout_includes_python_version(workflow: Path) -> None:
+    data = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    assert _sparse_checkouts_missing_python_version(data) == [], (
+        f"{workflow.name}: add .python-version to the sparse checkout"
     )

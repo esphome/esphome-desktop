@@ -768,9 +768,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
-          # Need the latest.json generator script + the JSON Schema it produces;
-          # nothing else from the source tree is required by the release job.
+          # Need the latest.json generator script + the JSON Schema it produces,
+          # and .python-version for setup-python; nothing else from the source
+          # tree is required by the release job.
           sparse-checkout: |
+            .python-version
             .github/latest.schema.json
             .github/scripts
           sparse-checkout-cone-mode: false
