@@ -188,7 +188,7 @@ jobs:
       # and build English-only.
       - name: Restore translations
         if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           name: translations
           path: src-tauri/translations/
@@ -245,7 +245,7 @@ jobs:
       # no prebuilt (e.g. aarch64 Linux).
       - name: Install cargo-binstall
         if: ${{ !matrix.tauri_rev }}
-        uses: cargo-bins/cargo-binstall@v1.25.1
+        uses: cargo-bins/cargo-binstall@v1.26.1
 
       # Version reaches the script only through env, never via ${{ }}
       # interpolation into the run block, so a crafted Cargo.lock cannot inject
@@ -791,7 +791,7 @@ jobs:
           echo "Found draft release: $tag_name (ID: $release_id)"
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
 

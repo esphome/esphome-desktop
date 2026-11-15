@@ -20,7 +20,7 @@ jobs:
           client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
 
-      - uses: release-drafter/release-drafter@v7.9.0
+      - uses: release-drafter/release-drafter@v7.10.0
         id: release-draft
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
