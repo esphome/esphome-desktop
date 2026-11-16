@@ -94,6 +94,9 @@ jobs:
 
           cat >> comment.md <<'EOF'
 
+          > [!NOTE]
+          > PR builds of the Windows installer are not code-signed (only releases are), so SmartScreen will warn about an unknown publisher. Choose "More info" and then "Run anyway" to install it.
+
           ### Linux
           EOF
 
