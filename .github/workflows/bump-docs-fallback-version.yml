@@ -121,8 +121,7 @@ jobs:
           branch: auto/bump-device-builder-fallback-version
           base: current
           delete-branch: true
-          committer: esphome[bot] <115708604+esphome[bot]@users.noreply.github.com>
-          author: esphome[bot] <115708604+esphome[bot]@users.noreply.github.com>
+          sign-commits: true
           title: ${{ steps.bump.outputs.title }}
           body: ${{ steps.bump.outputs.body }}
           commit-message: ${{ steps.bump.outputs.title }}
