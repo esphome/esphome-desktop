@@ -20,13 +20,17 @@ jobs:
           client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
 
-      - uses: release-drafter/release-drafter@v7.11.0
+      # release-drafter v7 reads its `token` input (default github.token) and
+      # ignores a GITHUB_TOKEN env var, so the app token must go through `with:`.
+      - name: Draft release
+        uses: release-drafter/release-drafter@v7.11.0
         id: release-draft
-        env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
 
       # Update version numbers in Cargo.toml and tauri.conf.json
-      - uses: actions/checkout@v7.0.1
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ steps.generate-token.outputs.token }}
 
