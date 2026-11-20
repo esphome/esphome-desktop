@@ -1,0 +1,69 @@
+# Configuration file for `prek`, a git hook framework written in Rust.
+# See https://prek.j178.dev for more information.
+#:schema https://www.schemastore.org/prek.json
+# Install the git hook with: uv run prek install
+#
+# CI (prek.yml) skips the cargo hooks; `Lint & Test` already gates them on the
+# pinned toolchain. Locally they use rust-toolchain.toml via rustup.
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files" },
+  { id = "check-yaml" },
+  { id = "check-json" },
+  { id = "check-toml" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+  { id = "deny-pattern", name = "forbid NUL bytes in source files", args = ['\x00'], types = ["text"] },
+]
+
+[[repos]]
+repo = "local"
+
+# ruff runs from the uv dev environment, so the version is the one locked in
+# uv.lock (pinned in pyproject.toml) everywhere: here, CI and your editor.
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+entry = "uv run --locked ruff check --force-exclude"
+language = "system"
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+entry = "uv run --locked ruff format --check --force-exclude"
+language = "system"
+types_or = ["python", "pyi"]
+
+# Mirrors the "File size cap" gate in lint-test.yml. always_run because it is a
+# whole-tree check: a commit that only deletes a .rs file would otherwise skip
+# it. Runs on the pinned .python-version via uv, like the ruff hooks.
+[[repos.hooks]]
+id = "check-file-size"
+name = "file size cap (src-tauri/src)"
+entry = "uv run --locked python .github/scripts/check_file_size.py"
+language = "system"
+always_run = true
+pass_filenames = false
+
+# Run inside src-tauri to pick up its rust-toolchain.toml (needs git-bash on
+# Windows).
+[[repos.hooks]]
+id = "cargo-fmt"
+name = "cargo fmt (src-tauri)"
+entry = "bash -c 'cd src-tauri && cargo fmt --all --check'"
+language = "system"
+types = ["rust"]
+pass_filenames = false
+
+[[repos.hooks]]
+id = "cargo-clippy"
+name = "cargo clippy (src-tauri)"
+entry = "bash -c 'cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings'"
+language = "system"
+types = ["rust"]
+pass_filenames = false

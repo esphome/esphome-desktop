@@ -13,8 +13,8 @@ project and be sure to join us on [Discord](https://discord.gg/KhAMKrd).
 
 **File size cap: 800 lines.** Split a file into submodules before it crosses
 the cap; there are no exemptions for new files. `Lint & Test` enforces this
-(`.github/scripts/check_file_size.py`), and a pre-commit hook runs the same
-check locally.
+(`.github/scripts/check_file_size.py`), and a [prek](#git-hooks-prek) hook runs
+the same check locally.
 
 The cap counts code, not tests. A top-level `#[cfg(test)] mod` block does not
 count against it, wherever in the file it sits, so a well tested file is never
@@ -32,7 +32,7 @@ entries; split the file instead.
 To check before pushing:
 
 ```bash
-python3 .github/scripts/check_file_size.py   # `python` on Windows
+uv run python .github/scripts/check_file_size.py
 ```
 
 ## Running the Rust checks locally
@@ -56,19 +56,31 @@ locally, match that pinned version (see `toolchain:` in `lint-test.yml`).
 
 The first-party Python (the release tooling under `.github/scripts/` and the
 runtime helpers under `src-tauri/scripts/` that the Rust binary embeds) is gated
-by the `Scripts Test` workflow, which lints with `ruff` and runs the `pytest`
-suite across macOS, Windows, and Linux on the CPython 3.14 line we bundle:
+by the `Scripts Test` workflow, which runs the `pytest` suite across macOS,
+Windows, and Linux on the CPython 3.14 line we bundle. Ruff lint and format run
+as [prek](#git-hooks-prek) hooks.
+
+The dev tools (`pytest`, `ruff`, `prek`) are pinned in `pyproject.toml` and
+locked in `uv.lock`; Dependabot bumps them. Use [uv](https://docs.astral.sh/uv/)
+so you run the same versions as CI:
 
 ```bash
-python3 -m pip install pytest ruff   # one-time
-ruff check .
-ruff format --check .
-python3 -m pytest tests/ -v
+uv sync                          # one-time: creates .venv with the dev tools
+uv run pytest tests/ -v
 ```
 
-On Windows, use `py -m` rather than `python3`; a python.org install never ships a
-`python3.exe`, and the `py` launcher is the reliable spelling there (plain
-`python` works only if you added it to PATH during install).
+## Git hooks (prek)
+
+The repo's hooks are defined in `prek.toml` and run with
+[prek](https://prek.j178.dev): file hygiene, `ruff` lint and format, the file
+size cap, and `cargo fmt`/`cargo clippy`. The `prek` workflow runs the same
+hooks on every PR, except the cargo ones, which `Lint & Test` already gates. The
+ruff hooks run the locked ruff through `uv run`, so the hooks need uv on PATH.
+
+```bash
+uv run prek install              # run the hooks on every commit
+uv run prek run --all-files      # run them by hand
+```
 
 ---
 

@@ -45,7 +45,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -221,7 +221,7 @@ def build_manifest(
     platforms = build_platforms(assets_by_name, artifacts_dir, download_base)
     downloads = build_downloads(assets, download_base)
 
-    pub_date = release.get("publishedAt") or datetime.now(timezone.utc).strftime(
+    pub_date = release.get("publishedAt") or datetime.now(UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 

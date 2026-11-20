@@ -93,7 +93,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
-          python-version: "3.13"
+          python-version-file: desktop/.python-version
 
       # Fails the job when the FALLBACK_VERSION declaration is not found exactly
       # once, rather than quietly opening no PR - a silent no-op is how the

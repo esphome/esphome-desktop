@@ -45,6 +45,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
       - name: Determine jobs
         id: determine
         env:
@@ -70,6 +74,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
 
       # Structural gate: no file under src-tauri/src may cross the line cap.
       # Needs no Rust toolchain, so it runs before the setup steps and fails
