@@ -28,6 +28,39 @@ jobs:
         with:
           token: ${{ steps.generate-token.outputs.token }}
 
+      # Release Drafter has just reset the body to the template, putting the
+      # "do not publish" warning back. The assets attached to the draft are
+      # from the previous build and no longer match the new changes, so drop
+      # them all; the build workflow's release job uploads a fresh set and
+      # then removes the warning again.
+      - name: Delete stale assets from draft release
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          RELEASE_ID: ${{ steps.release-draft.outputs.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! draft=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft'); then
+            echo "::error::Failed to fetch release ${RELEASE_ID}."
+            exit 1
+          fi
+          if [ "$draft" != "true" ]; then
+            echo "::error::Release ${RELEASE_ID} is not a draft; refusing to delete its assets."
+            exit 1
+          fi
+          if ! asset_ids=$(gh api --paginate "repos/${REPO}/releases/${RELEASE_ID}/assets" --jq '.[].id'); then
+            echo "::error::Failed to list assets of release ${RELEASE_ID}."
+            exit 1
+          fi
+          if [ -z "$asset_ids" ]; then
+            echo "No assets to delete."
+            exit 0
+          fi
+          for id in $asset_ids; do
+            echo "Deleting asset $id"
+            gh api "repos/${REPO}/releases/assets/${id}" --method DELETE --silent
+          done
+
       # Update version numbers in Cargo.toml and tauri.conf.json
       - name: Check out repository
         uses: actions/checkout@v7.0.1
