@@ -83,3 +83,46 @@ def test_deploy_pages_workflow_is_docs_only() -> None:
     assert SCRIPT.determine(
         ["web/index.html", ".github/workflows/deploy-pages.yml"]
     ) == {"build": False, "lint_test": False}
+
+
+def test_python_tooling_only_pr_builds_but_skips_rust_lint() -> None:
+    # Release tooling and its tests are gated by scripts-test.yml; they cannot
+    # change the Rust lint/test result, but they still count as code for Build.
+    for path in (
+        ".github/scripts/generate_latest_json.py",
+        "tests/test_generate_latest_json.py",
+        "build-scripts/prepare_bundle.sh",
+        ".github/workflows/scripts-test.yml",
+        "pyproject.toml",
+    ):
+        assert not SCRIPT.affects_lint_test(path), path
+        assert SCRIPT.determine([path]) == {"build": True, "lint_test": False}, path
+
+
+def test_rust_gate_inputs_run_lint_test() -> None:
+    for path in (
+        "src-tauri/src/lib.rs",
+        "src-tauri/Cargo.lock",
+        "src-tauri/rust-toolchain.toml",
+        "src-tauri/scripts/device_builder_maintenance.py",
+        ".github/actions/setup-rust/action.yml",
+        ".github/scripts/check_file_size.py",
+        ".github/workflows/lint-test.yml",
+    ):
+        assert SCRIPT.affects_lint_test(path), path
+        assert SCRIPT.determine([path]) == {"build": True, "lint_test": True}, path
+
+
+def test_markdown_inside_src_tauri_does_not_run_lint_test() -> None:
+    # The meta-only allowlist wins: a README under src-tauri/ is still docs.
+    assert SCRIPT.determine(["src-tauri/README.md"]) == {
+        "build": False,
+        "lint_test": False,
+    }
+
+
+def test_rust_change_alongside_tooling_runs_lint_test() -> None:
+    assert SCRIPT.determine(["tests/test_set_version.py", "src-tauri/src/lib.rs"]) == {
+        "build": True,
+        "lint_test": True,
+    }
