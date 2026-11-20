@@ -1,10 +1,19 @@
 name: verify-lockfile
 
+# Only the workflow and composite-action files carry `uses:` references, and
+# the lockfile itself lives beside the workflows, so any other change cannot
+# affect the result.
 on:
   pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
 
 permissions:
   contents: read

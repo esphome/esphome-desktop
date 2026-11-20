@@ -3,7 +3,8 @@
 
 Emits JSON to stdout, e.g. ``{"build": true, "lint_test": true}``. Both
 ``build.yml`` and ``lint-test.yml`` read this to skip their expensive jobs on a
-pull request that only touches documentation or repo meta files, so a docs-only
+pull request that only touches documentation or repo meta files (and, for
+``lint_test``, on one that touches nothing the Rust gate builds), so a docs-only
 PR no longer spends ~60 minutes in the Tauri build matrix. The four required
 ``Build *`` checks are replaced in branch protection by a single ``CI Status``
 aggregate that treats a skipped build as a pass, so skipping never blocks the
@@ -62,10 +63,28 @@ META_ONLY_GLOBS = (
     "web/*",
 )
 
+# fnmatch globs for the paths the Rust lint/test gate (lint-test.yml) can
+# observe: the crate itself (src-tauri/ also holds the include_str!'d Python
+# helpers, translations read by build.rs, and the toolchain pin), the composite
+# actions and file-size checker the jobs run, and the workflow file. A PR that
+# changes none of these (e.g. Python tooling under .github/scripts/ or tests/,
+# which scripts-test.yml covers) cannot change the gate's result, so it skips.
+LINT_TEST_GLOBS = (
+    "src-tauri/*",
+    ".github/actions/*",
+    ".github/scripts/check_file_size.py",
+    ".github/workflows/lint-test.yml",
+)
+
 
 def is_meta_only(path: str) -> bool:
     """True if this single path is a documentation or repo-meta file."""
     return any(fnmatch.fnmatch(path, glob) for glob in META_ONLY_GLOBS)
+
+
+def affects_lint_test(path: str) -> bool:
+    """True if this single path can change the Rust lint/test gate's result."""
+    return any(fnmatch.fnmatch(path, glob) for glob in LINT_TEST_GLOBS)
 
 
 def determine(changed: list[str]) -> dict[str, bool]:
@@ -74,10 +93,13 @@ def determine(changed: list[str]) -> dict[str, bool]:
     Pure so it can be unit tested without git or the GitHub API. An empty set
     (nothing detected) runs everything, matching the fail-safe bias.
     """
-    run = (not changed) or any(not is_meta_only(path) for path in changed)
-    # build.yml and lint-test.yml read these independently; keeping them as
-    # separate keys lets the two gates diverge later without a workflow change.
-    return {"build": run, "lint_test": run}
+    if not changed:
+        return {"build": True, "lint_test": True}
+    code = [path for path in changed if not is_meta_only(path)]
+    return {
+        "build": bool(code),
+        "lint_test": any(affects_lint_test(path) for path in code),
+    }
 
 
 def _pr_number() -> str | None:

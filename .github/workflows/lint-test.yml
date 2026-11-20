@@ -21,11 +21,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # On pull requests, skip the Rust lint/test jobs when the PR only touches
-  # documentation or repo meta files (see .github/scripts/determine_jobs.py).
+  # On pull requests, skip the Rust lint/test jobs when the PR touches nothing
+  # they build or run: only documentation or repo meta files, or only paths
+  # outside src-tauri/, .github/actions/ and the gate's own scripts (see
+  # LINT_TEST_GLOBS in .github/scripts/determine_jobs.py).
   #
   # INVARIANT: these jobs must stay non-required checks. Unlike build.yml there
-  # is deliberately no CI Status aggregate here, so a docs-only PR (or a
+  # is deliberately no CI Status aggregate here, so a non-Rust PR (or a
   # determine-jobs gate-job failure) just skips them with nothing reported. If
   # any of these names is ever made a required check, that silent skip would
   # hang the merge; add a CI Status style aggregate (as build.yml has) first.
