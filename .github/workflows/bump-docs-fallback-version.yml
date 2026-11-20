@@ -114,7 +114,7 @@ jobs:
       # pull request instead of opening a second one.
       - name: Create or update pull request
         if: steps.bump.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v8.1.1
+        uses: peter-evans/create-pull-request@v8.1.3
         with:
           token: ${{ steps.generate-token.outputs.token }}
           path: esphome.io
