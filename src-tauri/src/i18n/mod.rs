@@ -160,18 +160,52 @@ fn locale_script(normalized: &str) -> Option<&str> {
         .find(|segment| segment.len() == 4 && segment.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
+/// The script a normalized locale is written in: its explicit script subtag,
+/// or, for Chinese, the script implied by its region. Lokalise ships Chinese
+/// as region-only stems (`zh-CN`, `zh-TW`) while macOS reports script-tagged
+/// tags (`zh-Hant-TW`, `zh-Hant-HK`), so the region has to stand in for the
+/// script for the two to be compared (esphome/esphome-desktop#510). Other
+/// languages imply no script from their region.
+fn effective_script(normalized: &str) -> Option<&str> {
+    if let Some(script) = locale_script(normalized) {
+        return Some(script);
+    }
+    let mut segments = normalized.split('-');
+    if segments.next() != Some("zh") {
+        return None;
+    }
+    match segments.next()? {
+        "tw" | "hk" | "mo" => Some("hant"),
+        "cn" | "sg" | "my" => Some("hans"),
+        _ => None,
+    }
+}
+
+/// The region subtag of a normalized locale, if present: `tw` in
+/// `zh-hant-tw`. Regions are two letters or three digits.
+fn locale_region(normalized: &str) -> Option<&str> {
+    normalized.split('-').skip(1).find(|segment| {
+        (segment.len() == 2 && segment.chars().all(|c| c.is_ascii_alphabetic()))
+            || (segment.len() == 3 && segment.chars().all(|c| c.is_ascii_digit()))
+    })
+}
+
 /// Match the requested locale against the available locale stems.
 ///
 /// Tries each fallback candidate for an exact (normalized) match, then falls
-/// back to the first available stem for the same language (`fr` requested,
-/// only `fr-CA` shipped). Returns the stem exactly as embedded.
+/// back to an available stem for the same language (`fr` requested, only
+/// `fr-CA` shipped), preferring one for the same region (`zh-Hant-HK`
+/// requested picks `zh-HK` over `zh-TW`). Returns the stem exactly as
+/// embedded.
 ///
 /// The language-only fallback never crosses a *script* boundary: a
 /// Simplified-Chinese (`zh-Hans`) user must not be served Traditional
 /// (`zh-Hant`) just because they share the `zh` language — the two are
 /// different writing systems, so falling through to English (the base) is the
-/// safer miss (esphome/esphome-desktop#373). A request that carries no script
-/// keeps the permissive same-language fallback.
+/// safer miss (esphome/esphome-desktop#373). A Chinese region implies its
+/// script (see [`effective_script`]), so `zh-Hant-TW` lands on `zh-TW` rather
+/// than `zh-CN`. A request that carries no script keeps the permissive
+/// same-language fallback.
 fn pick_locale<'a>(requested: &str, available: &[&'a str]) -> Option<&'a str> {
     let candidates = locale_candidates(requested);
     for candidate in &candidates {
@@ -187,18 +221,27 @@ fn pick_locale<'a>(requested: &str, available: &[&'a str]) -> Option<&'a str> {
     // if both sides name one, agrees.
     let language = candidates.last()?;
     let requested_normalized = normalize_locale(requested);
-    let requested_script = locale_script(&requested_normalized);
-    available
+    let requested_script = effective_script(&requested_normalized);
+    let requested_region = locale_region(&requested_normalized);
+    let matching: Vec<&'a str> = available
         .iter()
-        .find(|stem| {
+        .filter(|stem| {
             let normalized = normalize_locale(stem);
             let language_matches = normalized.split('-').next() == Some(language.as_str());
-            let script_agrees = match (requested_script, locale_script(&normalized)) {
+            let script_agrees = match (requested_script, effective_script(&normalized)) {
                 (Some(requested), Some(available)) => requested == available,
                 _ => true,
             };
             language_matches && script_agrees
         })
+        .copied()
+        .collect();
+    matching
+        .iter()
+        .find(|stem| {
+            requested_region.is_some() && locale_region(&normalize_locale(stem)) == requested_region
+        })
+        .or_else(|| matching.first())
         .copied()
 }
 
@@ -419,6 +462,72 @@ mod tests {
         // unaffected.
         assert_eq!(pick_locale("zh", &["zh-Hant"]), Some("zh-Hant"));
         assert_eq!(pick_locale("fr", &["de", "fr-CA"]), Some("fr-CA"));
+    }
+
+    #[test]
+    fn pick_locale_maps_macos_chinese_tags_to_region_stems() {
+        // The shipped Chinese stems are region-only; macOS reports
+        // script-tagged tags. Traditional must not land on Simplified
+        // (esphome-desktop#510), in either stem order.
+        let shipped = ["de", "zh-CN", "zh-TW"];
+        assert_eq!(pick_locale("zh-Hant-TW", &shipped), Some("zh-TW"));
+        assert_eq!(pick_locale("zh-Hant-HK", &shipped), Some("zh-TW"));
+        assert_eq!(pick_locale("zh-Hant", &shipped), Some("zh-TW"));
+        assert_eq!(pick_locale("zh-HK", &shipped), Some("zh-TW"));
+        assert_eq!(pick_locale("zh-Hans-CN", &shipped), Some("zh-CN"));
+        assert_eq!(
+            pick_locale("zh-Hans-SG", &["zh-TW", "zh-CN"]),
+            Some("zh-CN")
+        );
+        assert_eq!(pick_locale("zh-SG", &["zh-TW", "zh-CN"]), Some("zh-CN"));
+        // Only the other script shipped: English rather than the wrong script.
+        assert_eq!(pick_locale("zh-Hant-TW", &["zh-CN"]), None);
+        assert_eq!(pick_locale("zh-Hans-CN", &["zh-TW"]), None);
+    }
+
+    #[test]
+    fn pick_locale_prefers_same_region_within_script() {
+        assert_eq!(
+            pick_locale("zh-Hant-HK", &["zh-TW", "zh-HK"]),
+            Some("zh-HK")
+        );
+        assert_eq!(pick_locale("es-MX", &["es-ES", "es-419"]), Some("es-ES"));
+        assert_eq!(
+            pick_locale("es-Latn-419", &["es-ES", "es-419"]),
+            Some("es-419")
+        );
+    }
+
+    #[test]
+    fn effective_script_infers_chinese_script_from_region() {
+        assert_eq!(effective_script("zh-hant-tw"), Some("hant"));
+        assert_eq!(effective_script("zh-tw"), Some("hant"));
+        assert_eq!(effective_script("zh-mo"), Some("hant"));
+        assert_eq!(effective_script("zh-cn"), Some("hans"));
+        assert_eq!(effective_script("zh-my"), Some("hans"));
+        // Unknown region, bare language, and non-Chinese imply nothing.
+        assert_eq!(effective_script("zh-us"), None);
+        assert_eq!(effective_script("zh"), None);
+        assert_eq!(effective_script("pt-br"), None);
+    }
+
+    #[test]
+    fn locale_region_extracts_only_the_region_subtag() {
+        assert_eq!(locale_region("zh-hant-tw"), Some("tw"));
+        assert_eq!(locale_region("es-419"), Some("419"));
+        assert_eq!(locale_region("zh-hant"), None);
+        assert_eq!(locale_region("en"), None);
+    }
+
+    #[test]
+    fn build_table_serves_traditional_chinese_for_macos_tag() {
+        let embedded = [
+            ("en", r#"{"tray": {"open_dashboard": "Open Dashboard"}}"#),
+            ("zh-CN", r#"{"tray": {"open_dashboard": "简体"}}"#),
+            ("zh-TW", r#"{"tray": {"open_dashboard": "繁體"}}"#),
+        ];
+        let table = build_table(Some("zh-Hant-TW"), &embedded);
+        assert_eq!(table["tray.open_dashboard"], "繁體");
     }
 
     #[test]
