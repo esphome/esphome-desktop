@@ -25,7 +25,7 @@ jobs:
 
       # Python comes from .python-version, prek and ruff from uv.lock.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run prek
         run: uv run --locked prek run --all-files --show-diff-on-failure --color=always

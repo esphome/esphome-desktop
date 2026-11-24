@@ -50,7 +50,7 @@ jobs:
 
       # Python comes from .python-version, pytest from uv.lock.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@v10.4.0
 
       - name: Run script tests
         run: uv run --locked pytest tests/ -v
