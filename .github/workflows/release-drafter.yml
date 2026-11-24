@@ -6,6 +6,13 @@ on:
       - main
   workflow_dispatch:
 
+# Shared with release builds in build.yml (see the comment there). Cancelling
+# in progress stops any older release build before this run deletes the draft
+# release's assets, so that build cannot re-upload stale files afterwards.
+concurrency:
+  group: release-assets
+  cancel-in-progress: true
+
 permissions: {}
 
 jobs:

@@ -1,10 +1,18 @@
 name: Build
 
 concurrency:
-  # For workflow_run events (release builds), use a fixed group so new runs cancel
-  # in-flight ones. For PR/dispatch events, use the ref for per-branch concurrency.
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_run' && 'release' || github.ref }}
-  cancel-in-progress: true
+  # Release builds (workflow_run) share the `release-assets` group with the
+  # Release Drafter workflow, so nothing ever uploads to the draft release
+  # while Release Drafter is wiping its assets, and no older build can upload
+  # after that wipe:
+  # - A new Release Drafter run cancels any release build in flight.
+  # - A release build never cancels: one that arrives while Release Drafter is
+  #   running waits for it, and is replaced by the next arrival while waiting.
+  #   Cancelling here would kill the Release Drafter run itself, and the build
+  #   it then triggers would skip on its cancelled conclusion.
+  # PR/dispatch builds keep per-ref groups that cancel superseded runs.
+  group: ${{ github.event_name == 'workflow_run' && 'release-assets' || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_run' }}
 
 on:
   pull_request:
