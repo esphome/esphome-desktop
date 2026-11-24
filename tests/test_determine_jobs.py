@@ -108,6 +108,8 @@ def test_rust_gate_inputs_run_lint_test() -> None:
         ".github/actions/setup-rust/action.yml",
         ".github/scripts/check_file_size.py",
         ".github/workflows/lint-test.yml",
+        ".github/workflows/actions.lock",
+        ".python-version",
     ):
         assert SCRIPT.affects_lint_test(path), path
         assert SCRIPT.determine([path]) == {"build": True, "lint_test": True}, path
