@@ -17,4 +17,4 @@ jobs:
     # Keep this pinned by commit SHA: gh-actions-lock does not lock cross-repo
     # reusable workflows yet, so a version tag here would not be verified.
     # https://github.com/github/gh-actions-lock/issues/179
-    uses: esphome/workflows/.github/workflows/lock.yml@cc3e76de337dc59bc1cba8da58d963cd23b873f1  # 2026.9.0
+    uses: esphome/workflows/.github/workflows/lock.yml@7f0b0f230ba1b9fa1361e699b3a2043c92f0d3f3  # 2026.11.1
