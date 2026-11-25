@@ -66,7 +66,8 @@ META_ONLY_GLOBS = (
 # fnmatch globs for the paths the Rust lint/test gate (lint-test.yml) can
 # observe: the crate itself (src-tauri/ also holds the include_str!'d Python
 # helpers, translations read by build.rs, and the toolchain pin), the composite
-# actions and file-size checker the jobs run, and the workflow file. A PR that
+# actions and file-size checker the jobs run, the workflow file, the Python pin
+# its setup-python step reads, and the lockfile pinning its actions. A PR that
 # changes none of these (e.g. Python tooling under .github/scripts/ or tests/,
 # which scripts-test.yml covers) cannot change the gate's result, so it skips.
 LINT_TEST_GLOBS = (
@@ -74,6 +75,8 @@ LINT_TEST_GLOBS = (
     ".github/actions/*",
     ".github/scripts/check_file_size.py",
     ".github/workflows/lint-test.yml",
+    ".github/workflows/actions.lock",
+    ".python-version",
 )
 
 
