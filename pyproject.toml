@@ -19,7 +19,7 @@ package = false
 dev = [
     "prek==0.5.11",
     "pytest==9.2.0",
-    "pyyaml==6.0.3",
+    "pyyaml==6.0.4",
     "ruff==0.17.5",
 ]
 
