@@ -44,23 +44,19 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Filter by status on the server rather than scanning the newest
-          # runs: a re-run of an old build keeps its original place in the
-          # run history, however far back that is.
-          run_ids=""
-          for status in requested queued pending waiting in_progress; do
-            if ! ids=$(gh api --paginate \
-                "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&status=${status}&per_page=100" \
-                --jq '.workflow_runs[].id'); then
-              echo "::error::Failed to list ${status} release builds."
-              exit 1
-            fi
-            if [ -n "$ids" ]; then
-              run_ids="${run_ids}${ids}"$'\n'
-            fi
-          done
-          # A run can change status between the queries above; list it once.
-          run_ids=$(printf '%s' "$run_ids" | awk 'NF && !seen[$0]++' | tr '\n' ' ')
+          # Walk the whole release-build history and filter locally: a re-run
+          # of an old build keeps its original place in the history, however
+          # far back that is, and one query per status could miss a run that
+          # moves between statuses (e.g. pending to queued) mid-scan. Runs
+          # created during the walk only push older ones onto later pages, so
+          # nothing is skipped; at worst a run is listed twice.
+          if ! run_ids=$(gh api --paginate \
+              "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&per_page=100" \
+              --jq '.workflow_runs[] | select(.status != "completed") | .id'); then
+            echo "::error::Failed to list release builds."
+            exit 1
+          fi
+          run_ids=$(printf '%s\n' "$run_ids" | awk 'NF && !seen[$0]++' | tr '\n' ' ')
           if [ -z "$run_ids" ]; then
             echo "No release builds in flight."
             exit 0

@@ -794,7 +794,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          # The default branch, not the run's head_branch: a Release Drafter run
+          # dispatched from another branch must never populate the draft.
+          BRANCH: ${{ github.event.repository.default_branch }}
           BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
@@ -870,7 +872,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          # The default branch, not the run's head_branch: a Release Drafter run
+          # dispatched from another branch must never populate the draft.
+          BRANCH: ${{ github.event.repository.default_branch }}
           BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
