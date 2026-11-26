@@ -10,14 +10,22 @@ on:
 # end of a run triggers the next one, which waits here. A run still waiting
 # when yet another push arrives is replaced by it; the newer run drafts the
 # same release from all merged PRs, so nothing is lost.
+# A manual dispatch from any other branch gets a group of its own, so it can't
+# replace a waiting run for the default branch, and its job is skipped below.
 concurrency:
-  group: release-drafter
+  group: >-
+    ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    && 'release-drafter' || format('release-drafter-{0}', github.run_id) }}
   cancel-in-progress: false
 
 permissions: {}
 
 jobs:
   release-drafter:
+    # Only the default branch drafts releases. A dispatch from another branch
+    # would otherwise cancel the default branch's release builds and wipe the
+    # draft, while its own build is never uploaded.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: release-drafter
     permissions:
@@ -44,15 +52,17 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Walk the whole release-build history and filter locally: a re-run
-          # of an old build keeps its original place in the history, however
-          # far back that is, and one query per status could miss a run that
-          # moves between statuses (e.g. pending to queued) mid-scan. Runs
-          # created during the walk only push older ones onto later pages, so
-          # nothing is skipped; at worst a run is listed twice.
+          # Walk the whole Build history and filter locally: a re-run of an old
+          # build keeps its original place in the history, however far back
+          # that is, and one query per status could miss a run that moves
+          # between statuses (e.g. pending to queued) mid-scan. No server-side
+          # filter either: with `event`, `status` and similar parameters the
+          # API returns at most 1,000 runs. Runs created during the walk only
+          # push older ones onto later pages, so nothing is skipped; at worst
+          # a run is listed twice.
           if ! run_ids=$(gh api --paginate \
-              "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&per_page=100" \
-              --jq '.workflow_runs[] | select(.status != "completed") | .id'); then
+              "repos/${REPO}/actions/workflows/build.yml/runs?per_page=100" \
+              --jq '.workflow_runs[] | select(.event == "workflow_run" and .status != "completed") | .id'); then
             echo "::error::Failed to list release builds."
             exit 1
           fi

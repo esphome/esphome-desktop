@@ -1,7 +1,8 @@
 name: Build
 
 concurrency:
-  # Release builds (workflow_run from a successful Release Drafter run) are
+  # Release builds (workflow_run from a successful Release Drafter run on the
+  # default branch; any other workflow_run builds nothing) are
   # grouped by the commit they build, so only another build of the same commit
   # can cancel one: a re-run of an older build must not cancel the current
   # head's build and then skip its own stale upload. Release Drafter cancels
@@ -17,6 +18,7 @@ concurrency:
   group: >-
     ${{ github.event_name != 'workflow_run' && format('{0}-{1}', github.workflow, github.ref)
     || github.event.workflow_run.conclusion == 'success'
+       && github.event.workflow_run.head_branch == github.event.repository.default_branch
        && format('{0}-release-{1}', github.workflow, github.event.workflow_run.head_sha)
     || format('{0}-skipped-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: true
@@ -86,7 +88,8 @@ jobs:
     name: Download translations from Lokalise
     if: >-
       github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
     runs-on: ubuntu-22.04
     # The Lokalise credentials live in the `lokalise` environment.
     environment: lokalise
