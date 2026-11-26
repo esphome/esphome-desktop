@@ -31,34 +31,36 @@ jobs:
           client-id: ${{ vars.ESPHOME_GITHUB_APP_CLIENT_ID }}
           private-key: ${{ secrets.ESPHOME_GITHUB_APP_PRIVATE_KEY }}
 
-      # release-drafter v7 reads its `token` input (default github.token) and
-      # ignores a GITHUB_TOKEN env var, so the app token must go through `with:`.
-      - name: Draft release
-        uses: release-drafter/release-drafter@v7.11.0
-        id: release-draft
-        with:
-          token: ${{ steps.generate-token.outputs.token }}
-
       # A release build from an older push could otherwise upload after the
       # cleanup below, leaving its files (with old names, if the version
-      # changed) next to the new build's. Cancel every in-flight release build
-      # and wait for each to finish stopping before touching the assets. A
+      # changed) next to the new build's, or strip the warning that "Draft
+      # release" is about to restore. Cancel every in-flight release build and
+      # wait for each to finish stopping before touching the draft at all. A
       # build triggered after this point is caught by build.yml's
-      # check-release-current job instead.
+      # current-commit checks instead.
       - name: Stop in-flight release builds
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          list_active() {
-            gh api "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&per_page=100" \
-              --jq '.workflow_runs[] | select(.status != "completed") | .id'
-          }
-          if ! run_ids=$(list_active); then
-            echo "::error::Failed to list release builds."
-            exit 1
-          fi
+          # Filter by status on the server rather than scanning the newest
+          # runs: a re-run of an old build keeps its original place in the
+          # run history, however far back that is.
+          run_ids=""
+          for status in requested queued pending waiting in_progress; do
+            if ! ids=$(gh api --paginate \
+                "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&status=${status}&per_page=100" \
+                --jq '.workflow_runs[].id'); then
+              echo "::error::Failed to list ${status} release builds."
+              exit 1
+            fi
+            if [ -n "$ids" ]; then
+              run_ids="${run_ids}${ids}"$'\n'
+            fi
+          done
+          # A run can change status between the queries above; list it once.
+          run_ids=$(printf '%s' "$run_ids" | awk 'NF && !seen[$0]++' | tr '\n' ' ')
           if [ -z "$run_ids" ]; then
             echo "No release builds in flight."
             exit 0
@@ -96,6 +98,14 @@ jobs:
           done
           echo "::error::Release builds still running after 10 minutes:${run_ids}"
           exit 1
+
+      # release-drafter v7 reads its `token` input (default github.token) and
+      # ignores a GITHUB_TOKEN env var, so the app token must go through `with:`.
+      - name: Draft release
+        uses: release-drafter/release-drafter@v7.11.0
+        id: release-draft
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
 
       # Release Drafter has just reset the body to the template, putting the
       # "do not publish" warning back. The assets attached to the draft are

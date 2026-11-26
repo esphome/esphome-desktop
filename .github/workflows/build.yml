@@ -1,19 +1,23 @@
 name: Build
 
 concurrency:
-  # Release builds (workflow_run from a successful Release Drafter run) share a
-  # fixed group so a newer one cancels an older one in flight. A workflow_run
-  # from a cancelled or failed Release Drafter run builds nothing, so it gets a
-  # group of its own instead of cancelling a real release build on its way to
-  # being skipped. PR/dispatch builds use per-ref groups.
+  # Release builds (workflow_run from a successful Release Drafter run) are
+  # grouped by the commit they build, so only another build of the same commit
+  # can cancel one: a re-run of an older build must not cancel the current
+  # head's build and then skip its own stale upload. Release Drafter cancels
+  # superseded release builds itself. A workflow_run from a cancelled or failed
+  # Release Drafter run builds nothing, so it gets a group of its own instead
+  # of cancelling a real release build on its way to being skipped.
+  # PR/dispatch builds use per-ref groups.
   # Release builds deliberately share no group with Release Drafter: any new
   # arrival in a group replaces that group's pending run, so a Build arriving
   # while Release Drafter waited would cancel it. Release Drafter instead
-  # cancels and waits for in-flight release builds itself, and the
-  # check-release-current job skips uploads from builds main has moved past.
+  # cancels and waits for in-flight release builds itself, and the release
+  # jobs skip uploads from builds main has moved past.
   group: >-
     ${{ github.event_name != 'workflow_run' && format('{0}-{1}', github.workflow, github.ref)
-    || github.event.workflow_run.conclusion == 'success' && format('{0}-release', github.workflow)
+    || github.event.workflow_run.conclusion == 'success'
+       && format('{0}-release-{1}', github.workflow, github.event.workflow_run.head_sha)
     || format('{0}-skipped-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: true
 
@@ -773,6 +777,8 @@ jobs:
   # version-bump commit, so with old filenames), and the newer Release Drafter
   # run has already wiped the draft for its own build. Release Drafter cancels
   # in-flight release builds, but one triggered moments later can slip past it.
+  # This job skips such a build quietly; the release job re-checks before
+  # uploading, since a re-run of failed jobs does not re-run this one.
   check-release-current:
     name: Check release build is current
     needs: build
@@ -854,6 +860,28 @@ jobs:
         uses: actions/download-artifact@v8.0.2
         with:
           path: artifacts
+
+      # check-release-current already passed, but "Re-run failed jobs" re-runs
+      # this job alone and reuses that job's old output. Check again on every
+      # attempt, right before the first write to the draft; reaching a stale
+      # commit here means a retry after main moved on, so fail rather than
+      # upload old binaries over the newer build's cleanup.
+      - name: Re-check build is still current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if ! head_sha=$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha'); then
+            echo "::error::Failed to read the head of ${BRANCH}."
+            exit 1
+          fi
+          if [ "$head_sha" != "$BUILD_SHA" ]; then
+            echo "::error::Built ${BUILD_SHA} but ${BRANCH} is now at ${head_sha}; refusing to upload."
+            exit 1
+          fi
 
       # Stale assets are deleted by the Release Drafter workflow when it resets
       # the draft body, before this build starts; --clobber covers a re-run.
