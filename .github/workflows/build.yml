@@ -1,18 +1,21 @@
 name: Build
 
 concurrency:
-  # Release builds (workflow_run) share the `release-assets` group with the
-  # Release Drafter workflow, so nothing ever uploads to the draft release
-  # while Release Drafter is wiping its assets, and no older build can upload
-  # after that wipe:
-  # - A new Release Drafter run cancels any release build in flight.
-  # - A release build never cancels: one that arrives while Release Drafter is
-  #   running waits for it, and is replaced by the next arrival while waiting.
-  #   Cancelling here would kill the Release Drafter run itself, and the build
-  #   it then triggers would skip on its cancelled conclusion.
-  # PR/dispatch builds keep per-ref groups that cancel superseded runs.
-  group: ${{ github.event_name == 'workflow_run' && 'release-assets' || format('{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_run' }}
+  # Release builds (workflow_run from a successful Release Drafter run) share a
+  # fixed group so a newer one cancels an older one in flight. A workflow_run
+  # from a cancelled or failed Release Drafter run builds nothing, so it gets a
+  # group of its own instead of cancelling a real release build on its way to
+  # being skipped. PR/dispatch builds use per-ref groups.
+  # Release builds deliberately share no group with Release Drafter: any new
+  # arrival in a group replaces that group's pending run, so a Build arriving
+  # while Release Drafter waited would cancel it. Release Drafter instead
+  # cancels and waits for in-flight release builds itself, and the
+  # check-release-current job skips uploads from builds main has moved past.
+  group: >-
+    ${{ github.event_name != 'workflow_run' && format('{0}-{1}', github.workflow, github.ref)
+    || github.event.workflow_run.conclusion == 'success' && format('{0}-release', github.workflow)
+    || format('{0}-skipped-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: true
 
 on:
   pull_request:
@@ -765,8 +768,43 @@ jobs:
           echo "$NEEDS_JSON" | jq
           echo "$NEEDS_JSON" | jq -e 'all(.result == "success" or .result == "skipped")'
 
-  release:
+  # A release build triggered by an older Release Drafter run must not upload:
+  # its binaries are from a commit main has moved past (e.g. before the
+  # version-bump commit, so with old filenames), and the newer Release Drafter
+  # run has already wiped the draft for its own build. Release Drafter cancels
+  # in-flight release builds, but one triggered moments later can slip past it.
+  check-release-current:
+    name: Check release build is current
     needs: build
+    if: always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      current: ${{ steps.check.outputs.current }}
+    steps:
+      - name: Compare build commit with main
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if ! head_sha=$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha'); then
+            echo "::error::Failed to read the head of ${BRANCH}."
+            exit 1
+          fi
+          if [ "$head_sha" = "$BUILD_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Built ${BUILD_SHA} but ${BRANCH} is at ${head_sha}; skipping the release upload."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: [build, check-release-current]
     runs-on: ubuntu-latest
     # `always()` + an explicit result check, NOT the bare event guard: without
     # a status function GitHub prepends `success()`, which is false whenever
@@ -774,7 +812,9 @@ jobs:
     # (pull_request only) is always skipped on workflow_run events. That
     # combination silently skipped this job on every release build after
     # #357, stranding the draft release with stale assets.
-    if: always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
+    if: >-
+      always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
+      && needs.check-release-current.outputs.current == 'true'
     permissions:
       contents: write
 

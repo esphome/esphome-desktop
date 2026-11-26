@@ -6,12 +6,13 @@ on:
       - main
   workflow_dispatch:
 
-# Shared with release builds in build.yml (see the comment there). Cancelling
-# in progress stops any older release build before this run deletes the draft
-# release's assets, so that build cannot re-upload stale files afterwards.
+# One run at a time, never cancelled mid-run: the version-bump commit at the
+# end of a run triggers the next one, which waits here. A run still waiting
+# when yet another push arrives is replaced by it; the newer run drafts the
+# same release from all merged PRs, so nothing is lost.
 concurrency:
-  group: release-assets
-  cancel-in-progress: true
+  group: release-drafter
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -19,6 +20,9 @@ jobs:
   release-drafter:
     runs-on: ubuntu-latest
     environment: release-drafter
+    permissions:
+      # Cancel in-flight release builds before wiping the draft's assets.
+      actions: write
     steps:
       - name: Generate a token
         id: generate-token
@@ -34,6 +38,64 @@ jobs:
         id: release-draft
         with:
           token: ${{ steps.generate-token.outputs.token }}
+
+      # A release build from an older push could otherwise upload after the
+      # cleanup below, leaving its files (with old names, if the version
+      # changed) next to the new build's. Cancel every in-flight release build
+      # and wait for each to finish stopping before touching the assets. A
+      # build triggered after this point is caught by build.yml's
+      # check-release-current job instead.
+      - name: Stop in-flight release builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          list_active() {
+            gh api "repos/${REPO}/actions/workflows/build.yml/runs?event=workflow_run&per_page=100" \
+              --jq '.workflow_runs[] | select(.status != "completed") | .id'
+          }
+          if ! run_ids=$(list_active); then
+            echo "::error::Failed to list release builds."
+            exit 1
+          fi
+          if [ -z "$run_ids" ]; then
+            echo "No release builds in flight."
+            exit 0
+          fi
+          for id in $run_ids; do
+            echo "Cancelling release build $id"
+            # A run that finishes on its own meanwhile rejects the cancel;
+            # the wait below is what decides success.
+            gh api -X POST "repos/${REPO}/actions/runs/${id}/cancel" --silent || true
+          done
+          # Up to 10 minutes; force-cancel anything still running after 5.
+          for attempt in $(seq 1 60); do
+            sleep 10
+            remaining=""
+            for id in $run_ids; do
+              if ! status=$(gh api "repos/${REPO}/actions/runs/${id}" --jq '.status'); then
+                echo "::error::Failed to read the status of run $id."
+                exit 1
+              fi
+              if [ "$status" != "completed" ]; then
+                remaining="$remaining $id"
+              fi
+            done
+            if [ -z "$remaining" ]; then
+              echo "All release builds stopped."
+              exit 0
+            fi
+            run_ids=$remaining
+            if [ "$attempt" -eq 30 ]; then
+              for id in $run_ids; do
+                echo "Force-cancelling release build $id"
+                gh api -X POST "repos/${REPO}/actions/runs/${id}/force-cancel" --silent || true
+              done
+            fi
+          done
+          echo "::error::Release builds still running after 10 minutes:${run_ids}"
+          exit 1
 
       # Release Drafter has just reset the body to the template, putting the
       # "do not publish" warning back. The assets attached to the draft are
