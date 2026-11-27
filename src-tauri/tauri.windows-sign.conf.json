@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "pwsh",
+        "args": [
+          "-NoProfile",
+          "-NonInteractive",
+          "-File",
+          "../build-scripts/windows_sign.ps1",
+          "%1"
+        ]
+      }
+    }
+  }
+}

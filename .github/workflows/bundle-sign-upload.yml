@@ -1,0 +1,657 @@
+name: Bundle, sign and upload release
+
+# Bundles and signs a release build and uploads it to the draft release.
+# Called from build.yml once its build matrix succeeds on a release
+# (workflow_run) run, never on its own: it runs inside the caller's run, so it
+# shares that run's artifacts, concurrency group and event context
+# (github.event.workflow_run.head_sha below is the commit build.yml checked
+# out). It declares no concurrency of its own, which would put it in the
+# caller's group and deadlock against it.
+#
+# Kept apart from build.yml so the jobs that hold signing credentials sit in
+# one file, with the secrets they take listed below rather than inherited.
+
+on:
+  workflow_call:
+    inputs:
+      tauri-cli-version:
+        description: Exact tauri-cli version build.yml's resolve-tauri-cli job picked.
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  # build.yml's matrix runs pip installs, crate build scripts and
+  # prepare_bundle.sh, so it gets no signing credential: it compiles the
+  # Windows and macOS apps without bundling them, and builds the Linux bundles
+  # with `--no-sign`. The jobs below finish and sign that output inside the
+  # `release` environment, and run only:
+  #
+  # - GitHub's own actions, Python's stdlib (restore_unbundled_app.py) and
+  #   repo scripts;
+  # - cargo-binstall 1.27.0 from its GitHub release (not checksummed; if its
+  #   self-install fails, its installer reinstalls the latest binstall with
+  #   binstall itself), and the exact tauri-cli version resolved for the run
+  #   from Tauri's own GitHub release (`crate-meta-data` only, never a
+  #   third-party build or a compile);
+  # - `cargo metadata --no-deps` (no compile, no build scripts);
+  # - Windows: azure/login; the ArtifactSigning 0.1.8 module from PSGallery
+  #   (pinned by version, not hash; Microsoft-published), which fetches the
+  #   Windows SDK build tools, its signing client and the dotnet `sign` CLI
+  #   from nuget.org at sign time; signtool; and the NSIS toolchain and
+  #   plugins the bundler downloads and hash-checks. The sign command,
+  #   makensis and the plugins run as children of cargo-tauri, so they
+  #   inherit the updater key from its environment;
+  # - macOS: Apple's codesign, notarytool (with an App Store Connect API
+  #   key) and stapler.
+  #
+  # Each of those already shapes the signed output, so trusting it with the
+  # credentials adds no new party. A step can affect every later step in its
+  # job, and on Windows `id-token: write` lets any step request an Azure
+  # token, so nothing outside that list runs in these jobs at all, before or
+  # after the login. In particular nothing from the build output is executed
+  # here (no smoke test of the bundled Python): the CI build legs run the
+  # installed app instead.
+  #
+  # The build output these jobs sign is still untrusted. The tarball the
+  # Windows and macOS jobs unpack is checked member by member, unpacked into
+  # a staging directory and checked again on the real filesystem before any
+  # credential is in reach (see restore_unbundled_app.py), so it cannot plant
+  # a config, a script or a link the bundler would follow. It can still carry
+  # a malicious app or Python tree, which then gets signed: this guards the
+  # credentials, not the build's output.
+
+  # Linux: the updater .sig for each bundle, made from the final files (the
+  # AppImage after Python injection).
+  sign-linux:
+    name: Sign Linux updater bundles
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: Check signing credentials
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not set"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+          sparse-checkout: |
+            .python-version
+            .github/scripts
+            src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
+      # Each artifact into its own directory (no merge-multiple), so one
+      # artifact cannot overwrite another's file; check_release_artifacts.py
+      # then requires each to hold only the file it is named after.
+      - name: Download Linux bundles
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: "*.{AppImage,deb,rpm}"
+          path: linux-bundles
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Check Linux bundles
+        run: python3 .github/scripts/check_release_artifacts.py linux-bundles linux-bundles
+
+      - name: Install Tauri CLI
+        uses: $/.github/actions/install-tauri-cli
+        with:
+          version: ${{ inputs.tauri-cli-version }}
+          strategies: crate-meta-data
+          github-token: ${{ github.token }}
+
+      # --app-version binds each signature to the release version, as
+      # `cargo tauri build` does for the bundles it signs itself.
+      - name: Sign Linux bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unexpected app version in tauri.conf.json: '$version'"
+            exit 1
+          fi
+          mkdir -p linux-signatures
+          if ! bundles=$(find linux-bundles -type f); then
+            echo "::error::could not list the Linux bundles"
+            exit 1
+          fi
+          while IFS= read -r bundle; do
+            cargo tauri signer sign --app-version "$version" "$bundle"
+            mv "${bundle}.sig" linux-signatures/
+            echo "Signed: $bundle"
+          done <<< "$bundles"
+          ls -la linux-signatures
+
+      - name: Upload Linux updater signatures
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: linux-updater-signatures
+          path: linux-signatures/*.sig
+          if-no-files-found: error
+
+  # Windows: every unsigned PE file in the resource trees is signed in one
+  # batch first (windows_presign_resources.ps1, which also covers the .pyd
+  # files Tauri never signs). Tauri's bundler then calls the signCommand from
+  # src-tauri/tauri.windows-sign.conf.json for the app executable (after
+  # patching in its bundle type), the NSIS plugins (which it fetches and
+  # hash-checks), the uninstaller and the installer, and makes the updater
+  # .sig from the signed installer.
+  bundle-sign-windows:
+    name: Bundle and sign windows-x64
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+      # azure/login exchanges the job's OIDC token for an Azure credential.
+      id-token: write
+    timeout-minutes: 60
+    steps:
+      - name: Check signing credentials
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+              AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not set"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+
+      - name: Restore unbundled app
+        uses: $/.github/actions/restore-unbundled-app
+        with:
+          target: windows-x64
+          binary: target/release/esphome-desktop.exe
+
+      - name: Install Tauri CLI
+        uses: $/.github/actions/install-tauri-cli
+        with:
+          version: ${{ inputs.tauri-cli-version }}
+          strategies: crate-meta-data
+          github-token: ${{ github.token }}
+
+      # Same module version azure/artifact-signing-action@v2.0.0 installs.
+      - name: Install ArtifactSigning module
+        shell: pwsh
+        run: Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Repository PSGallery -Force
+
+      - name: Log in to Azure
+        uses: azure/login@v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign bundled resources
+        shell: pwsh
+        run: ./build-scripts/windows_presign_resources.ps1
+
+      # RUSTUP_TOOLCHAIN skips installing the pinned lint toolchain from
+      # src-tauri/rust-toolchain.toml: nothing is compiled here, and the
+      # bundler only runs `cargo metadata --no-deps`.
+      - name: Bundle and sign NSIS installer
+        shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo tauri bundle --verbose --bundles nsis \
+            --config src-tauri/tauri.release.conf.json \
+            --config src-tauri/tauri.windows-sign.conf.json
+
+      - name: Verify installer signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($files.Count -ne 1) {
+            throw "expected exactly one NSIS installer, found $($files.Count)"
+          }
+          $sig = Get-AuthenticodeSignature $files[0].FullName
+          Write-Host "$($files[0].Name): $($sig.Status) ($($sig.SignerCertificate.Subject))"
+          if ($sig.Status -ne 'Valid') {
+            throw "Authenticode signature on $($files[0].Name) is $($sig.Status)"
+          }
+
+      - name: Upload NSIS
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          archive: false
+
+      - name: Upload NSIS updater signature
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe.sig
+          archive: false
+
+  # macOS: the Python bundle's Mach-O files are signed first (inside-out, they
+  # must be signed before they are sealed into the .app), then Tauri signs
+  # and notarizes the .app and builds the DMG and the updater .app.tar.gz
+  # with its .sig.
+  bundle-sign-macos:
+    name: Bundle and sign ${{ matrix.target }}
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            rust_target: aarch64-apple-darwin
+            arch: aarch64
+          - target: macos-x64
+            rust_target: x86_64-apple-darwin
+            arch: x64
+    # Notarization waits on Apple, and a DMG flake retries the whole bundle.
+    timeout-minutes: 60
+    steps:
+      - name: Check signing credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+              APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_PRIVATE_KEY \
+              TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not set"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+
+      - name: Restore unbundled app
+        uses: $/.github/actions/restore-unbundled-app
+        with:
+          target: ${{ matrix.target }}
+          binary: target/${{ matrix.rust_target }}/release/esphome-desktop
+
+      - name: Install Tauri CLI
+        uses: $/.github/actions/install-tauri-cli
+        with:
+          version: ${{ inputs.tauri-cli-version }}
+          strategies: crate-meta-data
+          github-token: ${{ github.token }}
+
+      # A random keychain password rather than one derived from the run, and
+      # the .p12 removed once imported.
+      - name: Import Apple certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_FILE="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_FILE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_FILE" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERT_FILE"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Sign Python bundle binaries
+        run: ./build-scripts/sign_python_bundle.sh
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+
+      # Notarization authenticates with an App Store Connect API key, which
+      # notarytool reads from a .p8 file. APPLE_API_KEY_PATH tells Tauri where
+      # it is; the runner is discarded after the job.
+      - name: Write App Store Connect API key
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey.p8"
+          (umask 077 && printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key_path")
+          if ! grep -q -- '-----BEGIN PRIVATE KEY-----' "$key_path"; then
+            echo "::error::APPLE_API_PRIVATE_KEY is not a .p8 private key"
+            exit 1
+          fi
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      # RUSTUP_TOOLCHAIN skips installing the pinned lint toolchain from
+      # src-tauri/rust-toolchain.toml: nothing is compiled here, and the
+      # bundler only runs `cargo metadata --no-deps`.
+      - name: Bundle, sign and notarize
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+          RUSTUP_TOOLCHAIN: stable
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ./build-scripts/macos_build_retry.sh bundle --verbose \
+            --target "$RUST_TARGET" \
+            --config src-tauri/tauri.release.conf.json
+
+      # Tauri reports success without signing or notarizing when it has no
+      # identity or notarization account, so check the result itself: a valid
+      # deep signature, Gatekeeper acceptance (which needs notarization) and a
+      # stapled ticket.
+      - name: Verify app signature and notarization
+        env:
+          BUNDLE_DIR: src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=("$BUNDLE_DIR"/*.app)
+          if [ "${#apps[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one .app in $BUNDLE_DIR, found ${#apps[@]}"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          spctl --assess --type execute --verbose=2 "${apps[0]}"
+          xcrun stapler validate "${apps[0]}"
+
+      # Tauri notarizes the .app but not the DMG it ships in. Sign the DMG
+      # (idempotent if Tauri already did), notarize and staple it, so the
+      # download itself passes Gatekeeper and opens offline.
+      - name: Sign, notarize and staple DMG
+        env:
+          DMG_DIR: src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=("$DMG_DIR"/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one .dmg in $DMG_DIR, found ${#dmgs[@]}"
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+          xcrun notarytool submit "$dmg" --wait \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
+          xcrun stapler staple "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+          xcrun stapler validate "$dmg"
+
+      # The macOS updater format is .app.tar.gz, which Tauri names after the
+      # product (no version or arch). Rename per-arch so the two macOS jobs'
+      # uploads don't collide on the release.
+      - name: Stage macOS updater artifact
+        shell: bash
+        env:
+          BUNDLE_DIR: src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in "$BUNDLE_DIR"/*.app.tar.gz; do
+            base="$(basename "$f" .app.tar.gz)"
+            new="$BUNDLE_DIR/${base}_${ARCH}.app.tar.gz"
+            mv "$f" "$new"
+            if [[ -f "${f}.sig" ]]; then
+              mv "${f}.sig" "${new}.sig"
+            fi
+            echo "Staged: $new"
+          done
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/*.dmg
+          archive: false
+
+      - name: Upload macOS updater bundle
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app.tar.gz
+          archive: false
+
+      - name: Upload macOS updater signature
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/*.app.tar.gz.sig
+          archive: false
+
+  # Deletes the intermediate tarballs once every bundle job has succeeded. A
+  # job of its own so the credentialed bundle jobs don't need
+  # `actions: write`, and gated on both succeeding so a failed bundle job can
+  # still be re-run on its own against the tarball its build leg left.
+  delete-unbundled-apps:
+    name: Delete unbundled apps
+    needs: [bundle-sign-windows, bundle-sign-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete windows-x64 unbundled app
+        uses: $/.github/actions/delete-unbundled-app
+        with:
+          target: windows-x64
+          github-token: ${{ github.token }}
+
+      - name: Delete macos-arm64 unbundled app
+        uses: $/.github/actions/delete-unbundled-app
+        with:
+          target: macos-arm64
+          github-token: ${{ github.token }}
+
+      - name: Delete macos-x64 unbundled app
+        uses: $/.github/actions/delete-unbundled-app
+        with:
+          target: macos-x64
+          github-token: ${{ github.token }}
+
+  upload-release-assets:
+    name: Upload release assets
+    needs: [sign-linux, bundle-sign-windows, bundle-sign-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # No saved git credential: this job holds a contents: write token and
+      # runs PyPI packages (cryptography and check-jsonschema, hash-locked in
+      # uv.lock), so the token only ever reaches the steps that pass it to gh.
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+          # The release scripts, the JSON Schema latest.json must match,
+          # tauri.conf.json for the updater pubkey, .python-version for
+          # setup-python, and the uv project that locks the release tools.
+          sparse-checkout: |
+            .python-version
+            .github/latest.schema.json
+            .github/scripts
+            src-tauri/tauri.conf.json
+            pyproject.toml
+            uv.lock
+          sparse-checkout-cone-mode: false
+
+      - name: Find draft release
+        id: find-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Find the most recent draft release
+          release_json=$(gh api "repos/$REPO/releases" \
+            --jq '[.[] | select(.draft == true)] | first')
+          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
+            echo "::error::No draft release found"
+            exit 1
+          fi
+          release_id=$(echo "$release_json" | jq -r '.id')
+          tag_name=$(echo "$release_json" | jq -r '.tag_name')
+          # A draft that lost its tag carries an untagged-* placeholder, which
+          # would then be published as the release tag.
+          if [[ "$tag_name" == untagged-* ]]; then
+            echo "::error::Draft release $release_id has placeholder tag $tag_name"
+            exit 1
+          fi
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "Found draft release: $tag_name (ID: $release_id)"
+
+      # Only the release files, by name: other artifacts in the run (the
+      # translations, the intermediate tarballs, anything a build leg added)
+      # must never reach the release. Each lands in its own directory (no
+      # merge-multiple), so one artifact cannot overwrite another's file. The
+      # check below then requires exactly the expected set, each artifact
+      # holding only the file it is named after.
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: "{*.exe,*.sig,*.dmg,*.app.tar.gz,*.AppImage,*.deb,*.rpm,linux-updater-signatures}"
+          path: artifacts
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Check release artifacts
+        run: python3 .github/scripts/check_release_artifacts.py release artifacts
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      # Tauri only warns when it signs with a key that doesn't match the
+      # updater pubkey, and the installed app would then refuse the update.
+      - name: Verify updater signatures
+        run: |
+          uv run --locked --only-group release \
+            python .github/scripts/verify_updater_signatures.py artifacts
+
+      # Stale assets are deleted by the Release Drafter workflow when it resets
+      # the draft body, before this build starts; --clobber covers a re-run.
+      - name: Upload assets to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.find-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          find artifacts -type f -print0 | while IFS= read -r -d '' file; do
+            echo "Uploading: $file"
+            gh release upload "$TAG" "$file" --repo "$REPO" --clobber
+          done
+
+      # Build latest.json from the per-platform .sig files now attached to
+      # the draft release. See .github/scripts/generate_latest_json.py for
+      # the full manifest shape and the rationale around the `downloads`
+      # section (formats the Tauri updater doesn't ship, e.g. .dmg) and the
+      # desktop.esphome.io schema reference.
+      - name: Generate latest.json for updater
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.find-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: python3 .github/scripts/generate_latest_json.py
+
+      - name: Validate latest.json against schema
+        run: |
+          uv run --locked --only-group release \
+            check-jsonschema --schemafile .github/latest.schema.json latest.json
+
+      - name: Upload latest.json to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.find-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" latest.json --repo "$REPO" --clobber
+
+      - name: Remove assets-pending warning from release body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.find-release.outputs.release_id }}
+          TAG: ${{ steps.find-release.outputs.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Fetch the current release, all of it: a PATCH to a draft resets
+          # any writable field it leaves out (a missing tag_name becomes an
+          # untagged-* placeholder), so every one is sent back below.
+          release=$(gh api "repos/$REPO/releases/$RELEASE_ID")
+          body=$(jq -r '.body // ""' <<< "$release")
+          # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker), if present
+          new_body=$(echo "$body" | sed '/^> \[!CAUTION\]/,/<!-- ASSETS_PENDING -->/d')
+          # Ensure any remaining ASSETS_PENDING markers are removed even if the caution block was edited/removed
+          new_body=$(echo "$new_body" | sed 's/<!-- ASSETS_PENDING -->//g')
+          # Remove any leading blank lines left behind
+          new_body=$(echo "$new_body" | sed '/./,$!d')
+          # Only update the release body if it has actually changed, keeping it as a draft
+          if [ "$new_body" != "$body" ]; then
+            jq --arg body "$new_body" --arg tag "$TAG" \
+              '{tag_name: $tag, target_commitish, name, body: $body, prerelease, draft: true}' \
+              <<< "$release" \
+              | gh api "repos/$REPO/releases/$RELEASE_ID" --method PATCH --input - --silent
+          fi

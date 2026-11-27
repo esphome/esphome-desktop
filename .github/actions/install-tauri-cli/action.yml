@@ -1,0 +1,88 @@
+name: Install Tauri CLI
+description: >-
+  Installs a prebuilt cargo-tauri at an exact version via cargo-binstall.
+  build.yml's resolve-tauri-cli job picks that version once per run (the
+  newest patch in the locked `tauri` crate's minor line), so the release
+  build and the bundle jobs that finish it run the same CLI. Expects cargo to
+  be on PATH.
+
+inputs:
+  version:
+    description: Exact tauri-cli version to install, e.g. 2.12.6.
+    required: true
+  strategies:
+    description: >-
+      cargo-binstall --strategies list. The default falls back to a
+      third-party cargo-quickinstall build and then to compiling from
+      crates.io if Tauri's own release has no prebuilt for the platform.
+      The bundle-sign-upload.yml jobs that hold signing
+      credentials pass `crate-meta-data` alone, so they only ever run the
+      binary from Tauri's own GitHub release.
+    required: false
+    default: crate-meta-data,quick-install,compile
+  github-token:
+    description: >-
+      Token cargo-binstall uses to query GitHub releases without hitting the
+      anonymous rate limit. Pass the workflow's github.token.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The version is a job output, so reject anything but a plain x.y.z
+    # before it reaches a shell.
+    - name: Validate Tauri CLI version
+      shell: bash
+      env:
+        TAURI_CLI_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$TAURI_CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::unexpected tauri-cli version: '$TAURI_CLI_VERSION'"
+          exit 1
+        fi
+
+    # A prebuilt cargo-tauri via cargo-binstall (seconds) rather than compiling
+    # tauri-cli from source, which dominated the per-job time at 5-10 min. No
+    # cache is involved, so this is immune to the cache eviction that makes a
+    # small per-binary cache unreliable at the repo's 10 GB cache cap. The
+    # action installs the latest binstall unless told otherwise, so the
+    # version is pinned to the action's own tag.
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@v1.27.0
+      with:
+        version: 1.27.0
+
+    # Inputs reach the script only through env, never via ${{ }}
+    # interpolation into the run block. --locked makes the compile fallback
+    # use the crate's published Cargo.lock; without it cargo resolves the
+    # newest semver-compatible deps, and a newer tauri-bundler can break the
+    # build of an older tauri-cli.
+    #
+    # tauri-cli's binstall metadata defaults to .tgz and only switches
+    # x86_64-apple-darwin to .zip, but Tauri publishes both macOS builds as
+    # .zip. Without --pkg-fmt zip, binstall finds no aarch64-apple-darwin
+    # asset on the arm64 runners and falls back to the x86_64 build, which
+    # only runs under Rosetta.
+    - name: Install Tauri CLI (prebuilt)
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        TAURI_CLI_VERSION: ${{ inputs.version }}
+        STRATEGIES: ${{ inputs.strategies }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+      run: |
+        set -euo pipefail
+        pkg_fmt=()
+        if [[ "$RUNNER_OS_NAME" == "macOS" ]]; then
+          pkg_fmt=(--pkg-fmt zip)
+        fi
+        cargo binstall --no-confirm --locked \
+          --strategies "$STRATEGIES" "${pkg_fmt[@]}" \
+          tauri-cli --version "=$TAURI_CLI_VERSION"
+        installed=$(cargo tauri --version)
+        echo "Installed $installed"
+        if [[ "$installed" != "tauri-cli $TAURI_CLI_VERSION" ]]; then
+          echo "::error::expected tauri-cli $TAURI_CLI_VERSION, got '$installed'"
+          exit 1
+        fi

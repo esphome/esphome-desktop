@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate the latest.json release manifest.
 
-Invoked from the release job in .github/workflows/build.yml after build
-artifacts have been attached to the draft release. Produces a JSON manifest
-with:
+Invoked from the upload-release-assets job in
+.github/workflows/bundle-sign-upload.yml after build artifacts have been
+attached to the draft release. Produces a JSON manifest with:
 
   * `platforms` — Tauri updater bundles + signatures (consumed by
     tauri-plugin-updater for in-app self-updates).
@@ -60,8 +60,9 @@ from _gha import warn as _warn  # noqa: E402
 
 # (Tauri updater target, regex matching the .sig asset name)
 # This list is the expected set for a release: one entry per updater bundle
-# the `bundles` legs of the build matrix in .github/workflows/build.yml sign
-# and upload, and the release job only runs once every leg is green. Anything
+# the build matrix in .github/workflows/build.yml and the bundle-sign-* jobs
+# in .github/workflows/bundle-sign-upload.yml sign and upload, and the
+# upload-release-assets job only runs once every leg is green. Anything
 # missing here is a drift between the two, not a legitimately partial build —
 # see `main`.
 # fmt: off

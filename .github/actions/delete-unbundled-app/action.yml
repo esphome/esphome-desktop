@@ -1,0 +1,43 @@
+name: Delete unbundled app
+description: >-
+  Deletes the `intermediate-<target>-unbundled.tar` artifact from the current
+  run. bundle-sign-upload.yml's delete-unbundled-apps job calls this once every
+  bundle job has succeeded, so a failed bundle job can still be re-run on its
+  own against the artifact the build job left. The calling job needs
+  `actions: write`.
+
+inputs:
+  target:
+    description: Build matrix target the tarball was made for, e.g. windows-x64.
+    required: true
+  github-token:
+    description: >-
+      Token with `actions: write` on this repository. Pass the workflow's
+      github.token.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Delete unbundled app artifact
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARTIFACT_NAME: intermediate-${{ inputs.target }}-unbundled.tar
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        if ! ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?name=$ARTIFACT_NAME" \
+            --jq '.artifacts[].id'); then
+          echo "::error::could not list artifacts for run $RUN_ID"
+          exit 1
+        fi
+        if [ -z "$ids" ]; then
+          echo "::error::artifact $ARTIFACT_NAME not found on run $RUN_ID"
+          exit 1
+        fi
+        for id in $ids; do
+          gh api -X DELETE "repos/$REPO/actions/artifacts/$id"
+          echo "Deleted artifact $ARTIFACT_NAME ($id)"
+        done

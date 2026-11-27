@@ -1,0 +1,45 @@
+name: Restore unbundled app
+description: >-
+  Downloads the `intermediate-<target>-unbundled.tar` artifact a release build
+  leg uploads (the compiled app plus the python/, git/ and ccache/ resource
+  trees) and unpacks it back into src-tauri/, ready for `cargo tauri bundle`.
+  The tarball comes from a job that runs third-party code, so
+  .github/scripts/restore_unbundled_app.py rejects it unless every member is
+  the app binary or sits inside a resource tree. Run it before any step that
+  holds a credential. bundle-sign-upload.yml's delete-unbundled-apps job
+  deletes the artifact once every bundle job has succeeded.
+
+inputs:
+  target:
+    description: Build matrix target the tarball was made for, e.g. windows-x64.
+    required: true
+  binary:
+    description: >-
+      The app binary's path relative to src-tauri/, as the build leg packed
+      it, e.g. target/release/esphome-desktop.exe.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download unbundled app
+      uses: actions/download-artifact@v8.0.2
+      with:
+        name: intermediate-${{ inputs.target }}-unbundled.tar
+        path: ${{ runner.temp }}/unbundled
+
+    # The repo's pinned Python, so the unpack runs the same tarfile (and its
+    # `data` extraction filter) on every runner.
+    - name: Set up Python
+      uses: actions/setup-python@v7.0.0
+      with:
+        python-version-file: .python-version
+
+    - name: Unpack unbundled app
+      shell: bash
+      env:
+        DOWNLOAD_DIR: ${{ runner.temp }}/unbundled
+        BINARY: ${{ inputs.binary }}
+      run: |
+        python .github/scripts/restore_unbundled_app.py \
+          --tarball-dir "$DOWNLOAD_DIR" --binary "$BINARY"

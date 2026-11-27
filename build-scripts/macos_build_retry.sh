@@ -1,5 +1,5 @@
 #!/bin/bash
-# Retry wrapper for `cargo tauri build` on macOS CI.
+# Retry wrapper for `cargo tauri build` / `cargo tauri bundle` on macOS CI.
 #
 # The DMG stage (Tauri's generated bundle_dmg.sh, a fork of create-dmg)
 # intermittently fails on GitHub's macOS runners. It mounts a scratch
@@ -21,11 +21,30 @@
 # any scratch volume/image a wedged attempt left behind so it can't keep the
 # device busy on the next try.
 #
-# Usage: ./build-scripts/macos_build_retry.sh [args for `cargo tauri build`]
+# Usage: ./build-scripts/macos_build_retry.sh <build|bundle> [args for that
+# `cargo tauri` subcommand]
+#
+# CI builds use `build` (compile + bundle in one job). Release builds compile
+# in the build matrix and run `bundle` in the bundle-sign-macos job, where the
+# signing credentials live; see .github/workflows/bundle-sign-upload.yml.
 # Paths are derived from the script location, so the working directory does
 # not matter.
 
 set -euo pipefail
+
+if (( $# < 1 )); then
+  echo "usage: $0 <build|bundle> [cargo tauri args...]" >&2
+  exit 2
+fi
+SUBCOMMAND="$1"
+shift
+case "$SUBCOMMAND" in
+  build|bundle) ;;
+  *)
+    echo "unsupported cargo tauri subcommand '${SUBCOMMAND}' (expected build or bundle)" >&2
+    exit 2
+    ;;
+esac
 
 ATTEMPTS=3
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +80,7 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   # write failure can't mask a real cargo result. Drop errexit for the pipeline
   # since a non-zero build is expected and handled explicitly below.
   set +e
-  cargo tauri build "$@" 2>&1 | tee "$build_log"
+  cargo tauri "$SUBCOMMAND" "$@" 2>&1 | tee "$build_log"
   status="${PIPESTATUS[0]}"
   set -e
   if (( status == 0 )); then
@@ -69,9 +88,14 @@ for ((attempt = 1; attempt <= ATTEMPTS; attempt++)); do
   fi
 
   # Only the DMG bundling stage flakes. Anything else is deterministic, so fail
-  # fast instead of paying the build cost two more times.
-  if ! grep -qiE 'bundle_dmg|hdiutil|resource busy|failed to bundle' "$build_log"; then
-    echo "cargo tauri build failed with a non-DMG error; not retrying (exit ${status})" >&2
+  # fast instead of paying the build cost two more times. Match only the
+  # error itself: Tauri prints "failed to bundle" for every bundle error, and
+  # at --verbose always logs "Running bundle_dmg.sh", so either would also
+  # retry (and resubmit to Apple) a notarization rejection or a later
+  # updater-signing failure. A DMG failure is reported as "error running
+  # bundle_dmg.sh", with hdiutil's own error in its output.
+  if ! grep -qiE 'error running bundle_dmg\.sh|hdiutil: .*(failed|resource busy)' "$build_log"; then
+    echo "cargo tauri ${SUBCOMMAND} failed with a non-DMG error; not retrying (exit ${status})" >&2
     exit "$status"
   fi
 

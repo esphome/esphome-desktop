@@ -370,10 +370,10 @@ def test_main_error_names_every_missing_platform(
 
 # --- schema drift ---------------------------------------------------------
 #
-# The full check-jsonschema validation only runs in the release job, after
-# every asset is already attached to the draft release, so a schema pattern
-# that drifts from the generator (a target list that grew, an alternation
-# missing a key) would burn a release run before anyone saw it. Pin the two
+# The full check-jsonschema validation only runs in the upload-release-assets
+# job, after every asset is already attached to the draft release, so a schema
+# pattern that drifts from the generator (a target list that grew, an
+# alternation missing a key) would burn a release run before anyone saw it. Pin the two
 # patterns the generator's output must satisfy here, where PR CI runs them.
 # Anchoring note: JSON Schema `pattern` uses search semantics, so `re.search`
 # is the faithful check; the schema's own `^...$` anchors do the anchoring.

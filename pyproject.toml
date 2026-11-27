@@ -17,10 +17,18 @@ package = false
 # the prek hooks and contributors all run these versions via `uv run`.
 [dependency-groups]
 dev = [
+    "cryptography==50.0.2",
     "prek==0.5.11",
     "pytest==9.2.0",
     "pyyaml==6.0.3",
     "ruff==0.17.5",
+]
+# Release-pipeline tools, run by bundle-sign-upload.yml's upload-release-assets
+# job with `uv run --only-group release`. Locked with hashes in uv.lock, so
+# that job (which holds a contents: write token) runs no unpinned PyPI code.
+release = [
+    "check-jsonschema==0.39.0",
+    "cryptography==50.0.2",
 ]
 
 [tool.ruff]

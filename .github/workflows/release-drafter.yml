@@ -10,6 +10,9 @@ permissions: {}
 
 jobs:
   release-drafter:
+    # A manual dispatch can pick any branch, and a successful run here starts
+    # the signed release build, so only main may draft.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: release-drafter
     steps:
@@ -31,8 +34,9 @@ jobs:
       # Release Drafter has just reset the body to the template, putting the
       # "do not publish" warning back. The assets attached to the draft are
       # from the previous build and no longer match the new changes, so drop
-      # them all; the build workflow's release job uploads a fresh set and
-      # then removes the warning again.
+      # them all; the Build workflow's upload-release-assets job (in
+      # bundle-sign-upload.yml) uploads a fresh set and then removes the
+      # warning again.
       - name: Delete stale assets from draft release
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
