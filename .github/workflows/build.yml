@@ -62,12 +62,44 @@ jobs:
           echo "$output" | jq
           echo "build=$(echo "$output" | jq -r '.build')" >> "$GITHUB_OUTPUT"
 
+  # One exact tauri-cli version for the whole run (see
+  # .github/scripts/resolve_tauri_cli_version.py), so a release's build leg
+  # and the bundle-sign-upload.yml bundle job that finishes it run the same CLI
+  # even if a patch is published in between.
+  resolve-tauri-cli:
+    name: Resolve Tauri CLI version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          persist-credentials: false
+          sparse-checkout: |
+            .python-version
+            .github/scripts
+            src-tauri/Cargo.lock
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Resolve Tauri CLI version
+        id: resolve
+        run: python3 .github/scripts/resolve_tauri_cli_version.py
+
   # Release builds embed every translated locale (src-tauri/build.rs picks up
   # whatever JSON files sit in src-tauri/translations/ at compile time). The
   # download runs in its own small job so the Lokalise API token is only ever
   # exposed here — never to the build matrix, which runs pip installs and the
   # full bundler. PR builds skip this and build English-only.
-  translations:
+  download-translations:
     name: Download translations from Lokalise
     if: >-
       github.event_name == 'workflow_run' &&
@@ -118,16 +150,16 @@ jobs:
 
   build:
     # Only run release builds when the Release Drafter workflow succeeded AND
-    # the translations job delivered its artifact — a failed Lokalise download
+    # the download-translations job delivered its artifact: a failed Lokalise download
     # must block the release rather than silently shipping English-only
     # binaries. PR/dispatch builds run regardless (translations is skipped
     # there, hence the `always()`).
-    needs: [translations, determine-jobs]
+    needs: [resolve-tauri-cli, download-translations, determine-jobs]
     if: >-
-      always() && (
-        (github.event_name == 'pull_request' && needs.translations.result == 'skipped' && needs.determine-jobs.outputs.build == 'true') ||
-        (github.event_name == 'workflow_dispatch' && needs.translations.result == 'skipped') ||
-        (github.event.workflow_run.conclusion == 'success' && needs.translations.result == 'success')
+      always() && needs.resolve-tauri-cli.result == 'success' && (
+        (github.event_name == 'pull_request' && needs.download-translations.result == 'skipped' && needs.determine-jobs.outputs.build == 'true') ||
+        (github.event_name == 'workflow_dispatch' && needs.download-translations.result == 'skipped') ||
+        (github.event.workflow_run.conclusion == 'success' && needs.download-translations.result == 'success')
       )
     permissions:
       contents: read
@@ -184,7 +216,7 @@ jobs:
           # Release Drafter workflow (the latest push to main).
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-      # Locale files come from the `translations` job (which holds the
+      # Locale files come from the `download-translations` job (which holds the
       # Lokalise credentials); this job never sees the API token. The
       # artifact always carries en.json, so this overwrites the checked-out
       # copy with itself and adds any downloaded locales, which
@@ -204,69 +236,21 @@ jobs:
 
       # Floating `stable` toolchain (the action's default), unlike the pinned
       # lint gates in lint-test.yml.
-      - name: Setup Rust
+      - name: Set up Rust
         uses: $/.github/actions/setup-rust
         with:
           targets: ${{ matrix.rust_target }}
           cache-key: ${{ matrix.target }}
 
-      # Resolve a tauri-cli requirement from the locked `tauri` crate's
-      # major.minor so it tracks Dependabot's cargo bumps automatically (no
-      # hardcoded version to go stale). We pin the minor line, not the exact
-      # patch: `tauri` (the library) and `tauri-cli` publish on independent
-      # cadences, so an exact-patch pin breaks whenever they diverge by a patch
-      # (e.g. library 2.11.5 with no matching CLI 2.11.5). A `~major.minor`
-      # requirement installs the newest CLI patch in the same minor, which Tauri
-      # keeps compatible with the library. Used for the prebuilt install on the
-      # stock jobs below; the AppImage jobs build a pinned fork instead, so they
-      # skip this.
-      - name: Resolve Tauri CLI version
+      # Stock jobs install the prebuilt cargo-tauri resolve-tauri-cli picked
+      # (see the action for the binstall rationale). The AppImage jobs build a
+      # pinned fork instead, so they skip this.
+      - name: Install Tauri CLI
         if: ${{ !matrix.tauri_rev }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ver=$(awk '/^name = "tauri"$/{getline; print}' src-tauri/Cargo.lock \
-            | sed -E 's/version = "(.+)"/\1/' | head -1)
-          # Validate against a strict version charset before trusting it: the
-          # value comes from a PR-editable Cargo.lock, so reject anything with
-          # shell metacharacters / quotes / newlines (defends the $GITHUB_ENV
-          # write and every later use).
-          if [[ ! "$ver" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
-            echo "::error::unexpected tauri version from src-tauri/Cargo.lock: '$ver'"
-            exit 1
-          fi
-          # Derive the minor line (2.11.5 -> 2.11) from the already-validated
-          # string, then hand cargo-binstall a `~2.11` requirement.
-          minor=$(echo "$ver" | cut -d. -f1,2)
-          echo "TAURI_CLI_VERSION=~$minor" >> "$GITHUB_ENV"
-          echo "Resolved tauri-cli requirement: ~$minor (from tauri $ver)"
-
-      # Stock jobs install a prebuilt cargo-tauri via cargo-binstall (seconds)
-      # rather than compiling tauri-cli from source, which dominated the per-job
-      # time at 5-10 min. No cache is involved, so this is immune to the cache
-      # eviction that makes a small per-binary cache unreliable at the repo's
-      # 10 GB cache cap. binstall only falls back to compiling if a platform has
-      # no prebuilt (e.g. aarch64 Linux).
-      - name: Install cargo-binstall
-        if: ${{ !matrix.tauri_rev }}
-        uses: cargo-bins/cargo-binstall@v1.27.0
-
-      # Version reaches the script only through env, never via ${{ }}
-      # interpolation into the run block, so a crafted Cargo.lock cannot inject
-      # shell commands. GITHUB_TOKEN lets binstall query GitHub releases without
-      # hitting the anonymous rate limit. --locked makes the compile fallback
-      # use the crate's published Cargo.lock; without it cargo resolves the
-      # newest semver-compatible deps, and a newer tauri-bundler can break the
-      # build of an older tauri-cli.
-      - name: Install Tauri CLI (prebuilt)
-        if: ${{ !matrix.tauri_rev }}
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cargo binstall --no-confirm --locked \
-            --strategies crate-meta-data,quick-install,compile \
-            tauri-cli --version "$TAURI_CLI_VERSION"
+        uses: $/.github/actions/install-tauri-cli
+        with:
+          version: ${{ needs.resolve-tauri-cli.outputs.version }}
+          github-token: ${{ github.token }}
 
       # The AppImage jobs build tauri-cli from a pinned upstream fork (the
       # "truly portable AppImage" format, tauri-apps/tauri#12491, not yet
@@ -295,29 +279,6 @@ jobs:
         shell: bash
         run: ./build-scripts/prepare_bundle.sh ${{ matrix.target }}
 
-      # macOS-specific signing setup
-      - name: Import Apple certificate
-        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          CERT_FILE=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERT_FILE
-          security create-keychain -p "${{ github.run_id }}" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "${{ github.run_id }}" $KEYCHAIN_PATH
-          security import $CERT_FILE -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "${{ github.run_id }}" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-      - name: Sign Python bundle binaries
-        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: ./build-scripts/sign_python_bundle.sh
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-
       # The Tauri AppImage fork downloads quick-sharun.sh from upstream main and
       # runs it during the build. Its strace step backgrounds each traced binary
       # and kills it via `set -m` job control, which silently no-ops on tty-less
@@ -343,20 +304,21 @@ jobs:
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
 
-      # The release config turns on createUpdaterArtifacts for every Linux
-      # bundle: the AppImage legs need the .AppImage.sig (re-signed later after
-      # Python injection), and the deb/rpm legs need .deb.sig/.rpm.sig so
-      # latest.json can carry linux-*-deb / linux-*-rpm updater targets. A
-      # deb/rpm-installed app dispatches its self-update by the bundle type
+      # The release config still goes in here because it is embedded into the
+      # binary at compile time. `--no-sign` skips the updater .sig files the
+      # config's createUpdaterArtifacts would otherwise make, so the updater
+      # key never enters this job, which runs pip installs and crate build
+      # scripts. bundle-sign-upload.yml's sign-linux job signs the finished
+      # bundles instead: the .AppImage after Python injection, and the
+      # .deb/.rpm so latest.json can carry linux-*-deb / linux-*-rpm updater
+      # targets. A deb/rpm-installed app dispatches its self-update by the bundle type
       # baked into the binary, so without those targets it falls back to the
       # AppImage payload and fails with "invalid updater binary format" (#449).
       - name: Build (Linux Release)
         if: matrix.platform == 'linux' && github.event_name == 'workflow_run'
-        run: cargo tauri build --verbose --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
+        run: cargo tauri build --verbose --no-sign --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
         env:
           TAURI_BUNDLER_NEW_APPIMAGE_FORMAT: true
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Build step - Windows CI
       # `--bundles` so the matrix stays authoritative, as it already is on Linux.
@@ -368,34 +330,60 @@ jobs:
         if: matrix.platform == 'windows' && github.event_name != 'workflow_run'
         run: cargo tauri build --bundles ${{ matrix.bundles }}
 
-      - name: Build (Windows Release with signing)
+      # Windows and macOS release builds only compile here. Bundling and every
+      # signature (Authenticode, Apple codesign + notarization, the updater
+      # .sig) happen in bundle-sign-upload.yml's bundle-sign-* jobs, so none of
+      # those credentials are ever present in this job, which runs pip installs
+      # and crate build scripts. The release config still goes in here because
+      # it is embedded into the binary at compile time.
+      - name: Compile (Windows Release)
         if: matrix.platform == 'windows' && github.event_name == 'workflow_run'
-        run: cargo tauri build --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --no-bundle --config src-tauri/tauri.release.conf.json
 
       # Build step - macOS CI
       - name: Build (macOS CI)
         if: matrix.platform == 'macos' && github.event_name != 'workflow_run'
-        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
+        run: ./build-scripts/macos_build_retry.sh build ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }}
 
-      - name: Build (macOS Release with signing)
+      - name: Compile (macOS Release)
         if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        run: ./build-scripts/macos_build_retry.sh ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --no-bundle ${{ matrix.rust_target && format('--target {0}', matrix.rust_target) || '' }} --config src-tauri/tauri.release.conf.json
 
-      # Locate the built AppImage once. The inject step below repacks it in
-      # place and the re-sign step must sign that same file, so both read this
-      # output rather than repeating the find.
+      # Hand everything `cargo tauri bundle` reads that is not in the checkout
+      # (the compiled app and the resource trees prepare_bundle.sh built) to
+      # the bundle job. A tar rather than a plain artifact upload, because the
+      # artifact zip drops Unix permissions and turns the Python tree's
+      # symlinks into copies; tar keeps both, and keeps the empty git/ and
+      # ccache/ placeholders macOS needs. COPYFILE_DISABLE stops macOS's
+      # bsdtar adding ._* AppleDouble entries for extended attributes, which
+      # would unpack as stray files in the tree codesign seals.
+      # bundle-sign-upload.yml deletes the artifact once every bundle job has
+      # succeeded, and its upload-release-assets job only ever ships the
+      # expected release files.
+      - name: Package unbundled app
+        if: matrix.platform != 'linux' && github.event_name == 'workflow_run'
+        shell: bash
+        env:
+          BIN: target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/esphome-desktop${{ matrix.platform == 'windows' && '.exe' || '' }}
+          TARBALL: intermediate-${{ matrix.target }}-unbundled.tar
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          tar -C src-tauri -cf "$TARBALL" "$BIN" python git ccache
+          ls -la "$TARBALL"
+
+      - name: Upload unbundled app
+        if: matrix.platform != 'linux' && github.event_name == 'workflow_run'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          path: intermediate-${{ matrix.target }}-unbundled.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+      # Locate the built AppImage for the inject step below, which repacks it
+      # in place. Release builds upload it unsigned; bundle-sign-upload.yml's
+      # sign-linux job makes its updater .sig from this final file.
       - name: Locate AppImage
         id: appimage
         if: contains(matrix.bundles, 'appimage')
@@ -409,195 +397,20 @@ jobs:
           printf 'path=%s\n' "${APPIMAGES[0]}" >> "$GITHUB_OUTPUT"
 
       # The sharun-based AppImage format uses DwarFS and does not include Tauri
-      # resources. The build leaves the AppDir intact, so we inject Python into
-      # it and repack with mkdwarfs + the uruntime header.
+      # resources; see the script for how Python is injected and the image
+      # repacked.
       - name: Inject Python into AppImage
         if: contains(matrix.bundles, 'appimage')
-        run: |
-          set -euo pipefail
-
-          APPIMAGE="${{ steps.appimage.outputs.path }}"
-          APPDIR="src-tauri/target/release/bundle/appimage/ESPHome Device Builder.AppDir"
-          echo "Found AppImage: $APPIMAGE"
-          echo "AppDir: $APPDIR"
-
-          # Copy Python bundle into the resource directory that
-          # get_bundled_resource_dir() resolves on Linux: exe_dir/../lib/esphome-desktop/
-          # The binary lives at bin/esphome-desktop, so this becomes lib/esphome-desktop/.
-          RESOURCE_DIR="$APPDIR/lib/esphome-desktop"
-          mkdir -p "$RESOURCE_DIR"
-          cp -r src-tauri/python "$RESOURCE_DIR/python"
-
-          # Bundle libayatana-appindicator3 and its runtime deps.
-          # The tray backend (libappindicator-sys) dlopen()s this library
-          # lazily by bare soname at runtime, so it is absent from the
-          # binary's DT_NEEDED and sharun/lib4bin never bundles it. Without
-          # it the tray silently disappears on the AppImage even on desktops
-          # that support it, e.g. KDE Plasma / GNOME (issue #87). Copy the
-          # library the build runner installed (libayatana-appindicator3-dev)
-          # plus its closure into sharun's lib dir, which is already on the
-          # loader search path and where platform/linux.rs's AppDir fallback
-          # looks for it.
-          LIB_DIR="$APPDIR/shared/lib"
-          mkdir -p "$LIB_DIR"
-
-          APPINDICATOR=""
-          for soname in libayatana-appindicator3.so.1 libappindicator3.so.1; do
-            found=$(ldconfig -p | awk -v s="$soname" '$1 == s { print $NF; exit }')
-            if [ -n "$found" ] && [ -e "$found" ]; then
-              APPINDICATOR="$found"
-              break
-            fi
-          done
-          if [ -z "$APPINDICATOR" ]; then
-            echo "::error::appindicator library not found on build runner; tray would be missing from the AppImage (issue #87)"
-            exit 1
-          fi
-          echo "Bundling appindicator from: $APPINDICATOR"
-
-          # Copy the library plus every non-core object in its dependency
-          # closure into LIB_DIR, but never clobber a library sharun already
-          # bundled (e.g. the gtk/glib the webkit stack pulls in). Skip the
-          # glibc/loader core, which must come from the host to stay
-          # ABI-consistent. ldd already resolves the closure recursively, so a
-          # single pass is enough.
-          copy_dep() {
-            local src="$1" base soname
-            base=$(basename "$src")
-            case "$base" in
-              ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libresolv.so*)
-                return 0 ;;
-            esac
-            # Name the bundled file after the ELF SONAME, not the on-disk
-            # filename. ldconfig/ldd may resolve to a fully-versioned real file
-            # (e.g. libfoo.so.1.2.3), but the loader — and the dlopen() by bare
-            # soname described above — searches by SONAME (libfoo.so.1). Bundle
-            # under the SONAME so runtime resolution finds it; fall back to the
-            # basename only if the object has no SONAME.
-            soname=$(patchelf --print-soname "$src" 2>/dev/null || true)
-            [ -n "$soname" ] && base="$soname"
-            # Skip if sharun already bundled this lib anywhere under shared/,
-            # including the multiarch subdirs (shared/lib/x86_64-linux-gnu, seen
-            # in the wild per platform/linux.rs) — copying a second host-sourced
-            # copy risks a version-skewed duplicate of a lib the app loads.
-            [ -n "$(find "$APPDIR/shared" -name "$base" -print -quit 2>/dev/null)" ] && return 0
-            cp -L "$src" "$LIB_DIR/$base"
-            # Resolve co-bundled deps relative to the library's own directory.
-            # patchelf is installed by linux-tauri-deps; a failure here would
-            # ship a lib that resolves against the host and silently regress the
-            # tray, so fail the build loud rather than continue.
-            if ! patchelf --set-rpath '$ORIGIN' "$LIB_DIR/$base"; then
-              echo "::error::patchelf --set-rpath failed for $base; refusing to ship an AppImage whose bundled libs resolve against the host (issue #87)"
-              exit 1
-            fi
-          }
-
-          copy_dep "$APPINDICATOR"
-          while read -r dep; do
-            [ -n "$dep" ] && [ -e "$dep" ] && copy_dep "$dep"
-          done < <(ldd "$APPINDICATOR" | awk '/=> \// { print $3 }')
-
-          # Extract the uruntime header from the existing AppImage
-          chmod +x "$APPIMAGE"
-          OFFSET=$("$APPIMAGE" --appimage-offset)
-          dd if="$APPIMAGE" of=runtime.bin bs="$OFFSET" count=1
-
-          # Download mkdwarfs (same version used by quick-sharun.sh). The
-          # release asset name uses uname -m verbatim (x86_64 / aarch64).
-          # mkdwarfs repacks the AppImage shipped to every Linux user, so a
-          # tampered or truncated download would corrupt the published artifact.
-          # The dwarfs project publishes no SHA256SUMS asset, so pin the known
-          # hash per arch and verify before trusting the binary. --fail stops a
-          # saved HTTP error page; --retry rides out transient network blips.
-          DWARFS_VERSION="0.14.1"
-          DWARFS_ARCH=$(uname -m)
-          case "$DWARFS_ARCH" in
-            x86_64)  DWARFS_SHA256="f3a117fd6d5b7304944b199af7fdb8086a48c509ea2e9832255d8f9a54c98587" ;;
-            aarch64) DWARFS_SHA256="3a47eda6d496ba12fb6d9af1b1914d4ba7ab73df8df3172ee3cad66c29822cc1" ;;
-            *) echo "::error::no pinned mkdwarfs SHA256 for arch '$DWARFS_ARCH'"; exit 1 ;;
-          esac
-          DWARFS_ASSET="dwarfs-universal-${DWARFS_VERSION}-Linux-${DWARFS_ARCH}"
-          DWARFS_URL="https://github.com/mhx/dwarfs/releases/download/v${DWARFS_VERSION}/${DWARFS_ASSET}"
-          curl -fL --retry 3 --retry-delay 2 -o mkdwarfs "$DWARFS_URL"
-          echo "${DWARFS_SHA256}  mkdwarfs" | sha256sum -c -
-
-          # Cross-check against the sha256 digest GitHub records for the release
-          # asset. This is defense in depth on top of the
-          # inline pin: it catches a stale pin after a version bump, while the
-          # pin still guards against a compromised asset (the API would report
-          # the bad asset's digest, so it can't replace the pin). Older releases
-          # may predate GitHub's asset-digest feature, so a missing digest only
-          # warns rather than failing the build. The pin already verified the
-          # binary above, so a transient API failure must not red an
-          # already-correct build: --retry rides out blips and the trailing
-          # `|| true` degrades a hard failure to the no-digest warning branch.
-          API_DIGEST=$(curl -fsSL --retry 3 --retry-delay 2 \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/mhx/dwarfs/releases/tags/v${DWARFS_VERSION}" \
-            | jq -r --arg name "$DWARFS_ASSET" \
-                '.assets[] | select(.name == $name) | .digest // empty' || true)
-          if [ -n "$API_DIGEST" ]; then
-            echo "${API_DIGEST#sha256:}  mkdwarfs" | sha256sum -c -
-            echo "Verified mkdwarfs against GitHub API digest: $API_DIGEST"
-          else
-            echo "::warning::GitHub API reported no digest for ${DWARFS_ASSET}; relying on pinned SHA256"
-          fi
-          chmod +x mkdwarfs
-
-          # Repack: create DwarFS image from the AppDir and combine with runtime
-          ./mkdwarfs -i "$APPDIR" -o new.dwarfs --no-history -l7
-          cat runtime.bin new.dwarfs > "$APPIMAGE"
-          chmod +x "$APPIMAGE"
-
-          # Show the result
-          echo "AppImage size: $(du -sh "$APPIMAGE" | cut -f1)"
-
-          # Clean up
-          rm -f runtime.bin new.dwarfs mkdwarfs
-
-      # The .AppImage.sig produced by `cargo tauri build` was signed before the
-      # Python bundle was injected and the file repacked, so it's stale. Re-sign
-      # the final AppImage so the Tauri updater can verify it.
-      - name: Re-sign AppImage for updater
-        if: contains(matrix.bundles, 'appimage') && github.event_name == 'workflow_run'
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          APPIMAGE="${{ steps.appimage.outputs.path }}"
-          cargo tauri signer sign \
-            --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
-            --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
-            "$APPIMAGE"
-          echo "Signed: $APPIMAGE"
-          ls -la "${APPIMAGE}.sig"
-
-      # The macOS updater format is .app.tar.gz, which Tauri names after the
-      # product (no version or arch). Rename per-arch so the two macOS jobs'
-      # uploads don't collide on the release.
-      - name: Stage macOS updater artifact
-        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bundle_dir="src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos"
-          arch="${{ matrix.target == 'macos-arm64' && 'aarch64' || 'x64' }}"
-          shopt -s nullglob
-          for f in "$bundle_dir"/*.app.tar.gz; do
-            base="$(basename "$f" .app.tar.gz)"
-            new="$bundle_dir/${base}_${arch}.app.tar.gz"
-            mv "$f" "$new"
-            if [[ -f "${f}.sig" ]]; then
-              mv "${f}.sig" "${new}.sig"
-            fi
-            echo "Staged: $new"
-          done
+          APPIMAGE: ${{ steps.appimage.outputs.path }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./build-scripts/inject_python_appimage.sh "$APPIMAGE"
 
       # Upload artifacts
-      - name: Upload NSIS
-        if: contains(matrix.bundles, 'nsis')
+      # CI builds only. The release installer comes from
+      # bundle-sign-upload.yml.
+      - name: Upload NSIS (CI)
+        if: contains(matrix.bundles, 'nsis') && github.event_name != 'workflow_run'
         uses: actions/upload-artifact@v7.0.2
         with:
           path: src-tauri/target/release/bundle/nsis/*.exe
@@ -642,25 +455,11 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/e2e_windows_overlay_wipe.ps1
 
-      - name: Upload NSIS updater signature
-        if: contains(matrix.bundles, 'nsis') && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/release/bundle/nsis/*.exe.sig
-          archive: false
-
       - name: Upload AppImage
         if: contains(matrix.bundles, 'appimage')
         uses: actions/upload-artifact@v7.0.2
         with:
           path: src-tauri/target/release/bundle/appimage/*.AppImage
-          archive: false
-
-      - name: Upload AppImage updater signature
-        if: contains(matrix.bundles, 'appimage') && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/release/bundle/appimage/*.AppImage.sig
           archive: false
 
       - name: Upload deb
@@ -670,13 +469,6 @@ jobs:
           path: src-tauri/target/release/bundle/deb/*.deb
           archive: false
 
-      - name: Upload deb updater signature
-        if: contains(matrix.bundles, 'deb') && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/release/bundle/deb/*.deb.sig
-          archive: false
-
       - name: Upload RPM
         if: contains(matrix.bundles, 'rpm')
         uses: actions/upload-artifact@v7.0.2
@@ -684,39 +476,20 @@ jobs:
           path: src-tauri/target/release/bundle/rpm/*.rpm
           archive: false
 
-      - name: Upload RPM updater signature
-        if: contains(matrix.bundles, 'rpm') && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/release/bundle/rpm/*.rpm.sig
-          archive: false
-
-      - name: Upload DMG
-        if: contains(matrix.bundles, 'dmg')
+      # CI builds only. The release DMG comes from bundle-sign-upload.yml.
+      - name: Upload DMG (CI)
+        if: contains(matrix.bundles, 'dmg') && github.event_name != 'workflow_run'
         uses: actions/upload-artifact@v7.0.2
         with:
           path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/dmg/*.dmg
-          archive: false
-
-      - name: Upload macOS updater bundle
-        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz
-          archive: false
-
-      - name: Upload macOS updater signature
-        if: matrix.platform == 'macos' && github.event_name == 'workflow_run'
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          path: src-tauri/target/${{ matrix.rust_target && format('{0}/', matrix.rust_target) || '' }}release/bundle/macos/*.app.tar.gz.sig
           archive: false
 
   # Persist PR metadata so the companion "PR Comment" workflow (which runs
   # in the base-repo context via workflow_run, granting write access to fork
   # PRs too) knows which PR to comment on. JSON so we can add more fields
   # later without changing the file format.
-  pr-info:
+  upload-pr-info:
+    name: Upload PR info
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     permissions: {}
@@ -728,7 +501,8 @@ jobs:
             "pr_number": ${{ github.event.pull_request.number }}
           }
           EOF
-      - uses: actions/upload-artifact@v7.0.2
+      - name: Upload PR info artifact
+        uses: actions/upload-artifact@v7.0.2
         with:
           path: pr-info.json
           archive: false
@@ -745,8 +519,9 @@ jobs:
     if: always() && github.event_name == 'pull_request'
     needs:
       - determine-jobs
+      - resolve-tauri-cli
       - build
-      - pr-info
+      - upload-pr-info
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -757,120 +532,34 @@ jobs:
           echo "$NEEDS_JSON" | jq
           echo "$NEEDS_JSON" | jq -e 'all(.result == "success" or .result == "skipped")'
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    # `always()` + an explicit result check, NOT the bare event guard: without
-    # a status function GitHub prepends `success()`, which is false whenever
-    # any job in the transitive needs chain was skipped — and `determine-jobs`
-    # (pull_request only) is always skipped on workflow_run events. That
-    # combination silently skipped this job on every release build after
-    # #357, stranding the draft release with stale assets.
-    if: always() && github.event_name == 'workflow_run' && needs.build.result == 'success'
+  # Bundle, sign and upload release assets; see bundle-sign-upload.yml.
+  # `always()` + an explicit result check, NOT the bare event guard: without a
+  # status function GitHub prepends `success()`, which is false whenever any
+  # job in the transitive needs chain was skipped, and `determine-jobs`
+  # (pull_request only) is always skipped on workflow_run events. That
+  # combination silently skipped the release on every build after #357,
+  # stranding the draft release with stale assets.
+  #
+  # Only sign what main produced: Release Drafter can also be dispatched by
+  # hand from another branch, and this run's own ref (which the `release`
+  # environment's branch rule checks) is main either way, so the branch and
+  # repository the triggering run built are checked here.
+  bundle-sign-upload:
+    name: Bundle, sign and upload
+    needs: [resolve-tauri-cli, build]
+    if: >-
+      always() &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
+      needs.build.result == 'success'
+    # The union of what bundle-sign-upload.yml's jobs request; a called
+    # workflow can only narrow the caller's grant.
     permissions:
       contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-        with:
-          # Need the latest.json generator script + the JSON Schema it produces,
-          # and .python-version for setup-python; nothing else from the source
-          # tree is required by the release job.
-          sparse-checkout: |
-            .python-version
-            .github/latest.schema.json
-            .github/scripts
-          sparse-checkout-cone-mode: false
-
-      - name: Find draft release
-        id: find-release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Find the most recent draft release
-          release_json=$(gh api repos/${{ github.repository }}/releases \
-            --jq '[.[] | select(.draft == true)] | first')
-          if [[ -z "$release_json" || "$release_json" == "null" ]]; then
-            echo "::error::No draft release found"
-            exit 1
-          fi
-          release_id=$(echo "$release_json" | jq -r '.id')
-          tag_name=$(echo "$release_json" | jq -r '.tag_name')
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
-          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
-          echo "Found draft release: $tag_name (ID: $release_id)"
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v8.0.2
-        with:
-          path: artifacts
-
-      # Stale assets are deleted by the Release Drafter workflow when it resets
-      # the draft body, before this build starts; --clobber covers a re-run.
-      - name: Upload assets to draft release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.find-release.outputs.tag_name }}"
-          find artifacts -type f -print0 | while IFS= read -r -d '' file; do
-            echo "Uploading: $file"
-            gh release upload "$tag" "$file" --repo "${{ github.repository }}" --clobber
-          done
-
-      # Build latest.json from the per-platform .sig files now attached to
-      # the draft release. See .github/scripts/generate_latest_json.py for
-      # the full manifest shape and the rationale around the `downloads`
-      # section (formats the Tauri updater doesn't ship — .dmg) and the
-      # desktop.esphome.io schema reference.
-      - name: Set up Python
-        uses: actions/setup-python@v7.0.0
-        with:
-          python-version-file: .python-version
-
-      - name: Generate latest.json for updater
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.find-release.outputs.tag_name }}
-          REPO: ${{ github.repository }}
-        run: python3 .github/scripts/generate_latest_json.py
-
-      - name: Validate latest.json against schema
-        run: |
-          set -euo pipefail
-          pip install --quiet check-jsonschema
-          check-jsonschema --schemafile .github/latest.schema.json latest.json
-
-      - name: Upload latest.json to draft release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${{ steps.find-release.outputs.tag_name }}"
-          gh release upload "$tag" latest.json --repo "${{ github.repository }}" --clobber
-
-      - name: Remove assets-pending warning from release body
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          release_id="${{ steps.find-release.outputs.release_id }}"
-          # Fetch current release body
-          body=$(gh api "repos/${{ github.repository }}/releases/${release_id}" --jq '.body')
-          # Remove the warning block (everything from the caution block through the ASSETS_PENDING marker), if present
-          new_body=$(echo "$body" | sed '/^> \[!CAUTION\]/,/<!-- ASSETS_PENDING -->/d')
-          # Ensure any remaining ASSETS_PENDING markers are removed even if the caution block was edited/removed
-          new_body=$(echo "$new_body" | sed 's/<!-- ASSETS_PENDING -->//g')
-          # Remove any leading blank lines left behind
-          new_body=$(echo "$new_body" | sed '/./,$!d')
-          # Only update the release body if it has actually changed, keeping it as a draft
-          if [ "$new_body" != "$body" ]; then
-            gh api "repos/${{ github.repository }}/releases/${release_id}" \
-              --method PATCH \
-              --field "tag_name=${{ steps.find-release.outputs.tag_name }}" \
-              --field "body=${new_body}" \
-              --field "draft=true" \
-              --silent
-          fi
+      actions: write
+      id-token: write
+    uses: $/.github/workflows/bundle-sign-upload.yml
+    with:
+      tauri-cli-version: ${{ needs.resolve-tauri-cli.outputs.version }}
