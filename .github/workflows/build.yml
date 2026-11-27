@@ -2,7 +2,7 @@ name: Build
 
 concurrency:
   # For workflow_run events (release builds), use a fixed group so new runs cancel
-  # in-flight ones. For PR/dispatch events, use the ref for per-branch concurrency.
+  # in-flight ones. For PR events, use the ref for per-branch concurrency.
   group: ${{ github.workflow }}-${{ github.event_name == 'workflow_run' && 'release' || github.ref }}
   cancel-in-progress: true
 
@@ -12,7 +12,6 @@ on:
   workflow_run:
     workflows: ["Release Drafter"]
     types: [completed]
-  workflow_dispatch:
 
 permissions: {}
 
@@ -31,8 +30,8 @@ jobs:
   # that only touches documentation or repo meta files skips it (the logic and
   # its fail-safe bias live in .github/scripts/determine_jobs.py). The CI Status
   # job below turns a skipped build into a passing required check, so a docs-only
-  # PR merges without paying for the ~60 minute matrix. Non-PR events (the
-  # release workflow_run, a manual dispatch) skip this job and build regardless.
+  # PR merges without paying for the ~60 minute matrix. The release
+  # workflow_run skips this job and builds regardless.
   determine-jobs:
     name: Determine jobs
     if: github.event_name == 'pull_request'
@@ -101,9 +100,14 @@ jobs:
   # full bundler. PR builds skip this and build English-only.
   download-translations:
     name: Download translations from Lokalise
+    # Release builds come only from Release Drafter runs on main; the build
+    # job needs this one to succeed, so a run from anywhere else builds
+    # nothing.
     if: >-
       github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-22.04
     # The Lokalise credentials live in the `lokalise` environment.
     environment: lokalise
@@ -152,13 +156,12 @@ jobs:
     # Only run release builds when the Release Drafter workflow succeeded AND
     # the download-translations job delivered its artifact: a failed Lokalise download
     # must block the release rather than silently shipping English-only
-    # binaries. PR/dispatch builds run regardless (translations is skipped
-    # there, hence the `always()`).
+    # binaries. PR builds run regardless (translations is skipped there,
+    # hence the `always()`).
     needs: [resolve-tauri-cli, download-translations, determine-jobs]
     if: >-
       always() && needs.resolve-tauri-cli.result == 'success' && (
         (github.event_name == 'pull_request' && needs.download-translations.result == 'skipped' && needs.determine-jobs.outputs.build == 'true') ||
-        (github.event_name == 'workflow_dispatch' && needs.download-translations.result == 'skipped') ||
         (github.event.workflow_run.conclusion == 'success' && needs.download-translations.result == 'success')
       )
     permissions:

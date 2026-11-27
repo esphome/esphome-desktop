@@ -10,6 +10,9 @@ permissions: {}
 
 jobs:
   release-drafter:
+    # A manual dispatch can pick any branch, and a successful run here starts
+    # the signed release build, so only main may draft.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: release-drafter
     steps:
